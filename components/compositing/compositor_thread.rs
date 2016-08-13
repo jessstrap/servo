@@ -151,7 +151,7 @@ pub enum Msg {
     /// Composite.
     Recomposite(CompositingReason),
     /// Sends an unconsumed key event back to the compositor.
-    KeyEvent(Key, KeyState, KeyModifiers),
+    KeyEvent(Option<char>, Key, KeyState, KeyModifiers),
     /// Script has handled a touch event, and either prevented or allowed default actions.
     TouchEventProcessed(EventResult),
     /// Changes the cursor.
@@ -183,6 +183,11 @@ pub enum Msg {
     ResizeTo(Size2D<u32>),
     /// Get scroll offset of a layer
     GetScrollOffset(PipelineId, LayerId, IpcSender<Point2D<f32>>),
+    /// Pipeline visibility changed
+    PipelineVisibilityChanged(PipelineId, bool),
+    /// WebRender has successfully processed a scroll. The boolean specifies whether a composite is
+    /// needed.
+    NewScrollFrameReady(bool),
     /// A pipeline was shut down.
     // This message acts as a synchronization point between the constellation,
     // when it shuts down a pipeline, to the compositor; when the compositor
@@ -223,8 +228,10 @@ impl Debug for Msg {
             Msg::GetClientWindow(..) => write!(f, "GetClientWindow"),
             Msg::MoveTo(..) => write!(f, "MoveTo"),
             Msg::ResizeTo(..) => write!(f, "ResizeTo"),
+            Msg::PipelineVisibilityChanged(..) => write!(f, "PipelineVisibilityChanged"),
             Msg::PipelineExited(..) => write!(f, "PipelineExited"),
             Msg::GetScrollOffset(..) => write!(f, "GetScrollOffset"),
+            Msg::NewScrollFrameReady(..) => write!(f, "NewScrollFrameReady"),
         }
     }
 }

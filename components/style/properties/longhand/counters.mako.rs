@@ -6,10 +6,11 @@
 
 <% data.new_style_struct("Counters", inherited=False, gecko_name="Content") %>
 
-<%helpers:longhand name="content">
+<%helpers:longhand name="content" animatable="False">
     use cssparser::Token;
     use std::ascii::AsciiExt;
     use values::computed::ComputedValueAsSpecified;
+    use values::NoViewportPercentage;
 
     use super::list_style_type;
 
@@ -17,6 +18,7 @@
     pub use self::computed_value::ContentItem;
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
 
     pub mod computed_value {
         use super::super::list_style_type;
@@ -24,7 +26,8 @@
         use cssparser::{self, ToCss};
         use std::fmt;
 
-        #[derive(Debug, PartialEq, Eq, Clone, HeapSizeOf)]
+        #[derive(Debug, PartialEq, Eq, Clone)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub enum ContentItem {
             /// Literal string content.
             String(String),
@@ -73,7 +76,8 @@
         }
 
         #[allow(non_camel_case_types)]
-        #[derive(Debug, PartialEq, Eq, Clone, HeapSizeOf)]
+        #[derive(Debug, PartialEq, Eq, Clone)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub enum T {
             normal,
             none,
@@ -169,9 +173,10 @@
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="counter-increment">
+<%helpers:longhand name="counter-increment" animatable="False">
     use std::fmt;
     use super::content;
+    use values::NoViewportPercentage;
     use values::computed::ComputedValueAsSpecified;
 
     use cssparser::{ToCss, Token, serialize_identifier};
@@ -180,7 +185,8 @@
     pub use self::computed_value::T as SpecifiedValue;
 
     pub mod computed_value {
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Vec<(String,i32)>);
     }
 
@@ -190,6 +196,7 @@
     }
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
 
     impl ToCss for SpecifiedValue {
         fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
@@ -238,7 +245,7 @@
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="counter-reset">
+<%helpers:longhand name="counter-reset" animatable="False">
     pub use super::counter_increment::{SpecifiedValue, computed_value, get_initial_value};
     use super::counter_increment::{parse_common};
 

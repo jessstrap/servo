@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#window
-[PrimaryGlobal]
+[PrimaryGlobal, Exposed=(Window,Worker)]
 /*sealed*/ interface Window : EventTarget {
   // the current browsing context
   [Unforgeable] readonly attribute WindowProxy window;
@@ -11,7 +11,7 @@
   [Unforgeable] readonly attribute Document document;
   //         attribute DOMString name;
   [/*PutForwards=href, */Unforgeable] readonly attribute Location location;
-  //readonly attribute History history;
+  readonly attribute History history;
   //[Replaceable] readonly attribute BarProp locationbar;
   //[Replaceable] readonly attribute BarProp menubar;
   //[Replaceable] readonly attribute BarProp personalbar;
@@ -54,17 +54,19 @@
   void cancelAnimationFrame(unsigned long handle);
 
   //void postMessage(any message, DOMString targetOrigin, optional sequence<Transferable> transfer);
+  [Throws]
+  void postMessage(any message, DOMString targetOrigin);
 
   // also has obsolete members
 };
 Window implements GlobalEventHandlers;
 Window implements WindowEventHandlers;
 
-[NoInterfaceObject]
+[NoInterfaceObject, Exposed=(Window,Worker)]
 interface WindowProxy {};
 
 // https://html.spec.whatwg.org/multipage/#timers
-[NoInterfaceObject/*, Exposed=Window,Worker*/]
+[NoInterfaceObject, Exposed=(Window,Worker)]
 interface WindowTimers {
   long setTimeout(Function handler, optional long timeout = 0, any... arguments);
   long setTimeout(DOMString handler, optional long timeout = 0, any... arguments);
@@ -76,7 +78,7 @@ interface WindowTimers {
 Window implements WindowTimers;
 
 // https://html.spec.whatwg.org/multipage/#atob
-[NoInterfaceObject/*, Exposed=Window,Worker*/]
+[NoInterfaceObject, Exposed=(Window,Worker)]
 interface WindowBase64 {
   [Throws]
   DOMString btoa(DOMString btoa);
@@ -175,14 +177,14 @@ partial interface Window {
 };
 
 // https://html.spec.whatwg.org/multipage/#dom-sessionstorage
-[NoInterfaceObject]
+[NoInterfaceObject, Exposed=(Window,Worker)]
 interface WindowSessionStorage {
   readonly attribute Storage sessionStorage;
 };
 Window implements WindowSessionStorage;
 
 // https://html.spec.whatwg.org/multipage/#dom-localstorage
-[NoInterfaceObject]
+[NoInterfaceObject, Exposed=(Window,Worker)]
 interface WindowLocalStorage {
   readonly attribute Storage localStorage;
 };

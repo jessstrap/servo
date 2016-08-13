@@ -1,0 +1,34 @@
+[package]
+name = "script_layout_interface"
+version = "0.0.1"
+authors = ["The Servo Project Developers"]
+license = "MPL-2.0"
+publish = false
+
+[lib]
+name = "script_layout_interface"
+path = "lib.rs"
+
+[dependencies]
+app_units = "0.3"
+bitflags = "0.7"
+canvas_traits = {path = "../canvas_traits"}
+cssparser = {version = "0.5.7", features = ["heap_size", "serde-serialization"]}
+euclid = "0.9"
+gfx_traits = {path = "../gfx_traits"}
+heapsize = "0.3.0"
+heapsize_plugin = "0.1.2"
+ipc-channel = "0.5"
+libc = "0.2"
+log = "0.3.5"
+msg = {path = "../msg"}
+net_traits = {path = "../net_traits"}
+plugins = {path = "../plugins"}
+profile_traits = {path = "../profile_traits"}
+range = {path = "../range"}
+script_traits = {path = "../script_traits"}
+selectors = {version = "0.8", features = ["heap_size"]}
+string_cache = {version = "0.2.23", features = ["heap_size"]}
+style = {path = "../style"}
+url = {version = "1.2", features = ["heap_size"]}
+util = {path = "../util"}

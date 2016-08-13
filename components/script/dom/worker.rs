@@ -2,9 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-
+use devtools_traits::{ScriptToDevtoolsControlMsg, DevtoolsPageInfo};
+use dom::abstractworker::WorkerScriptMsg;
 use dom::abstractworker::{SimpleWorkerErrorHandler, SharedRt, WorkerErrorHandler};
-use dom::abstractworker::{WorkerScriptLoadOrigin, WorkerScriptMsg};
 use dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
 use dom::bindings::codegen::Bindings::WorkerBinding;
 use dom::bindings::codegen::Bindings::WorkerBinding::WorkerMethods;
@@ -23,9 +23,11 @@ use dom::eventtarget::EventTarget;
 use dom::messageevent::MessageEvent;
 use dom::workerglobalscope::prepare_workerscope_init;
 use ipc_channel::ipc;
-use js::jsapi::{HandleValue, JSContext, RootedValue, JSAutoCompartment};
+use js::jsapi::{HandleValue, JSContext, JSAutoCompartment};
 use js::jsval::UndefinedValue;
 use script_thread::Runnable;
+use script_traits::WorkerScriptLoadOrigin;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -42,7 +44,8 @@ pub struct Worker {
     sender: Sender<(TrustedWorkerAddress, WorkerScriptMsg)>,
     closing: Arc<AtomicBool>,
     #[ignore_heap_size_of = "Defined in rust-mozjs"]
-    runtime: Arc<Mutex<Option<SharedRt>>>
+    runtime: Arc<Mutex<Option<SharedRt>>>,
+    terminated: Cell<bool>,
 }
 
 impl Worker {
@@ -52,7 +55,8 @@ impl Worker {
             eventtarget: EventTarget::new_inherited(),
             sender: sender,
             closing: closing,
-            runtime: Arc::new(Mutex::new(None))
+            runtime: Arc::new(Mutex::new(None)),
+            terminated: Cell::new(false),
         }
     }
 
@@ -81,21 +85,28 @@ impl Worker {
         let worker_load_origin = WorkerScriptLoadOrigin {
             referrer_url: None,
             referrer_policy: None,
-            request_source: global.request_source(),
             pipeline_id: Some(global.pipeline())
         };
 
         let (devtools_sender, devtools_receiver) = ipc::channel().unwrap();
+        let worker_id = global.get_next_worker_id();
+        if let Some(ref chan) = global.devtools_chan() {
+            let pipeline_id = global.pipeline();
+                let title = format!("Worker for {}", worker_url);
+                let page_info = DevtoolsPageInfo {
+                    title: title,
+                    url: worker_url.clone(),
+                };
+                let _ = chan.send(ScriptToDevtoolsControlMsg::NewGlobal((pipeline_id, Some(worker_id)),
+                                                                devtools_sender.clone(),
+                                                                page_info));
+        }
 
-        let init = prepare_workerscope_init(global,
-            "Worker".to_owned(),
-            worker_url.clone(),
-            devtools_sender.clone(),
-            closing);
+        let init = prepare_workerscope_init(global, Some(devtools_sender));
 
         DedicatedWorkerGlobalScope::run_worker_scope(
             init, worker_url, global.pipeline(), devtools_receiver, worker.runtime.clone(), worker_ref,
-            global.script_chan(), sender, receiver, worker_load_origin);
+            global.script_chan(), sender, receiver, worker_load_origin, closing);
 
         Ok(worker)
     }
@@ -104,18 +115,22 @@ impl Worker {
         self.closing.load(Ordering::SeqCst)
     }
 
+    pub fn is_terminated(&self) -> bool {
+        self.terminated.get()
+    }
+
     pub fn handle_message(address: TrustedWorkerAddress,
                           data: StructuredCloneData) {
         let worker = address.root();
 
-        if worker.is_closing() {
+        if worker.is_terminated() {
             return;
         }
 
         let global = worker.r().global();
         let target = worker.upcast();
         let _ac = JSAutoCompartment::new(global.r().get_cx(), target.reflector().get_jsobject().get());
-        let mut message = RootedValue::new(global.r().get_cx(), UndefinedValue());
+        rooted!(in(global.r().get_cx()) let mut message = UndefinedValue());
         data.read(global.r(), message.handle_mut());
         MessageEvent::dispatch_jsval(target, global.r(), message.handle());
     }
@@ -129,12 +144,12 @@ impl Worker {
                                 filename: DOMString, lineno: u32, colno: u32) {
         let worker = address.root();
 
-        if worker.is_closing() {
+        if worker.is_terminated() {
             return;
         }
 
         let global = worker.r().global();
-        let error = RootedValue::new(global.r().get_cx(), UndefinedValue());
+        rooted!(in(global.r().get_cx()) let error = UndefinedValue());
         let errorevent = ErrorEvent::new(global.r(), atom!("error"),
                                          EventBubbles::Bubbles, EventCancelable::Cancelable,
                                          message, filename, lineno, colno, error.handle());
@@ -147,7 +162,10 @@ impl WorkerMethods for Worker {
     fn PostMessage(&self, cx: *mut JSContext, message: HandleValue) -> ErrorResult {
         let data = try!(StructuredCloneData::write(cx, message));
         let address = Trusted::new(self);
-        self.sender.send((address, WorkerScriptMsg::DOMMessage(data))).unwrap();
+
+        // NOTE: step 9 of https://html.spec.whatwg.org/multipage/#dom-messageport-postmessage
+        // indicates that a nonexistent communication channel should result in a silent error.
+        let _ = self.sender.send((address, WorkerScriptMsg::DOMMessage(data)));
         Ok(())
     }
 
@@ -158,7 +176,10 @@ impl WorkerMethods for Worker {
             return;
         }
 
-        // Step 4
+        // Step 2
+        self.terminated.set(true);
+
+        // Step 3
         if let Some(runtime) = *self.runtime.lock().unwrap() {
             runtime.request_interrupt();
         }

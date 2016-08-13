@@ -24,15 +24,17 @@ use hyper::method::Method;
 use hyper::mime::{Mime, SubLevel, TopLevel};
 use hyper::net::Fresh;
 use hyper::status::{StatusClass, StatusCode};
-use ipc_channel::ipc;
+use hyper_serde::Serde;
+use ipc_channel::ipc::{self, IpcSender};
 use log;
-use mime_classifier::MIMEClassifier;
+use mime_classifier::MimeClassifier;
 use msg::constellation_msg::{PipelineId, ReferrerPolicy};
 use net_traits::ProgressMsg::{Done, Payload};
 use net_traits::hosts::replace_hosts;
 use net_traits::response::HttpsState;
 use net_traits::{CookieSource, IncludeSubdomains, LoadConsumer, LoadContext, LoadData};
-use net_traits::{Metadata, NetworkError, RequestSource, CustomResponse};
+use net_traits::{Metadata, NetworkError, CustomResponse, CustomResponseMediator};
+use openssl;
 use openssl::ssl::error::{SslError, OpensslError};
 use profile_traits::time::{ProfilerCategory, profile, ProfilerChan, TimerMetadata};
 use profile_traits::time::{TimerMetadataReflowType, TimerMetadataFrameType};
@@ -47,10 +49,10 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use time;
 use time::Tm;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tinyfiledialogs;
 use url::{Url, Position};
-use util::prefs;
+use util::prefs::PREFS;
 use util::thread::spawn_named;
 use uuid;
 
@@ -58,10 +60,11 @@ pub fn factory(user_agent: String,
                http_state: HttpState,
                devtools_chan: Option<Sender<DevtoolsControlMsg>>,
                profiler_chan: ProfilerChan,
+               swmanager_chan: Option<IpcSender<CustomResponseMediator>>,
                connector: Arc<Pool<Connector>>)
                -> Box<FnBox(LoadData,
                             LoadConsumer,
-                            Arc<MIMEClassifier>,
+                            Arc<MimeClassifier>,
                             CancellationListener) + Send> {
     box move |load_data: LoadData, senders, classifier, cancel_listener| {
         spawn_named(format!("http_loader for {}", load_data.url), move || {
@@ -77,6 +80,7 @@ pub fn factory(user_agent: String,
                                   connector,
                                   http_state,
                                   devtools_chan,
+                                  swmanager_chan,
                                   cancel_listener,
                                   user_agent)
             })
@@ -126,10 +130,11 @@ fn precise_time_ms() -> u64 {
 
 fn load_for_consumer(load_data: LoadData,
                      start_chan: LoadConsumer,
-                     classifier: Arc<MIMEClassifier>,
+                     classifier: Arc<MimeClassifier>,
                      connector: Arc<Pool<Connector>>,
                      http_state: HttpState,
                      devtools_chan: Option<Sender<DevtoolsControlMsg>>,
+                     swmanager_chan: Option<IpcSender<CustomResponseMediator>>,
                      cancel_listener: CancellationListener,
                      user_agent: String) {
     let factory = NetworkHttpRequestFactory {
@@ -139,12 +144,12 @@ fn load_for_consumer(load_data: LoadData,
     let ui_provider = TFDProvider;
     match load(&load_data, &ui_provider, &http_state,
                devtools_chan, &factory,
-               user_agent, &cancel_listener) {
+               user_agent, &cancel_listener, swmanager_chan) {
         Err(error) => {
             match error.error {
                 LoadErrorType::ConnectionAborted { .. } => unreachable!(),
-                LoadErrorType::Ssl { .. } => send_error(error.url.clone(),
-                                                        NetworkError::SslValidation(error.url),
+                LoadErrorType::Ssl { reason } => send_error(error.url.clone(),
+                                                        NetworkError::SslValidation(error.url, reason),
                                                         start_chan),
                 LoadErrorType::Cancelled => send_error(error.url, NetworkError::LoadCancelled, start_chan),
                 _ => send_error(error.url, NetworkError::Internal(error.error.description().to_owned()), start_chan)
@@ -259,8 +264,21 @@ impl HttpRequestFactory for NetworkHttpRequestFactory {
             let error: &(Error + Send + 'static) = &**error;
             if let Some(&SslError::OpenSslErrors(ref errors)) = error.downcast_ref::<SslError>() {
                 if errors.iter().any(is_cert_verify_error) {
-                    let msg = format!("ssl error: {:?} {:?}", error.description(), error.cause());
-                    return Err(LoadError::new(url, LoadErrorType::Ssl { reason: msg }));
+                    let mut error_report = vec![format!("ssl error ({}):", openssl::version::version())];
+                    let mut suggestion = None;
+                    for err in errors {
+                        if is_unknown_message_digest_err(err) {
+                            suggestion = Some("<b>Servo recommends upgrading to a newer OpenSSL version.</b>");
+                        }
+                        error_report.push(format_ssl_error(err));
+                    }
+
+                    if let Some(suggestion) = suggestion {
+                        error_report.push(suggestion.to_owned());
+                    }
+
+                    let error_report = error_report.join("<br>\n");
+                    return Err(LoadError::new(url, LoadErrorType::Ssl { reason: error_report }));
                 }
             }
         }
@@ -370,7 +388,7 @@ impl Error for LoadErrorType {
     }
 }
 
-fn set_default_accept_encoding(headers: &mut Headers) {
+pub fn set_default_accept_encoding(headers: &mut Headers) {
     if headers.has::<AcceptEncoding>() {
         return
     }
@@ -411,7 +429,7 @@ fn set_default_accept_language(headers: &mut Headers) {
 }
 
 /// https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-state-no-referrer-when-downgrade
-fn no_ref_when_downgrade_header(referrer_url: Url, url: Url) -> Option<Url> {
+fn no_referrer_when_downgrade_header(referrer_url: Url, url: Url) -> Option<Url> {
     if referrer_url.scheme() == "https" && url.scheme() != "https" {
         return None;
     }
@@ -434,28 +452,30 @@ fn strip_url(mut referrer_url: Url, origin_only: bool) -> Option<Url> {
 }
 
 /// https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer
-fn determine_request_referrer(headers: &mut Headers,
-                              referrer_policy: Option<ReferrerPolicy>,
-                              referrer_url: Option<Url>,
-                              url: Url) -> Option<Url> {
+pub fn determine_request_referrer(headers: &mut Headers,
+                                  referrer_policy: Option<ReferrerPolicy>,
+                                  referrer_url: Option<Url>,
+                                  url: Url) -> Option<Url> {
     //TODO - algorithm step 2 not addressed
     assert!(!headers.has::<Referer>());
     if let Some(ref_url) = referrer_url {
         let cross_origin = ref_url.origin() != url.origin();
         return match referrer_policy {
             Some(ReferrerPolicy::NoReferrer) => None,
-            Some(ReferrerPolicy::OriginOnly) => strip_url(ref_url, true),
+            Some(ReferrerPolicy::Origin) => strip_url(ref_url, true),
+            Some(ReferrerPolicy::SameOrigin) => if cross_origin { None } else { strip_url(ref_url, false) },
             Some(ReferrerPolicy::UnsafeUrl) => strip_url(ref_url, false),
             Some(ReferrerPolicy::OriginWhenCrossOrigin) => strip_url(ref_url, cross_origin),
-            Some(ReferrerPolicy::NoRefWhenDowngrade) | None => no_ref_when_downgrade_header(ref_url, url),
+            Some(ReferrerPolicy::NoReferrerWhenDowngrade) | None =>
+                no_referrer_when_downgrade_header(ref_url, url),
         };
     }
     return None;
 }
 
-pub fn set_request_cookies(url: Url, headers: &mut Headers, cookie_jar: &Arc<RwLock<CookieStorage>>) {
+pub fn set_request_cookies(url: &Url, headers: &mut Headers, cookie_jar: &Arc<RwLock<CookieStorage>>) {
     let mut cookie_jar = cookie_jar.write().unwrap();
-    if let Some(cookie_list) = cookie_jar.cookies_for_url(&url, CookieSource::HTTP) {
+    if let Some(cookie_list) = cookie_jar.cookies_for_url(url, CookieSource::HTTP) {
         let mut v = Vec::new();
         v.push(cookie_list.into_bytes());
         headers.set_raw("Cookie".to_owned(), v);
@@ -540,7 +560,7 @@ impl StreamedResponse {
         StreamedResponse { metadata: m, decoder: d }
     }
 
-    fn from_http_response(response: Box<HttpResponse>, m: Metadata) -> Result<StreamedResponse, LoadError> {
+    pub fn from_http_response(response: Box<HttpResponse>, m: Metadata) -> Result<StreamedResponse, LoadError> {
         let decoder = match response.content_encoding() {
             Some(Encoding::Gzip) => {
                 let result = GzDecoder::new(response);
@@ -556,7 +576,7 @@ impl StreamedResponse {
                 Decoder::Deflate(DeflateDecoder::new(response))
             }
             Some(Encoding::EncodingExt(ref ext)) if ext == "br" => {
-                Decoder::Brotli(Decompressor::new(response))
+                Decoder::Brotli(Decompressor::new(response, 1024))
             }
             _ => {
                 Decoder::Plain(response)
@@ -581,7 +601,8 @@ fn prepare_devtools_request(request_id: String,
                             pipeline_id: PipelineId,
                             now: Tm,
                             connect_time: u64,
-                            send_time: u64) -> ChromeToDevtoolsControlMsg {
+                            send_time: u64,
+                            is_xhr: bool) -> ChromeToDevtoolsControlMsg {
     let request = DevtoolsHttpRequest {
         url: url,
         method: method,
@@ -592,29 +613,28 @@ fn prepare_devtools_request(request_id: String,
         timeStamp: now.to_timespec().sec,
         connect_time: connect_time,
         send_time: send_time,
+        is_xhr: is_xhr,
     };
     let net_event = NetworkEvent::HttpRequest(request);
 
     ChromeToDevtoolsControlMsg::NetworkEvent(request_id, net_event)
 }
 
-fn send_request_to_devtools(msg: ChromeToDevtoolsControlMsg,
+pub fn send_request_to_devtools(msg: ChromeToDevtoolsControlMsg,
                             devtools_chan: &Sender<DevtoolsControlMsg>) {
     devtools_chan.send(DevtoolsControlMsg::FromChrome(msg)).unwrap();
 }
 
-fn send_response_to_devtools(devtools_chan: Option<Sender<DevtoolsControlMsg>>,
+pub fn send_response_to_devtools(devtools_chan: &Sender<DevtoolsControlMsg>,
                              request_id: String,
                              headers: Option<Headers>,
                              status: Option<RawStatus>,
                              pipeline_id: PipelineId) {
-    if let Some(ref chan) = devtools_chan {
-        let response = DevtoolsHttpResponse { headers: headers, status: status, body: None, pipeline_id: pipeline_id };
-        let net_event_response = NetworkEvent::HttpResponse(response);
+    let response = DevtoolsHttpResponse { headers: headers, status: status, body: None, pipeline_id: pipeline_id };
+    let net_event_response = NetworkEvent::HttpResponse(response);
 
-        let msg = ChromeToDevtoolsControlMsg::NetworkEvent(request_id, net_event_response);
-        chan.send(DevtoolsControlMsg::FromChrome(msg)).unwrap();
-    }
+    let msg = ChromeToDevtoolsControlMsg::NetworkEvent(request_id, net_event_response);
+    let _ = devtools_chan.send(DevtoolsControlMsg::FromChrome(msg));
 }
 
 fn request_must_be_secured(url: &Url, hsts_list: &Arc<RwLock<HstsList>>) -> bool {
@@ -627,10 +647,7 @@ fn request_must_be_secured(url: &Url, hsts_list: &Arc<RwLock<HstsList>>) -> bool
 pub fn modify_request_headers(headers: &mut Headers,
                               url: &Url,
                               user_agent: &str,
-                              cookie_jar: &Arc<RwLock<CookieStorage>>,
-                              auth_cache: &Arc<RwLock<AuthCache>>,
-                              load_data: &LoadData,
-                              block_cookies: bool,
+                              referrer_policy: Option<ReferrerPolicy>,
                               referrer_url: &mut Option<Url>) {
     // Ensure that the host header is set from the original url
     let host = Host {
@@ -654,22 +671,12 @@ pub fn modify_request_headers(headers: &mut Headers,
     set_default_accept_encoding(headers);
 
     *referrer_url = determine_request_referrer(headers,
-                                               load_data.referrer_policy.clone(),
+                                               referrer_policy.clone(),
                                                referrer_url.clone(),
                                                url.clone());
 
     if let Some(referer_val) = referrer_url.clone() {
         headers.set(Referer(referer_val.into_string()));
-    }
-
-    // https://fetch.spec.whatwg.org/#concept-http-network-or-cache-fetch step 11
-    if load_data.credentials_flag {
-        if !block_cookies {
-            set_request_cookies(url.clone(), headers, cookie_jar);
-        }
-
-        // https://fetch.spec.whatwg.org/#http-network-or-cache-fetch step 12
-        set_auth_header(headers, url, auth_cache);
     }
 }
 
@@ -680,18 +687,21 @@ fn set_auth_header(headers: &mut Headers,
         if let Some(auth) = auth_from_url(url) {
             headers.set(auth);
         } else {
-            if let Some(ref auth_entry) = auth_cache.read().unwrap().entries.get(url) {
-                auth_from_entry(&auth_entry, headers);
+            if let Some(basic) = auth_from_cache(auth_cache, url) {
+                headers.set(Authorization(basic));
             }
         }
     }
 }
 
-fn auth_from_entry(auth_entry: &AuthCacheEntry, headers: &mut Headers) {
-    let user_name = auth_entry.user_name.clone();
-    let password  = Some(auth_entry.password.clone());
-
-    headers.set(Authorization(Basic { username: user_name, password: password }));
+pub fn auth_from_cache(auth_cache: &Arc<RwLock<AuthCache>>, url: &Url) -> Option<Basic> {
+    if let Some(ref auth_entry) = auth_cache.read().unwrap().entries.get(url) {
+        let user_name = auth_entry.user_name.clone();
+        let password  = Some(auth_entry.password.clone());
+        Some(Basic { username: user_name, password: password })
+    } else {
+        None
+    }
 }
 
 fn auth_from_url(doc_url: &Url) -> Option<Authorization<Basic>> {
@@ -735,13 +745,15 @@ pub fn obtain_response<A>(request_factory: &HttpRequestFactory<R=A>,
                           pipeline_id: &Option<PipelineId>,
                           iters: u32,
                           devtools_chan: &Option<Sender<DevtoolsControlMsg>>,
-                          request_id: &str)
+                          request_id: &str,
+                          is_xhr: bool)
                           -> Result<(A::R, Option<ChromeToDevtoolsControlMsg>), LoadError>
                           where A: HttpRequest + 'static  {
     let null_data = None;
     let response;
     let connection_url = replace_hosts(&url);
     let mut msg;
+
 
     // loop trying connections in connection pool
     // they may have grown stale (disconnected), in which case we'll get
@@ -802,7 +814,7 @@ pub fn obtain_response<A>(request_factory: &HttpRequestFactory<R=A>,
                     request_id.clone().into(),
                     url.clone(), method.clone(), headers,
                     request_body.clone(), pipeline_id, time::now(),
-                    connect_end - connect_start, send_end - send_start))
+                    connect_end - connect_start, send_end - send_start, is_xhr))
             } else {
                 None
             }
@@ -834,13 +846,13 @@ pub trait UIProvider {
 }
 
 impl UIProvider for TFDProvider {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn input_username_and_password(&self, prompt: &str) -> (Option<String>, Option<String>) {
         (tinyfiledialogs::input_box(prompt, "Username:", ""),
         tinyfiledialogs::input_box(prompt, "Password:", ""))
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     fn input_username_and_password(&self, _prompt: &str) -> (Option<String>, Option<String>) {
         (None, None)
     }
@@ -854,9 +866,10 @@ pub fn load<A, B>(load_data: &LoadData,
                   devtools_chan: Option<Sender<DevtoolsControlMsg>>,
                   request_factory: &HttpRequestFactory<R=A>,
                   user_agent: String,
-                  cancel_listener: &CancellationListener)
+                  cancel_listener: &CancellationListener,
+                  swmanager_chan: Option<IpcSender<CustomResponseMediator>>)
                   -> Result<StreamedResponse, LoadError> where A: HttpRequest + 'static, B: UIProvider {
-    let max_redirects = prefs::get_pref("network.http.redirection-limit").as_i64().unwrap() as u32;
+    let max_redirects = PREFS.get("network.http.redirection-limit").as_i64().unwrap() as u32;
     let mut iters = 0;
     // URL of the document being loaded, as seen by all the higher-level code.
     let mut doc_url = load_data.url.clone();
@@ -872,17 +885,19 @@ pub fn load<A, B>(load_data: &LoadData,
     }
 
     let (msg_sender, msg_receiver) = ipc::channel().unwrap();
-    match load_data.source {
-        RequestSource::Window(ref sender) | RequestSource::Worker(ref sender) => {
-            sender.send(msg_sender.clone()).unwrap();
-            let received_msg = msg_receiver.recv().unwrap();
-            if let Some(custom_response) = received_msg {
-                let metadata = Metadata::default(doc_url.clone());
-                let readable_response = to_readable_response(custom_response);
-                return StreamedResponse::from_http_response(box readable_response, metadata);
-            }
+    let response_mediator = CustomResponseMediator {
+        response_chan: msg_sender,
+        load_url: doc_url.clone()
+    };
+    if let Some(sender) = swmanager_chan {
+        let _ = sender.send(response_mediator);
+        if let Ok(Some(custom_response)) = msg_receiver.recv() {
+            let metadata = Metadata::default(doc_url.clone());
+            let readable_response = to_readable_response(custom_response);
+            return StreamedResponse::from_http_response(box readable_response, metadata);
         }
-        RequestSource::None => {}
+    } else {
+        debug!("Did not receive a custom response");
     }
 
     // If the URL is a view-source scheme then the scheme data contains the
@@ -956,9 +971,18 @@ pub fn load<A, B>(load_data: &LoadData,
         let request_id = uuid::Uuid::new_v4().simple().to_string();
 
         modify_request_headers(&mut request_headers, &doc_url,
-                               &user_agent, &http_state.cookie_jar,
-                               &http_state.auth_cache, &load_data,
-                               block_cookies, &mut referrer_url);
+                               &user_agent, load_data.referrer_policy,
+                               &mut referrer_url);
+
+        // https://fetch.spec.whatwg.org/#concept-http-network-or-cache-fetch step 11
+        if load_data.credentials_flag {
+            if !block_cookies {
+                set_request_cookies(&doc_url, &mut request_headers, &http_state.cookie_jar);
+            }
+
+            // https://fetch.spec.whatwg.org/#http-network-or-cache-fetch step 12
+            set_auth_header(&mut request_headers, &doc_url, &http_state.auth_cache);
+        }
 
         //if there is a new auth header then set the request headers with it
         if let Some(ref auth_header) = new_auth_header {
@@ -968,7 +992,7 @@ pub fn load<A, B>(load_data: &LoadData,
         let (response, msg) =
             try!(obtain_response(request_factory, &doc_url, &method, &request_headers,
                                  &cancel_listener, &load_data.data, &load_data.method,
-                                 &load_data.pipeline_id, iters, &devtools_chan, &request_id));
+                                 &load_data.pipeline_id, iters, &devtools_chan, &request_id, false));
 
         process_response_headers(&response, &doc_url, &http_state.cookie_jar, &http_state.hsts_list, &load_data);
 
@@ -1035,10 +1059,13 @@ pub fn load<A, B>(load_data: &LoadData,
                 doc_url = new_doc_url;
 
                 redirected_to.insert(doc_url.clone());
-                continue;
             }
         }
 
+        // Only notify the devtools about the final request that received a response.
+        if let Some(m) = msg {
+            send_request_to_devtools(m, devtools_chan.as_ref().unwrap());
+        }
         let mut adjusted_headers = response.headers().clone();
 
         if viewing_source {
@@ -1050,29 +1077,32 @@ pub fn load<A, B>(load_data: &LoadData,
             Some(&ContentType(ref mime)) => Some(mime),
             None => None
         });
-        metadata.headers = Some(adjusted_headers);
-        metadata.status = Some(response.status_raw().clone());
+        metadata.headers = Some(Serde(adjusted_headers));
+        metadata.status = Some(Serde(response.status_raw().clone()));
         metadata.https_state = if doc_url.scheme() == "https" {
             HttpsState::Modern
         } else {
             HttpsState::None
         };
-
-        // Only notify the devtools about the final request that received a response.
-        if let Some(msg) = msg {
-            send_request_to_devtools(msg, devtools_chan.as_ref().unwrap());
-        }
+        metadata.referrer = referrer_url.clone();
 
         // --- Tell devtools that we got a response
         // Send an HttpResponse message to devtools with the corresponding request_id
         // TODO: Send this message even when the load fails?
         if let Some(pipeline_id) = load_data.pipeline_id {
+            if let Some(ref chan) = devtools_chan {
                 send_response_to_devtools(
-                    devtools_chan, request_id,
-                    metadata.headers.clone(), metadata.status.clone(),
+                    &chan, request_id,
+                    metadata.headers.clone().map(Serde::into_inner),
+                    metadata.status.clone().map(Serde::into_inner),
                     pipeline_id);
-         }
-        return StreamedResponse::from_http_response(box response, metadata)
+            }
+        }
+        if response.status().class() == StatusClass::Redirection {
+            continue;
+        } else {
+            return StreamedResponse::from_http_response(box response, metadata);
+        }
     }
 }
 
@@ -1080,7 +1110,7 @@ fn send_data<R: Read>(context: LoadContext,
                       reader: &mut R,
                       start_chan: LoadConsumer,
                       metadata: Metadata,
-                      classifier: Arc<MIMEClassifier>,
+                      classifier: Arc<MimeClassifier>,
                       cancel_listener: &CancellationListener) {
     let (progress_chan, mut chunk) = {
         let buf = match read_block(reader) {
@@ -1121,8 +1151,26 @@ fn is_cert_verify_error(error: &OpensslError) -> bool {
     match error {
         &OpensslError::UnknownError { ref library, ref function, ref reason } => {
             library == "SSL routines" &&
-            function == "SSL3_GET_SERVER_CERTIFICATE" &&
+            function.to_uppercase() == "SSL3_GET_SERVER_CERTIFICATE" &&
             reason == "certificate verify failed"
+        }
+    }
+}
+
+fn is_unknown_message_digest_err(error: &OpensslError) -> bool {
+    match error {
+        &OpensslError::UnknownError { ref library, ref function, ref reason } => {
+            library == "asn1 encoding routines" &&
+            function == "ASN1_item_verify" &&
+            reason == "unknown message digest algorithm"
+        }
+    }
+}
+
+fn format_ssl_error(error: &OpensslError) -> String {
+    match error {
+        &OpensslError::UnknownError { ref library, ref function, ref reason } => {
+            format!("{}: {} - {}", library, function, reason)
         }
     }
 }

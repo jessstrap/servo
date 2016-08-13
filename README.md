@@ -43,14 +43,14 @@ Visit the [Servo Project page](https://servo.org/) for news and guides.
 On OS X (homebrew):
 
 ``` sh
-brew install automake pkg-config python cmake
+brew install automake pkg-config python cmake ffmpeg
 pip install virtualenv
 ```
 
 On OS X (MacPorts):
 
 ``` sh
-sudo port install python27 py27-virtualenv cmake
+sudo port install python27 py27-virtualenv cmake ffmpeg
 ```
 
 On OS X 10.11 (El Capitan), you also have to install openssl:
@@ -60,6 +60,29 @@ brew install openssl
 brew link --force openssl
 ```
 
+If you get this error during the brew link step:
+```sh
+Warning: Refusing to link: openssl
+```
+followed by a compile error not being able to find one or more
+openssl/ include files, you may want to try:
+```sh
+export DEP_OPENSSL_INCLUDE=/usr/local/include
+./mach build ...
+```
+
+If you get this error:
+``` sh
+"Couldn't find libavformat", do the following:
+
+brew uninstall ffmpeg
+brew install ffmpeg --build-from-source
+./mach clean
+./mach build
+```
+
+If you've already partially compiled servo but forgot to do this step, run ./mach clean, link openssl, and recompile.
+
 On Debian-based Linuxes:
 
 ``` sh
@@ -67,7 +90,8 @@ sudo apt-get install git curl freeglut3-dev autoconf \
     libfreetype6-dev libgl1-mesa-dri libglib2.0-dev xorg-dev \
     gperf g++ build-essential cmake virtualenv python-pip \
     libssl-dev libbz2-dev libosmesa6-dev libxmu6 libxmu-dev \
-    libglu1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev
+    libglu1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev \
+    libavformat-dev
 ```
 If you are on **Ubuntu 14.04** and encountered errors on installing these dependencies involving `libcheese`, see [#6158](https://github.com/servo/servo/issues/6158) for a workaround.
 
@@ -80,13 +104,13 @@ sudo dnf install curl freeglut-devel libtool gcc-c++ libXi-devel \
     freetype-devel mesa-libGL-devel mesa-libEGL-devel glib2-devel libX11-devel libXrandr-devel gperf \
     fontconfig-devel cabextract ttmkfdir python python-virtualenv python-pip expat-devel \
     rpm-build openssl-devel cmake bzip2-devel libXcursor-devel libXmu-devel mesa-libOSMesa-devel \
-    dbus-devel
+    dbus-devel ffmpeg-devel
 ```
 
 On Arch Linux:
 
 ``` sh
-sudo pacman -S --needed base-devel git python2 python2-virtualenv python2-pip mesa cmake bzip2 libxmu glu
+sudo pacman -S --needed base-devel git python2 python2-virtualenv python2-pip mesa cmake bzip2 libxmu glu pkg-config
 ```
 
 On Gentoo Linux:
@@ -104,14 +128,21 @@ Download Python for Windows [here](https://www.python.org/downloads/release/pyth
 required for the SpiderMonkey build on Windows.
 
 Install MSYS2 from [here](https://msys2.github.io/). After you have done so, open an MSYS shell
-window and update the core libraries and install new packages:
+window and update the core libraries and install new packages. The extra step at the end is to
+downgrate GCC to 5.4, as the GCC6 versions in mingw currently fail to compile some of our
+dependencies. We are upgrading to a gcc-free build on Windows as soon as possible:
 
 ```sh
-update-core
+pacman -Su
 pacman -Sy git mingw-w64-x86_64-toolchain mingw-w64-x86_64-freetype \
     mingw-w64-x86_64-icu mingw-w64-x86_64-nspr mingw-w64-x86_64-ca-certificates \
     mingw-w64-x86_64-expat mingw-w64-x86_64-cmake tar diffutils patch \
-    patchutils make python2-setuptools
+    patchutils make python2-setuptools mingw-w64-x86_64-ffmpeg
+export GCC_URL=http://repo.msys2.org/mingw/x86_64/mingw-w64-x86_64-gcc
+export GCC_EXT=5.4.0-1-any.pkg.tar.xz
+pacman -U --noconfirm $GCC_URL-$GCC_EXT $GCC_URL-ada-$GCC_EXT \
+    $GCC_URL-fortran-$GCC_EXT $GCC_URL-libgfortran-$GCC_EXT $GCC_URL-libs-$GCC_EXT \
+    $GCC_URL-objc-$GCC_EXT
 easy_install-2.7 pip virtualenv
 ```
 
@@ -177,7 +208,7 @@ export ANDROID_TOOLCHAIN="/path/to/toolchain"
 export PATH="$PATH:/path/to/toolchain/bin"
 
 ./mach build --release --android
-./mach package --release
+./mach package --release --android
 ```
 
 Rather than setting the `ANDROID_*` environment variables every time, you can
@@ -202,13 +233,14 @@ URL with servo).
   `INTERVAL` seconds
 - `-s SIZE` sets the tile size for painting; defaults to 512
 - `-z` disables all graphical output; useful for running JS / layout tests
+- `-Z help` displays useful output to debug servo
 
 ### Keyboard Shortcuts
 
 - `Ctrl--` zooms out
 - `Ctrl-=` zooms in
-- `Backspace` goes backwards in the history
-- `Shift-Backspace` goes forwards in the history
+- `Alt`+`left arrow` goes backwards in the history
+- `Alt`+`right arrow` goes forwards in the history
 - `Esc` exits servo
 
 ## Developing

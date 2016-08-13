@@ -13,29 +13,28 @@
 use std::ascii::AsciiExt;
 use std::boxed::Box as StdBox;
 use std::collections::HashSet;
-use std::fmt;
-use std::fmt::Write;
-use std::intrinsics;
-use std::mem;
+use std::fmt::{self, Write};
 use std::sync::Arc;
 
 use app_units::Au;
-use cssparser::Color as CSSParserColor;
-use cssparser::{Parser, RGBA, AtRuleParser, DeclarationParser, Delimiter,
+#[cfg(feature = "servo")] use cssparser::{Color as CSSParserColor, RGBA};
+use cssparser::{Parser, AtRuleParser, DeclarationParser, Delimiter,
                 DeclarationListParser, parse_important, ToCss, TokenSerializationType};
 use error_reporting::ParseErrorReporter;
 use url::Url;
-use euclid::SideOffsets2D;
+#[cfg(feature = "servo")] use euclid::side_offsets::SideOffsets2D;
 use euclid::size::Size2D;
 use string_cache::Atom;
 use computed_values;
-use logical_geometry::{LogicalMargin, PhysicalSide, WritingMode};
+#[cfg(feature = "servo")] use logical_geometry::{LogicalMargin, PhysicalSide};
+use logical_geometry::WritingMode;
 use parser::{ParserContext, ParserContextExtraData, log_css_error};
 use selectors::matching::DeclarationBlock;
 use stylesheets::Origin;
-use values::AuExtensionMethods;
-use values::computed::{self, TContext, ToComputedValue};
-use values::specified::BorderStyle;
+use values::LocalToCss;
+use values::HasViewportPercentage;
+use values::computed::{self, ToComputedValue};
+#[cfg(feature = "servo")] use values::specified::BorderStyle;
 
 use self::property_bit_field::PropertyBitField;
 
@@ -74,11 +73,12 @@ pub mod longhands {
 }
 
 pub mod shorthands {
-    use cssparser::Parser;
+    use cssparser::{Parser, ToCss};
+    use std::fmt;
     use parser::ParserContext;
     use values::specified;
 
-    fn parse_four_sides<F, T>(input: &mut Parser, parse_one: F) -> Result<(T, T, T, T), ()>
+    pub fn parse_four_sides<F, T>(input: &mut Parser, parse_one: F) -> Result<(T, T, T, T), ()>
     where F: Fn(&mut Parser) -> Result<T, ()>, F: Copy, T: Clone {
         // zero or more than four values is invalid.
         // one value sets them all
@@ -121,6 +121,33 @@ pub mod shorthands {
         Ok((top, right, bottom, left))
     }
 
+    /// Serialize a set of top,left,bottom,right values, in <margin>-shorthand style,
+    /// attempting to minimize the output
+    pub fn serialize_four_sides<T, W>(sides: (&T, &T, &T, &T), dest: &mut W) -> fmt::Result
+        where W: fmt::Write, T: ToCss+PartialEq {
+        if sides.0 == sides.1 && sides.0 == sides.2 && sides.0 == sides.3 {
+            sides.0.to_css(dest)
+        } else if sides.0 == sides.2 && sides.1 == sides.3 {
+            try!(sides.0.to_css(dest));
+            try!(dest.write_str(" "));
+            sides.1.to_css(dest)
+        } else if sides.1 == sides.3 {
+            try!(sides.0.to_css(dest));
+            try!(dest.write_str(" "));
+            try!(sides.1.to_css(dest));
+            try!(dest.write_str(" "));
+            sides.2.to_css(dest)
+        } else {
+            try!(sides.0.to_css(dest));
+            try!(dest.write_str(" "));
+            try!(sides.1.to_css(dest));
+            try!(dest.write_str(" "));
+            try!(sides.2.to_css(dest));
+            try!(dest.write_str(" "));
+            sides.3.to_css(dest)
+        }
+    }
+
     <%include file="/shorthand/background.mako.rs" />
     <%include file="/shorthand/border.mako.rs" />
     <%include file="/shorthand/box.mako.rs" />
@@ -131,7 +158,12 @@ pub mod shorthands {
     <%include file="/shorthand/margin.mako.rs" />
     <%include file="/shorthand/outline.mako.rs" />
     <%include file="/shorthand/padding.mako.rs" />
+    <%include file="/shorthand/position.mako.rs" />
     <%include file="/shorthand/text.mako.rs" />
+}
+
+pub mod animated_properties {
+    <%include file="/helpers/animated_properties.mako.rs" />
 }
 
 
@@ -261,11 +293,12 @@ use std::slice;
 /// Overridden declarations are skipped.
 
 // FIXME (https://github.com/servo/servo/issues/3426)
-#[derive(Debug, PartialEq, HeapSizeOf)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct PropertyDeclarationBlock {
-    #[ignore_heap_size_of = "#7038"]
+    #[cfg_attr(feature = "servo", ignore_heap_size_of = "#7038")]
     pub important: Arc<Vec<PropertyDeclaration>>,
-    #[ignore_heap_size_of = "#7038"]
+    #[cfg_attr(feature = "servo", ignore_heap_size_of = "#7038")]
     pub normal: Arc<Vec<PropertyDeclaration>>,
 }
 
@@ -616,7 +649,8 @@ impl CSSWideKeyword {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug, HeapSizeOf)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum Shorthand {
     % for property in data.shorthands:
         ${property.camel_case},
@@ -722,7 +756,8 @@ impl Shorthand {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, HeapSizeOf)]
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum DeclaredValue<T> {
     Value(T),
     WithVariables {
@@ -753,7 +788,8 @@ impl<T: ToCss> ToCss for DeclaredValue<T> {
     }
 }
 
-#[derive(PartialEq, Clone, Debug, HeapSizeOf)]
+#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum PropertyDeclaration {
     % for property in data.longhands:
         ${property.camel_case}(DeclaredValue<longhands::${property.ident}::SpecifiedValue>),
@@ -818,6 +854,19 @@ impl ToCss for PropertyDeclaration {
     }
 }
 
+impl HasViewportPercentage for PropertyDeclaration {
+    fn has_viewport_percentage(&self) -> bool {
+        match *self {
+            % for property in data.longhands:
+                PropertyDeclaration::${property.camel_case}(DeclaredValue::Value(ref val)) => {
+                    val.has_viewport_percentage()
+                },
+            % endfor
+            _ => false
+        }
+    }
+}
+
 impl PropertyDeclaration {
     pub fn name(&self) -> PropertyDeclarationName {
         match *self {
@@ -832,6 +881,16 @@ impl PropertyDeclaration {
             PropertyDeclaration::Custom(ref name, _) => {
                 PropertyDeclarationName::Custom(name.clone())
             }
+        }
+    }
+
+    #[inline]
+    pub fn discriminant_value(&self) -> usize {
+        match *self {
+            % for i, property in enumerate(data.longhands):
+                PropertyDeclaration::${property.camel_case}(..) => ${i},
+            % endfor
+            PropertyDeclaration::Custom(..) => ${len(data.longhands)}
         }
     }
 
@@ -934,7 +993,7 @@ impl PropertyDeclaration {
                             }
                         % endif
                         % if property.experimental:
-                            if !::util::prefs::get_pref("${property.experimental}")
+                            if !::util::prefs::PREFS.get("${property.experimental}")
                                 .as_boolean().unwrap_or(false) {
                                 return PropertyDeclarationParseResult::ExperimentalProperty
                             }
@@ -959,7 +1018,7 @@ impl PropertyDeclaration {
                         }
                     % endif
                     % if shorthand.experimental:
-                        if !::util::prefs::get_pref("${shorthand.experimental}")
+                        if !::util::prefs::PREFS.get("${shorthand.experimental}")
                             .as_boolean().unwrap_or(false) {
                             return PropertyDeclarationParseResult::ExperimentalProperty
                         }
@@ -1032,54 +1091,53 @@ impl PropertyDeclaration {
             PropertyDeclaration::Custom(_, _) => &[]
         }
     }
-}
 
-pub mod style_struct_traits {
-    use super::longhands;
-
-    % for style_struct in data.active_style_structs():
-        pub trait ${style_struct.trait_name}: Clone {
-            % for longhand in style_struct.longhands:
-                #[allow(non_snake_case)]
-                fn set_${longhand.ident}(&mut self, v: longhands::${longhand.ident}::computed_value::T);
-                #[allow(non_snake_case)]
-                fn copy_${longhand.ident}_from(&mut self, other: &Self);
-                % if longhand.need_clone:
-                    #[allow(non_snake_case)]
-                    fn clone_${longhand.ident}(&self) -> longhands::${longhand.ident}::computed_value::T;
+    /// Returns true if this property is one of the animable properties, false
+    /// otherwise.
+    pub fn is_animatable(&self) -> bool {
+        match *self {
+            % for property in data.longhands:
+            PropertyDeclaration::${property.camel_case}(_) => {
+                % if property.animatable:
+                    true
+                % else:
+                    false
                 % endif
+            }
             % endfor
-            % for additional in style_struct.additional_methods:
-                #[allow(non_snake_case)]
-                ${additional.declare()}
-            % endfor
+            PropertyDeclaration::Custom(..) => false,
         }
-    % endfor
+    }
 }
 
+#[cfg(feature = "gecko")]
+pub use gecko_properties::style_structs;
+
+#[cfg(feature = "servo")]
 pub mod style_structs {
     use fnv::FnvHasher;
     use super::longhands;
     use std::hash::{Hash, Hasher};
 
     % for style_struct in data.active_style_structs():
-        % if style_struct.trait_name == "Font":
-        #[derive(Clone, HeapSizeOf, Debug)]
+        % if style_struct.name == "Font":
+        #[derive(Clone, Debug)]
         % else:
-        #[derive(PartialEq, Clone, HeapSizeOf)]
+        #[derive(PartialEq, Clone, Debug)]
         % endif
-        pub struct ${style_struct.servo_struct_name} {
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+        pub struct ${style_struct.name} {
             % for longhand in style_struct.longhands:
                 pub ${longhand.ident}: longhands::${longhand.ident}::computed_value::T,
             % endfor
-            % if style_struct.trait_name == "Font":
+            % if style_struct.name == "Font":
                 pub hash: u64,
             % endif
         }
-        % if style_struct.trait_name == "Font":
+        % if style_struct.name == "Font":
 
-        impl PartialEq for ${style_struct.servo_struct_name} {
-            fn eq(&self, other: &${style_struct.servo_struct_name}) -> bool {
+        impl PartialEq for ${style_struct.name} {
+            fn eq(&self, other: &${style_struct.name}) -> bool {
                 self.hash == other.hash
                 % for longhand in style_struct.longhands:
                     && self.${longhand.ident} == other.${longhand.ident}
@@ -1088,55 +1146,48 @@ pub mod style_structs {
         }
         % endif
 
-        impl super::style_struct_traits::${style_struct.trait_name} for ${style_struct.servo_struct_name} {
+        impl ${style_struct.name} {
             % for longhand in style_struct.longhands:
-                fn set_${longhand.ident}(&mut self, v: longhands::${longhand.ident}::computed_value::T) {
+                #[allow(non_snake_case)]
+                #[inline]
+                pub fn set_${longhand.ident}(&mut self, v: longhands::${longhand.ident}::computed_value::T) {
                     self.${longhand.ident} = v;
                 }
-                fn copy_${longhand.ident}_from(&mut self, other: &Self) {
+                #[allow(non_snake_case)]
+                #[inline]
+                pub fn copy_${longhand.ident}_from(&mut self, other: &Self) {
                     self.${longhand.ident} = other.${longhand.ident}.clone();
                 }
+                % if longhand.need_clone:
+                    #[allow(non_snake_case)]
+                    #[inline]
+                    pub fn clone_${longhand.ident}(&self) -> longhands::${longhand.ident}::computed_value::T {
+                        self.${longhand.ident}.clone()
+                    }
+                % endif
+
+                % if longhand.need_index:
+                    #[allow(non_snake_case)]
+                    pub fn ${longhand.ident}_count(&self) -> usize {
+                        self.${longhand.ident}.0.len()
+                    }
+
+                    #[allow(non_snake_case)]
+                    pub fn ${longhand.ident}_at(&self, index: usize)
+                        -> longhands::${longhand.ident}::computed_value::SingleComputedValue {
+                        self.${longhand.ident}.0[index].clone()
+                    }
+                % endif
             % endfor
-            % if style_struct.trait_name == "Border":
+            % if style_struct.name == "Border":
                 % for side in ["top", "right", "bottom", "left"]:
-                fn clone_border_${side}_style(&self) -> longhands::border_${side}_style::computed_value::T {
-                    self.border_${side}_style.clone()
-                }
-                fn border_${side}_has_nonzero_width(&self) -> bool {
-                    self.border_${side}_width != ::app_units::Au(0)
-                }
+                    #[allow(non_snake_case)]
+                    pub fn border_${side}_has_nonzero_width(&self) -> bool {
+                        self.border_${side}_width != ::app_units::Au(0)
+                    }
                 % endfor
-            % elif style_struct.trait_name == "Box":
-                fn clone_display(&self) -> longhands::display::computed_value::T {
-                    self.display.clone()
-                }
-                fn clone_position(&self) -> longhands::position::computed_value::T {
-                    self.position.clone()
-                }
-                fn clone_float(&self) -> longhands::float::computed_value::T {
-                    self.float.clone()
-                }
-                fn clone_overflow_x(&self) -> longhands::overflow_x::computed_value::T {
-                    self.overflow_x.clone()
-                }
-                fn clone_overflow_y(&self) -> longhands::overflow_y::computed_value::T {
-                    self.overflow_y.clone()
-                }
-                fn transition_count(&self) -> usize {
-                    self.transition_property.0.len()
-                }
-            % elif style_struct.trait_name == "Color":
-                fn clone_color(&self) -> longhands::color::computed_value::T {
-                    self.color.clone()
-                }
-            % elif style_struct.trait_name == "Font":
-                fn clone_font_size(&self) -> longhands::font_size::computed_value::T {
-                    self.font_size.clone()
-                }
-                fn clone_font_weight(&self) -> longhands::font_weight::computed_value::T {
-                    self.font_weight.clone()
-                }
-                fn compute_font_hash(&mut self) {
+            % elif style_struct.name == "Font":
+                pub fn compute_font_hash(&mut self) {
                     // Corresponds to the fields in `gfx::font_template::FontTemplateDescriptor`.
                     let mut hasher: FnvHasher = Default::default();
                     hasher.write_u16(self.font_weight as u16);
@@ -1144,44 +1195,23 @@ pub mod style_structs {
                     self.font_family.hash(&mut hasher);
                     self.hash = hasher.finish()
                 }
-            % elif style_struct.trait_name == "InheritedBox":
-                fn clone_direction(&self) -> longhands::direction::computed_value::T {
-                    self.direction.clone()
-                }
-                fn clone_writing_mode(&self) -> longhands::writing_mode::computed_value::T {
-                    self.writing_mode.clone()
-                }
-                fn clone_text_orientation(&self) -> longhands::text_orientation::computed_value::T {
-                    self.text_orientation.clone()
-                }
-            % elif style_struct.trait_name == "InheritedText" and product == "servo":
-                fn clone__servo_text_decorations_in_effect(&self) ->
-                    longhands::_servo_text_decorations_in_effect::computed_value::T {
-                    self._servo_text_decorations_in_effect.clone()
-                }
-            % elif style_struct.trait_name == "Outline":
-                fn clone_outline_style(&self) -> longhands::outline_style::computed_value::T {
-                    self.outline_style.clone()
-                }
-                fn outline_has_nonzero_width(&self) -> bool {
+            % elif style_struct.name == "Outline":
+                #[inline]
+                pub fn outline_has_nonzero_width(&self) -> bool {
                     self.outline_width != ::app_units::Au(0)
                 }
-            % elif style_struct.trait_name == "Position":
-                fn clone_align_items(&self) -> longhands::align_items::computed_value::T {
-                    self.align_items.clone()
-                }
-                fn clone_align_self(&self) -> longhands::align_self::computed_value::T {
-                    self.align_self.clone()
-                }
-            % elif style_struct.trait_name == "Text":
+            % elif style_struct.name == "Text":
                 <% text_decoration_field = 'text_decoration' if product == 'servo' else 'text_decoration_line' %>
-                fn has_underline(&self) -> bool {
+                #[inline]
+                pub fn has_underline(&self) -> bool {
                     self.${text_decoration_field}.underline
                 }
-                fn has_overline(&self) -> bool {
+                #[inline]
+                pub fn has_overline(&self) -> bool {
                     self.${text_decoration_field}.overline
                 }
-                fn has_line_through(&self) -> bool {
+                #[inline]
+                pub fn has_line_through(&self) -> bool {
                     self.${text_decoration_field}.line_through
                 }
             % endif
@@ -1190,53 +1220,66 @@ pub mod style_structs {
     % endfor
 }
 
-pub trait ComputedValues : Clone + Send + Sync + 'static {
-    % for style_struct in data.active_style_structs():
-        type Concrete${style_struct.trait_name}: style_struct_traits::${style_struct.trait_name};
-    % endfor
+% for style_struct in data.active_style_structs():
+    impl style_structs::${style_struct.name} {
+        % for longhand in style_struct.longhands:
+            % if longhand.need_index:
+                #[allow(non_snake_case)]
+                #[inline]
+                pub fn ${longhand.ident}_iter(&self) -> ${longhand.camel_case}Iter {
+                    ${longhand.camel_case}Iter {
+                        style_struct: self,
+                        current: 0,
+                        max: self.${longhand.ident}_count(),
+                    }
+                }
 
-        // Temporary bailout case for stuff we haven't made work with the trait
-        // yet - panics for non-Servo implementations.
-        //
-        // Used only for animations. Don't use it in other places.
-        fn as_servo<'a>(&'a self) -> &'a ServoComputedValues;
-        fn as_servo_mut<'a>(&'a mut self) -> &'a mut ServoComputedValues;
-
-        fn new(custom_properties: Option<Arc<::custom_properties::ComputedValuesMap>>,
-               shareable: bool,
-               writing_mode: WritingMode,
-               root_font_size: Au,
-        % for style_struct in data.active_style_structs():
-               ${style_struct.ident}: Arc<Self::Concrete${style_struct.trait_name}>,
+                #[allow(non_snake_case)]
+                #[inline]
+                pub fn ${longhand.ident}_mod(&self, index: usize)
+                    -> longhands::${longhand.ident}::computed_value::SingleComputedValue {
+                    self.${longhand.ident}_at(index % self.${longhand.ident}_count())
+                }
+            % endif
         % endfor
-        ) -> Self;
+    }
 
-        fn style_for_child_text_node(parent: &Arc<Self>) -> Arc<Self>;
+    % for longhand in style_struct.longhands:
+        % if longhand.need_index:
+            pub struct ${longhand.camel_case}Iter<'a> {
+                style_struct: &'a style_structs::${style_struct.name},
+                current: usize,
+                max: usize,
+            }
 
-        fn initial_values() -> &'static Self;
+            impl<'a> Iterator for ${longhand.camel_case}Iter<'a> {
+                type Item = longhands::${longhand.ident}::computed_value::SingleComputedValue;
 
-        fn do_cascade_property<F: FnOnce(&Vec<Option<CascadePropertyFn<Self>>>)>(f: F);
-
-    % for style_struct in data.active_style_structs():
-        fn clone_${style_struct.trait_name_lower}(&self) ->
-            Arc<Self::Concrete${style_struct.trait_name}>;
-        fn get_${style_struct.trait_name_lower}<'a>(&'a self) ->
-            &'a Self::Concrete${style_struct.trait_name};
-        fn mutate_${style_struct.trait_name_lower}<'a>(&'a mut self) ->
-            &'a mut Self::Concrete${style_struct.trait_name};
+                fn next(&mut self) -> Option<Self::Item> {
+                    self.current += 1;
+                    if self.current <= self.max {
+                        Some(self.style_struct.${longhand.ident}_at(self.current - 1))
+                    } else {
+                        None
+                    }
+                }
+            }
+        % endif
     % endfor
+% endfor
 
-    fn custom_properties(&self) -> Option<Arc<::custom_properties::ComputedValuesMap>>;
-    fn root_font_size(&self) -> Au;
-    fn set_root_font_size(&mut self, size: Au);
-    fn set_writing_mode(&mut self, mode: WritingMode);
-    fn is_multicol(&self) -> bool;
-}
 
-#[derive(Clone, HeapSizeOf)]
-pub struct ServoComputedValues {
+#[cfg(feature = "gecko")]
+pub use gecko_properties::ComputedValues;
+
+#[cfg(feature = "servo")]
+pub type ServoComputedValues = ComputedValues;
+
+#[cfg(feature = "servo")]
+#[cfg_attr(feature = "servo", derive(Clone, Debug, HeapSizeOf))]
+pub struct ComputedValues {
     % for style_struct in data.active_style_structs():
-        ${style_struct.ident}: Arc<style_structs::${style_struct.servo_struct_name}>,
+        ${style_struct.ident}: Arc<style_structs::${style_struct.name}>,
     % endfor
     custom_properties: Option<Arc<::custom_properties::ComputedValuesMap>>,
     shareable: bool,
@@ -1244,87 +1287,77 @@ pub struct ServoComputedValues {
     pub root_font_size: Au,
 }
 
-impl ComputedValues for ServoComputedValues {
-    % for style_struct in data.active_style_structs():
-        type Concrete${style_struct.trait_name} = style_structs::${style_struct.servo_struct_name};
-    % endfor
-
-        fn as_servo<'a>(&'a self) -> &'a ServoComputedValues { self }
-        fn as_servo_mut<'a>(&'a mut self) -> &'a mut ServoComputedValues { self }
-
-        fn new(custom_properties: Option<Arc<::custom_properties::ComputedValuesMap>>,
-               shareable: bool,
-               writing_mode: WritingMode,
-               root_font_size: Au,
-            % for style_struct in data.active_style_structs():
-               ${style_struct.ident}: Arc<style_structs::${style_struct.servo_struct_name}>,
-            % endfor
-        ) -> Self {
-            ServoComputedValues {
-                custom_properties: custom_properties,
-                shareable: shareable,
-                writing_mode: writing_mode,
-                root_font_size: root_font_size,
-            % for style_struct in data.active_style_structs():
-                ${style_struct.ident}: ${style_struct.ident},
-            % endfor
-            }
+#[cfg(feature = "servo")]
+impl ComputedValues {
+    pub fn new(custom_properties: Option<Arc<::custom_properties::ComputedValuesMap>>,
+           shareable: bool,
+           writing_mode: WritingMode,
+           root_font_size: Au,
+        % for style_struct in data.active_style_structs():
+           ${style_struct.ident}: Arc<style_structs::${style_struct.name}>,
+        % endfor
+    ) -> Self {
+        ComputedValues {
+            custom_properties: custom_properties,
+            shareable: shareable,
+            writing_mode: writing_mode,
+            root_font_size: root_font_size,
+        % for style_struct in data.active_style_structs():
+            ${style_struct.ident}: ${style_struct.ident},
+        % endfor
         }
+    }
 
-        fn style_for_child_text_node(parent: &Arc<Self>) -> Arc<Self> {
-            // Text nodes get a copy of the parent style. Inheriting all non-
-            // inherited properties into the text node is odd from a CSS
-            // perspective, but makes fragment construction easier (by making
-            // properties like vertical-align on fragments have values that
-            // match the parent element). This is an implementation detail of
-            // Servo layout that is not central to how fragment construction
-            // works, but would be difficult to change. (Text node style is
-            // also not visible to script.)
-            parent.clone()
-        }
+    pub fn style_for_child_text_node(parent: &Arc<Self>) -> Arc<Self> {
+        // Text nodes get a copy of the parent style. Inheriting all non-
+        // inherited properties into the text node is odd from a CSS
+        // perspective, but makes fragment construction easier (by making
+        // properties like vertical-align on fragments have values that
+        // match the parent element). This is an implementation detail of
+        // Servo layout that is not central to how fragment construction
+        // works, but would be difficult to change. (Text node style is
+        // also not visible to script.)
+        parent.clone()
+    }
 
-        fn initial_values() -> &'static Self { &*INITIAL_SERVO_VALUES }
+    pub fn initial_values() -> &'static Self { &*INITIAL_SERVO_VALUES }
 
-        fn do_cascade_property<F: FnOnce(&Vec<Option<CascadePropertyFn<Self>>>)>(f: F) {
-            CASCADE_PROPERTY.with(|x| f(x));
-        }
+    #[inline]
+    pub fn do_cascade_property<F: FnOnce(&[CascadePropertyFn])>(f: F) {
+        f(&CASCADE_PROPERTY)
+    }
 
     % for style_struct in data.active_style_structs():
         #[inline]
-        fn clone_${style_struct.trait_name_lower}(&self) ->
-            Arc<Self::Concrete${style_struct.trait_name}> {
+        pub fn clone_${style_struct.name_lower}(&self) -> Arc<style_structs::${style_struct.name}> {
                 self.${style_struct.ident}.clone()
             }
         #[inline]
-        fn get_${style_struct.trait_name_lower}<'a>(&'a self) ->
-            &'a Self::Concrete${style_struct.trait_name} {
-                &self.${style_struct.ident}
-            }
+        pub fn get_${style_struct.name_lower}(&self) -> &style_structs::${style_struct.name} {
+            &self.${style_struct.ident}
+        }
         #[inline]
-        fn mutate_${style_struct.trait_name_lower}<'a>(&'a mut self) ->
-            &'a mut Self::Concrete${style_struct.trait_name} {
-                Arc::make_mut(&mut self.${style_struct.ident})
-            }
+        pub fn mutate_${style_struct.name_lower}(&mut self) -> &mut style_structs::${style_struct.name} {
+            Arc::make_mut(&mut self.${style_struct.ident})
+        }
     % endfor
 
     // Cloning the Arc here is fine because it only happens in the case where we have custom
     // properties, and those are both rare and expensive.
-    fn custom_properties(&self) -> Option<Arc<::custom_properties::ComputedValuesMap>> {
+    pub fn custom_properties(&self) -> Option<Arc<::custom_properties::ComputedValuesMap>> {
         self.custom_properties.as_ref().map(|x| x.clone())
     }
 
-    fn root_font_size(&self) -> Au { self.root_font_size }
-    fn set_root_font_size(&mut self, size: Au) { self.root_font_size = size }
-    fn set_writing_mode(&mut self, mode: WritingMode) { self.writing_mode = mode; }
+    pub fn root_font_size(&self) -> Au { self.root_font_size }
+    pub fn set_root_font_size(&mut self, size: Au) { self.root_font_size = size }
+    pub fn set_writing_mode(&mut self, mode: WritingMode) { self.writing_mode = mode; }
 
     #[inline]
-    fn is_multicol(&self) -> bool {
+    pub fn is_multicol(&self) -> bool {
         let style = self.get_column();
         style.column_count.0.is_some() || style.column_width.0.is_some()
     }
-}
 
-impl ServoComputedValues {
     /// Resolves the currentColor keyword.
     /// Any color value form computed values (except for the 'color' property itself)
     /// should go through this method.
@@ -1425,7 +1458,7 @@ impl ServoComputedValues {
     }
 
     #[inline]
-    pub fn get_font_arc(&self) -> Arc<style_structs::ServoFont> {
+    pub fn get_font_arc(&self) -> Arc<style_structs::Font> {
         self.font.clone()
     }
 
@@ -1508,7 +1541,7 @@ impl ServoComputedValues {
 
 
 /// Return a WritingMode bitflags from the relevant CSS properties.
-pub fn get_writing_mode<S: style_struct_traits::InheritedBox>(inheritedbox_style: &S) -> WritingMode {
+pub fn get_writing_mode(inheritedbox_style: &style_structs::InheritedBox) -> WritingMode {
     use logical_geometry;
     let mut flags = WritingMode::empty();
     match inheritedbox_style.clone_direction() {
@@ -1549,43 +1582,53 @@ pub fn get_writing_mode<S: style_struct_traits::InheritedBox>(inheritedbox_style
 }
 
 
-/// The initial values for all style structs as defined by the specification.
-lazy_static! {
-    pub static ref INITIAL_SERVO_VALUES: ServoComputedValues = ServoComputedValues {
-        % for style_struct in data.active_style_structs():
-            ${style_struct.ident}: Arc::new(style_structs::${style_struct.servo_struct_name} {
-                % for longhand in style_struct.longhands:
-                    ${longhand.ident}: longhands::${longhand.ident}::get_initial_value(),
-                % endfor
-                % if style_struct.trait_name == "Font":
-                    hash: 0,
-                % endif
-            }),
-        % endfor
-        custom_properties: None,
-        shareable: true,
-        writing_mode: WritingMode::empty(),
-        root_font_size: longhands::font_size::get_initial_value(),
-    };
-}
+#[cfg(feature = "servo")]
+pub use self::lazy_static_module::INITIAL_SERVO_VALUES;
 
+// Use a module to work around #[cfg] on lazy_static! not being applied to every generated item.
+#[cfg(feature = "servo")]
+mod lazy_static_module {
+    use logical_geometry::WritingMode;
+    use std::sync::Arc;
+    use super::{ComputedValues, longhands, style_structs};
+
+    /// The initial values for all style structs as defined by the specification.
+    lazy_static! {
+        pub static ref INITIAL_SERVO_VALUES: ComputedValues = ComputedValues {
+            % for style_struct in data.active_style_structs():
+                ${style_struct.ident}: Arc::new(style_structs::${style_struct.name} {
+                    % for longhand in style_struct.longhands:
+                        ${longhand.ident}: longhands::${longhand.ident}::get_initial_value(),
+                    % endfor
+                    % if style_struct.name == "Font":
+                        hash: 0,
+                    % endif
+                }),
+            % endfor
+            custom_properties: None,
+            shareable: true,
+            writing_mode: WritingMode::empty(),
+            root_font_size: longhands::font_size::get_initial_value(),
+        };
+    }
+}
 
 /// Fast path for the function below. Only computes new inherited styles.
 #[allow(unused_mut, unused_imports)]
-fn cascade_with_cached_declarations<C: ComputedValues>(
+fn cascade_with_cached_declarations(
         viewport_size: Size2D<Au>,
         applicable_declarations: &[DeclarationBlock<Vec<PropertyDeclaration>>],
         shareable: bool,
-        parent_style: &C,
-        cached_style: &C,
+        parent_style: &ComputedValues,
+        cached_style: &ComputedValues,
         custom_properties: Option<Arc<::custom_properties::ComputedValuesMap>>,
         mut error_reporter: StdBox<ParseErrorReporter + Send>)
-        -> C {
+        -> ComputedValues {
     let mut context = computed::Context {
         is_root_element: false,
         viewport_size: viewport_size,
         inherited_style: parent_style,
-        style: C::new(
+        style: ComputedValues::new(
             custom_properties,
             shareable,
             WritingMode::empty(),
@@ -1596,7 +1639,7 @@ fn cascade_with_cached_declarations<C: ComputedValues>(
                 % else:
                     cached_style
                 % endif
-                    .clone_${style_struct.trait_name_lower}(),
+                    .clone_${style_struct.name_lower}(),
             % endfor
         ),
     };
@@ -1613,7 +1656,6 @@ fn cascade_with_cached_declarations<C: ComputedValues>(
                             PropertyDeclaration::${property.camel_case}(ref
                                     ${'_' if not style_struct.inherited else ''}declared_value)
                                     => {
-                                    use properties::style_struct_traits::${style_struct.trait_name};
                                 % if style_struct.inherited:
                                     if seen.get_${property.ident}() {
                                         continue
@@ -1626,14 +1668,14 @@ fn cascade_with_cached_declarations<C: ComputedValues>(
                                             DeclaredValue::Value(ref specified_value)
                                             => {
                                                 let computed = specified_value.to_computed_value(&context);
-                                                context.mutate_style().mutate_${style_struct.trait_name_lower}()
+                                                context.mutate_style().mutate_${style_struct.name_lower}()
                                                        .set_${property.ident}(computed);
                                             },
                                             DeclaredValue::Initial
                                             => {
                                                 // FIXME(bholley): We may want set_X_to_initial_value() here.
                                                 let initial = longhands::${property.ident}::get_initial_value();
-                                                context.mutate_style().mutate_${style_struct.trait_name_lower}()
+                                                context.mutate_style().mutate_${style_struct.name_lower}()
                                                        .set_${property.ident}(initial);
                                             },
                                             DeclaredValue::Inherit => {
@@ -1642,7 +1684,7 @@ fn cascade_with_cached_declarations<C: ComputedValues>(
                                                 //
                                                 // FIXME: is it still?
                                                 let inherited_struct = parent_style.get_${style_struct.ident}();
-                                                context.mutate_style().mutate_${style_struct.trait_name_lower}()
+                                                context.mutate_style().mutate_${style_struct.name_lower}()
                                                        .copy_${property.ident}_from(inherited_struct);
                                             }
                                             DeclaredValue::WithVariables { .. } => unreachable!()
@@ -1671,45 +1713,26 @@ fn cascade_with_cached_declarations<C: ComputedValues>(
 
     if seen.get_font_style() || seen.get_font_weight() || seen.get_font_stretch() ||
             seen.get_font_family() {
-        use properties::style_struct_traits::Font;
         context.mutate_style().mutate_font().compute_font_hash();
     }
 
     context.style
 }
 
-pub type CascadePropertyFn<C /*: ComputedValues */> =
+pub type CascadePropertyFn =
     extern "Rust" fn(declaration: &PropertyDeclaration,
-                     inherited_style: &C,
-                     context: &mut computed::Context<C>,
+                     inherited_style: &ComputedValues,
+                     context: &mut computed::Context,
                      seen: &mut PropertyBitField,
                      cacheable: &mut bool,
                      error_reporter: &mut StdBox<ParseErrorReporter + Send>);
 
-pub fn make_cascade_vec<C: ComputedValues>() -> Vec<Option<CascadePropertyFn<C>>> {
-    let mut result: Vec<Option<CascadePropertyFn<C>>> = Vec::new();
-    % for style_struct in data.active_style_structs():
-        % for property in style_struct.longhands:
-            let discriminant;
-            unsafe {
-                let variant = PropertyDeclaration::${property.camel_case}(intrinsics::uninit());
-                discriminant = intrinsics::discriminant_value(&variant) as usize;
-                mem::forget(variant);
-            }
-            while result.len() < discriminant + 1 {
-                result.push(None)
-            }
-            result[discriminant] = Some(longhands::${property.ident}::cascade_property);
-        % endfor
+#[cfg(feature = "servo")]
+static CASCADE_PROPERTY: [CascadePropertyFn; ${len(data.longhands)}] = [
+    % for property in data.longhands:
+        longhands::${property.ident}::cascade_property,
     % endfor
-    result
-}
-
-// This is a thread-local rather than a lazy static to avoid atomic operations when cascading
-// properties.
-thread_local!(static CASCADE_PROPERTY: Vec<Option<CascadePropertyFn<ServoComputedValues>>> = {
-    make_cascade_vec::<ServoComputedValues>()
-});
+];
 
 /// Performs the CSS cascade, computing new styles for an element from its parent style and
 /// optionally a cached related style. The arguments are:
@@ -1729,16 +1752,14 @@ thread_local!(static CASCADE_PROPERTY: Vec<Option<CascadePropertyFn<ServoCompute
 ///     this is ignored.
 ///
 /// Returns the computed values and a boolean indicating whether the result is cacheable.
-pub fn cascade<C: ComputedValues>(
-               viewport_size: Size2D<Au>,
+pub fn cascade(viewport_size: Size2D<Au>,
                applicable_declarations: &[DeclarationBlock<Vec<PropertyDeclaration>>],
                shareable: bool,
-               parent_style: Option<<&C>,
-               cached_style: Option<<&C>,
+               parent_style: Option<<&ComputedValues>,
+               cached_style: Option<<&ComputedValues>,
                mut error_reporter: StdBox<ParseErrorReporter + Send>)
-               -> (C, bool) {
-    use properties::style_struct_traits::{Border, Box, Font, Outline};
-    let initial_values = C::initial_values();
+               -> (ComputedValues, bool) {
+    let initial_values = ComputedValues::initial_values();
     let (is_root_element, inherited_style) = match parent_style {
         Some(parent_style) => (false, parent_style),
         None => (true, initial_values),
@@ -1778,7 +1799,7 @@ pub fn cascade<C: ComputedValues>(
         is_root_element: is_root_element,
         viewport_size: viewport_size,
         inherited_style: inherited_style,
-        style: C::new(
+        style: ComputedValues::new(
             custom_properties,
             shareable,
             WritingMode::empty(),
@@ -1789,7 +1810,7 @@ pub fn cascade<C: ComputedValues>(
             % else:
             initial_values
             % endif
-                .clone_${style_struct.trait_name_lower}(),
+                .clone_${style_struct.name_lower}(),
             % endfor
         ),
     };
@@ -1803,7 +1824,7 @@ pub fn cascade<C: ComputedValues>(
     // We could (and used to) use a pattern match here, but that bloats this function to over 100K
     // of compiled code! To improve i-cache behavior, we outline the individual functions and use
     // virtual dispatch instead.
-    C::do_cascade_property(|cascade_property| {
+    ComputedValues::do_cascade_property(|cascade_property| {
         % for category_to_cascade_now in ["early", "other"]:
             for sub_list in applicable_declarations.iter().rev() {
                 // Declarations are already stored in reverse order.
@@ -1833,15 +1854,13 @@ pub fn cascade<C: ComputedValues>(
                     {
                         continue
                     }
-                    let discriminant = unsafe {
-                        intrinsics::discriminant_value(declaration) as usize
-                    };
-                    (cascade_property[discriminant].unwrap())(declaration,
-                                                              inherited_style,
-                                                              &mut context,
-                                                              &mut seen,
-                                                              &mut cacheable,
-                                                              &mut error_reporter);
+                    let discriminant = declaration.discriminant_value();
+                    (cascade_property[discriminant])(declaration,
+                                                     inherited_style,
+                                                     &mut context,
+                                                     &mut seen,
+                                                     &mut cacheable,
+                                                     &mut error_reporter);
                 }
             }
         % endfor
@@ -1853,7 +1872,9 @@ pub fn cascade<C: ComputedValues>(
         longhands::position::SpecifiedValue::absolute |
         longhands::position::SpecifiedValue::fixed);
     let floated = style.get_box().clone_float() != longhands::float::SpecifiedValue::none;
-    if positioned || floated || is_root_element {
+    let is_flex_item =
+        context.inherited_style.get_box().clone_display() == computed_values::display::T::flex;
+    if positioned || floated || is_root_element || is_flex_item {
         use computed_values::display::T;
 
         let specified_display = style.get_box().clone_display();
@@ -1874,7 +1895,7 @@ pub fn cascade<C: ComputedValues>(
             let box_ = style.mutate_box();
             box_.set_display(computed_display);
             % if product == "servo":
-                box_.set__servo_display_for_hypothetical_box(if is_root_element {
+                box_.set__servo_display_for_hypothetical_box(if is_root_element || is_flex_item {
                     computed_display
                 } else {
                     specified_display
@@ -1899,8 +1920,8 @@ pub fn cascade<C: ComputedValues>(
         }
     }
 
+    % if "align-items" in data.longhands_by_name:
     {
-        use self::style_struct_traits::Position;
         use computed_values::align_self::T as align_self;
         use computed_values::align_items::T as align_items;
         if style.get_position().clone_align_self() == computed_values::align_self::T::auto && !positioned {
@@ -1915,6 +1936,7 @@ pub fn cascade<C: ComputedValues>(
             style.mutate_position().set_align_self(self_align);
         }
     }
+    % endif
 
     // The initial value of border-*-width may be changed at computed value time.
     % for side in ["top", "right", "bottom", "left"]:
@@ -1938,7 +1960,6 @@ pub fn cascade<C: ComputedValues>(
 
     if seen.get_font_style() || seen.get_font_weight() || seen.get_font_stretch() ||
             seen.get_font_family() {
-        use properties::style_struct_traits::Font;
         style.mutate_font().compute_font_hash();
     }
 
@@ -1947,14 +1968,57 @@ pub fn cascade<C: ComputedValues>(
     (style, cacheable)
 }
 
+#[cfg(feature = "servo")]
+pub fn modify_style_for_anonymous_flow(style: &mut Arc<ComputedValues>,
+                                      new_display_value: longhands::display::computed_value::T) {
+    // The 'align-self' property needs some special treatment since
+    // its value depends on the 'align-items' value of its parent.
+    % if "align-items" in data.longhands_by_name:
+        use computed_values::align_self::T as align_self;
+        use computed_values::align_items::T as align_items;
+        let self_align =
+            match style.position.align_items {
+                align_items::stretch => align_self::stretch,
+                align_items::baseline => align_self::baseline,
+                align_items::flex_start => align_self::flex_start,
+                align_items::flex_end => align_self::flex_end,
+                align_items::center => align_self::center,
+            };
+    % endif
+    let inital_values = &*INITIAL_SERVO_VALUES;
+    let mut style = Arc::make_mut(style);
+    % for style_struct in data.active_style_structs():
+    % if not style_struct.inherited:
+        style.${style_struct.ident} = inital_values.clone_${style_struct.name_lower}();
+    % endif
+    % endfor
+    % if "align-items" in data.longhands_by_name:
+       let position = Arc::make_mut(&mut style.position);
+       position.align_self = self_align;
+    % endif
+    if new_display_value != longhands::display::computed_value::T::inline {
+        let new_box = Arc::make_mut(&mut style.box_);
+        new_box.display = new_display_value;
+    }
+    let border = Arc::make_mut(&mut style.border);
+    % for side in ["top", "right", "bottom", "left"]:
+        // Like calling to_computed_value, which wouldn't type check.
+        border.border_${side}_width = Au(0);
+    % endfor
+    // Initial value of outline-style is always none for anonymous box.
+    let outline = Arc::make_mut(&mut style.outline);
+    outline.outline_width = Au(0);
+}
+
 /// Alters the given style to accommodate replaced content. This is called in flow construction. It
 /// handles cases like `<div style="position: absolute">foo bar baz</div>` (in which `foo`, `bar`,
 /// and `baz` must not be absolutely-positioned) and cases like `<sup>Foo</sup>` (in which the
 /// `vertical-align: top` style of `sup` must not propagate down into `Foo`).
 ///
 /// FIXME(#5625, pcwalton): It would probably be cleaner and faster to do this in the cascade.
+#[cfg(feature = "servo")]
 #[inline]
-pub fn modify_style_for_replaced_content(style: &mut Arc<ServoComputedValues>) {
+pub fn modify_style_for_replaced_content(style: &mut Arc<ComputedValues>) {
     // Reset `position` to handle cases like `<div style="position: absolute">foo bar baz</div>`.
     if style.box_.display != longhands::display::computed_value::T::inline {
         let mut style = Arc::make_mut(style);
@@ -1989,11 +2053,12 @@ pub fn modify_style_for_replaced_content(style: &mut Arc<ServoComputedValues>) {
 ///
 /// Specifically, this function sets border widths to zero on the sides for which the fragment is
 /// not outermost.
+#[cfg(feature = "servo")]
 #[inline]
-pub fn modify_border_style_for_inline_sides(style: &mut Arc<ServoComputedValues>,
+pub fn modify_border_style_for_inline_sides(style: &mut Arc<ComputedValues>,
                                             is_first_fragment_of_element: bool,
                                             is_last_fragment_of_element: bool) {
-    fn modify_side(style: &mut Arc<ServoComputedValues>, side: PhysicalSide) {
+    fn modify_side(style: &mut Arc<ComputedValues>, side: PhysicalSide) {
         {
             let border = &style.border;
             let current_style = match side {
@@ -2040,9 +2105,10 @@ pub fn modify_border_style_for_inline_sides(style: &mut Arc<ServoComputedValues>
 }
 
 /// Adjusts the display and position properties as appropriate for an anonymous table object.
+#[cfg(feature = "servo")]
 #[inline]
 pub fn modify_style_for_anonymous_table_object(
-        style: &mut Arc<ServoComputedValues>,
+        style: &mut Arc<ComputedValues>,
         new_display_value: longhands::display::computed_value::T) {
     let mut style = Arc::make_mut(style);
     let box_style = Arc::make_mut(&mut style.box_);
@@ -2051,8 +2117,9 @@ pub fn modify_style_for_anonymous_table_object(
 }
 
 /// Adjusts the `position` property as necessary for the outer fragment wrapper of an inline-block.
+#[cfg(feature = "servo")]
 #[inline]
-pub fn modify_style_for_outer_inline_block_fragment(style: &mut Arc<ServoComputedValues>) {
+pub fn modify_style_for_outer_inline_block_fragment(style: &mut Arc<ComputedValues>) {
     let mut style = Arc::make_mut(style);
     let box_style = Arc::make_mut(&mut style.box_);
     box_style.position = longhands::position::computed_value::T::static_
@@ -2062,8 +2129,9 @@ pub fn modify_style_for_outer_inline_block_fragment(style: &mut Arc<ServoCompute
 ///
 /// Text is never directly relatively positioned; it's always contained within an element that is
 /// itself relatively positioned.
+#[cfg(feature = "servo")]
 #[inline]
-pub fn modify_style_for_text(style: &mut Arc<ServoComputedValues>) {
+pub fn modify_style_for_text(style: &mut Arc<ComputedValues>) {
     if style.box_.position == longhands::position::computed_value::T::relative {
         // We leave the `position` property set to `relative` so that we'll still establish a
         // containing block if needed. But we reset all position offsets to `auto`.
@@ -2098,22 +2166,20 @@ pub fn modify_style_for_text(style: &mut Arc<ServoComputedValues>) {
 ///
 /// Margins apply to the `input` element itself, so including them in the text will cause them to
 /// be double-counted.
-pub fn modify_style_for_input_text(style: &mut Arc<ServoComputedValues>) {
+#[cfg(feature = "servo")]
+pub fn modify_style_for_input_text(style: &mut Arc<ComputedValues>) {
     let mut style = Arc::make_mut(style);
     let margin_style = Arc::make_mut(&mut style.margin);
     margin_style.margin_top = computed::LengthOrPercentageOrAuto::Length(Au(0));
     margin_style.margin_right = computed::LengthOrPercentageOrAuto::Length(Au(0));
     margin_style.margin_bottom = computed::LengthOrPercentageOrAuto::Length(Au(0));
     margin_style.margin_left = computed::LengthOrPercentageOrAuto::Length(Au(0));
-
-    // whitespace inside text input should not be collapsed
-    let inherited_text = Arc::make_mut(&mut style.inheritedtext);
-    inherited_text.white_space = longhands::white_space::computed_value::T::pre;
 }
 
 /// Adjusts the `clip` property so that an inline absolute hypothetical fragment doesn't clip its
 /// children.
-pub fn modify_style_for_inline_absolute_hypothetical_fragment(style: &mut Arc<ServoComputedValues>) {
+#[cfg(feature = "servo")]
+pub fn modify_style_for_inline_absolute_hypothetical_fragment(style: &mut Arc<ComputedValues>) {
     if style.get_effects().clip.0.is_some() {
         let mut style = Arc::make_mut(style);
         let effects_style = Arc::make_mut(&mut style.effects);

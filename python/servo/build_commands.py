@@ -209,7 +209,7 @@ class MachCommands(CommandBase):
             opts += ["--features", "%s" % ' '.join(features)]
 
         build_start = time()
-        env = self.build_env(target=target)
+        env = self.build_env(target=target, is_build=True)
 
         if android:
             # Build OpenSSL for android
@@ -235,6 +235,9 @@ class MachCommands(CommandBase):
             env['OPENSSL_STATIC'] = 'TRUE'
 
         cargo_binary = "cargo" + BIN_SUFFIX
+
+        if sys.platform == "win32" or sys.platform == "msys":
+            env["RUSTFLAGS"] = "-C link-args=-Wl,--subsystem,windows"
 
         status = call(
             [cargo_binary, "build"] + opts,
@@ -296,7 +299,7 @@ class MachCommands(CommandBase):
         build_start = time()
         with cd(path.join("ports", "cef")):
             ret = call(["cargo", "build"] + opts,
-                       env=self.build_env(), verbose=verbose)
+                       env=self.build_env(is_build=True), verbose=verbose)
         elapsed = time() - build_start
 
         # Generate Desktop Notification if elapsed-time > some threshold value
@@ -319,6 +322,7 @@ class MachCommands(CommandBase):
                      action='store_true',
                      help='Build in release mode')
     def build_geckolib(self, jobs=None, verbose=False, release=False):
+        self.set_use_stable_rust()
         self.ensure_bootstrapped()
 
         ret = None
@@ -330,10 +334,12 @@ class MachCommands(CommandBase):
         if release:
             opts += ["--release"]
 
+        env = self.build_env(is_build=True)
+        env["CARGO_TARGET_DIR"] = path.join(self.context.topdir, "target", "geckolib").encode("UTF-8")
+
         build_start = time()
         with cd(path.join("ports", "geckolib")):
-            ret = call(["cargo", "build"] + opts,
-                       env=self.build_env(), verbose=verbose)
+            ret = call(["cargo", "build"] + opts, env=env, verbose=verbose)
         elapsed = time() - build_start
 
         # Generate Desktop Notification if elapsed-time > some threshold value

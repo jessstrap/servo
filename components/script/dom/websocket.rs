@@ -16,14 +16,14 @@ use dom::bindings::js::Root;
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::{Reflectable, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString, is_token};
-use dom::blob::{Blob, BlobImpl, DataSlice};
+use dom::blob::{Blob, BlobImpl};
 use dom::closeevent::CloseEvent;
 use dom::event::{Event, EventBubbles, EventCancelable};
 use dom::eventtarget::EventTarget;
 use dom::messageevent::MessageEvent;
 use dom::urlhelper::UrlHelper;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
-use js::jsapi::{JSAutoCompartment, RootedValue};
+use js::jsapi::JSAutoCompartment;
 use js::jsapi::{JS_GetArrayBufferData, JS_NewArrayBuffer};
 use js::jsval::UndefinedValue;
 use libc::{uint32_t, uint8_t};
@@ -405,7 +405,7 @@ impl WebSocketMethods for WebSocket {
         if send_data {
             let mut other_sender = self.sender.borrow_mut();
             let my_sender = other_sender.as_mut().unwrap();
-            let bytes = blob.get_slice_or_empty().get_bytes().to_vec();
+            let bytes = blob.get_bytes().unwrap_or(vec![]);
             let _ = my_sender.send(WebSocketDomAction::SendMessage(MessageData::Binary(bytes)));
         }
 
@@ -461,6 +461,8 @@ struct ConnectionEstablishedTask {
 }
 
 impl Runnable for ConnectionEstablishedTask {
+    fn name(&self) -> &'static str { "ConnectionEstablishedTask" }
+
     fn handler(self: Box<Self>) {
         let ws = self.address.root();
         let global = ws.r().global();
@@ -489,8 +491,8 @@ impl Runnable for ConnectionEstablishedTask {
             for cookie in cookies.iter() {
                 if let Ok(cookie_value) = String::from_utf8(cookie.clone()) {
                     let _ = ws.global().r().core_resource_thread().send(SetCookiesForUrl(ws.url.clone(),
-                                                                                    cookie_value,
-                                                                                    HTTP));
+                                                                                         cookie_value,
+                                                                                         HTTP));
                 }
             }
         }
@@ -510,6 +512,8 @@ impl Runnable for BufferedAmountTask {
     // To be compliant with standards, we need to reset bufferedAmount only when the event loop
     // reaches step 1.  In our implementation, the bytes will already have been sent on a background
     // thread.
+    fn name(&self) -> &'static str { "BufferedAmountTask" }
+
     fn handler(self: Box<Self>) {
         let ws = self.address.root();
 
@@ -526,6 +530,8 @@ struct CloseTask {
 }
 
 impl Runnable for CloseTask {
+    fn name(&self) -> &'static str { "CloseTask" }
+
     fn handler(self: Box<Self>) {
         let ws = self.address.root();
         let ws = ws.r();
@@ -568,6 +574,8 @@ struct MessageReceivedTask {
 }
 
 impl Runnable for MessageReceivedTask {
+    fn name(&self) -> &'static str { "MessageReceivedTask" }
+
     #[allow(unsafe_code)]
     fn handler(self: Box<Self>) {
         let ws = self.address.root();
@@ -585,14 +593,13 @@ impl Runnable for MessageReceivedTask {
         unsafe {
             let cx = global.r().get_cx();
             let _ac = JSAutoCompartment::new(cx, ws.reflector().get_jsobject().get());
-            let mut message = RootedValue::new(cx, UndefinedValue());
+            rooted!(in(cx) let mut message = UndefinedValue());
             match self.message {
                 MessageData::Text(text) => text.to_jsval(cx, message.handle_mut()),
                 MessageData::Binary(data) => {
                     match ws.binary_type.get() {
                         BinaryType::Blob => {
-                            let slice = DataSlice::from_bytes(data);
-                            let blob = Blob::new(global.r(), BlobImpl::new_from_slice(slice), "");
+                            let blob = Blob::new(global.r(), BlobImpl::new_from_bytes(data), "".to_owned());
                             blob.to_jsval(cx, message.handle_mut());
                         }
                         BinaryType::Arraybuffer => {

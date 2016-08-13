@@ -11,18 +11,17 @@ use display_list::{DisplayItem, DisplayList, DisplayListTraversal};
 use display_list::{LayerInfo, StackingContext, StackingContextType};
 use euclid::Matrix4D;
 use euclid::point::Point2D;
-use euclid::rect::Rect;
+use euclid::rect::{Rect, TypedRect};
 use euclid::size::Size2D;
 use font_cache_thread::FontCacheThread;
 use font_context::FontContext;
-use gfx_traits::StackingContextId;
-use gfx_traits::{Epoch, FrameTreeId, LayerId, LayerKind, LayerProperties, PaintListener};
-use ipc_channel::ipc::IpcSender;
+use gfx_traits::{ChromeToPaintMsg, Epoch, LayerId, LayerKind, LayerProperties};
+use gfx_traits::{PaintListener, PaintRequest, StackingContextId};
 use layers::layers::{BufferRequest, LayerBuffer, LayerBufferSet};
 use layers::platform::surface::{NativeDisplay, NativeSurface};
-use msg::constellation_msg::{PanicMsg, PipelineId};
+use msg::constellation_msg::PipelineId;
 use paint_context::PaintContext;
-use profile_traits::mem::{self, ReportsChan};
+use profile_traits::mem;
 use profile_traits::time;
 use rand::{self, Rng};
 use std::borrow::ToOwned;
@@ -325,14 +324,6 @@ impl LayerCreator {
     }
 }
 
-pub struct PaintRequest {
-    pub buffer_requests: Vec<BufferRequest>,
-    pub scale: f32,
-    pub layer_id: LayerId,
-    pub epoch: Epoch,
-    pub layer_kind: LayerKind,
-}
-
 pub enum Msg {
     FromLayout(LayoutToPaintMsg),
     FromChrome(ChromeToPaintMsg),
@@ -341,14 +332,6 @@ pub enum Msg {
 #[derive(Deserialize, Serialize)]
 pub enum LayoutToPaintMsg {
     PaintInit(Epoch, Arc<DisplayList>),
-    Exit,
-}
-
-pub enum ChromeToPaintMsg {
-    Paint(Vec<PaintRequest>, FrameTreeId),
-    PaintPermissionGranted,
-    PaintPermissionRevoked,
-    CollectReports(ReportsChan),
     Exit,
 }
 
@@ -393,13 +376,13 @@ impl<C> PaintThread<C> where C: PaintListener + Send + 'static {
                   layout_to_paint_port: Receiver<LayoutToPaintMsg>,
                   chrome_to_paint_port: Receiver<ChromeToPaintMsg>,
                   mut compositor: C,
-                  panic_chan: IpcSender<PanicMsg>,
                   font_cache_thread: FontCacheThread,
                   time_profiler_chan: time::ProfilerChan,
                   mem_profiler_chan: mem::ProfilerChan) {
-        thread::spawn_named_with_send_on_panic(format!("PaintThread {:?}", id),
-                                               thread_state::PAINT,
-                                               move || {
+        thread::spawn_named(format!("PaintThread {:?}", id), move || {
+            thread_state::initialize(thread_state::PAINT);
+            PipelineId::install(id);
+
             let native_display = compositor.native_display();
             let worker_threads = WorkerThreadProxy::spawn(native_display,
                                                           font_cache_thread,
@@ -428,7 +411,7 @@ impl<C> PaintThread<C> where C: PaintListener + Send + 'static {
             for worker_thread in &mut paint_thread.worker_threads {
                 worker_thread.exit()
             }
-        }, Some(id), panic_chan);
+        });
     }
 
     #[allow(unsafe_code)]
@@ -441,9 +424,9 @@ impl<C> PaintThread<C> where C: PaintListener + Send + 'static {
                 let chrome_to_paint = &self.chrome_to_paint_port;
                 select! {
                     msg = layout_to_paint.recv() =>
-                        Msg::FromLayout(msg.unwrap()),
+                        Msg::FromLayout(msg.expect("expected message from layout")),
                     msg = chrome_to_paint.recv() =>
-                        Msg::FromChrome(msg.unwrap())
+                        Msg::FromChrome(msg.expect("expected message from chrome"))
                 }
             };
 
@@ -583,6 +566,12 @@ impl WorkerThreadProxy {
              font_cache_thread: FontCacheThread,
              time_profiler_chan: time::ProfilerChan)
              -> Vec<WorkerThreadProxy> {
+        // Don't make any paint threads if we're using WebRender. They're just a waste of
+        // resources.
+        if opts::get().use_webrender {
+            return vec![]
+        }
+
         let thread_count = opts::get().paint_threads;
         (0..thread_count).map(|_| {
             let (from_worker_sender, from_worker_receiver) = channel();
@@ -695,11 +684,12 @@ impl WorkerThread {
             let mut paint_context = PaintContext {
                 draw_target: draw_target.clone(),
                 font_context: &mut self.font_context,
-                page_rect: Rect::from_untyped(&tile.page_rect),
-                screen_rect: Rect::from_untyped(&tile.screen_rect),
+                page_rect: TypedRect::from_untyped(&tile.page_rect.translate(&paint_layer.display_list_origin)),
+                screen_rect: TypedRect::from_untyped(&tile.screen_rect),
                 clip_rect: None,
                 transient_clip: None,
                 layer_kind: layer_kind,
+                subpixel_offset: Point2D::zero(),
             };
 
             // Apply the translation to paint the tile we want.

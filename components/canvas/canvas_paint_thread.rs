@@ -17,9 +17,7 @@ use ipc_channel::ipc::{self, IpcSender};
 use num_traits::ToPrimitive;
 use std::borrow::ToOwned;
 use std::mem;
-use util::opts;
 use util::thread::spawn_named;
-use util::vec::byte_swap;
 use webrender_traits;
 
 impl<'a> CanvasPaintThread<'a> {
@@ -31,7 +29,7 @@ impl<'a> CanvasPaintThread<'a> {
         let canvas_rect = Rect::new(Point2D::new(0i32, 0i32), canvas_size);
         let src_read_rect = canvas_rect.intersection(&read_rect).unwrap_or(Rect::zero());
 
-        let mut image_data = Vec::new();
+        let mut image_data = vec![];
         if src_read_rect.is_empty() || canvas_size.width <= 0 && canvas_size.height <= 0 {
           return image_data;
         }
@@ -79,8 +77,8 @@ struct CanvasPaintState<'a> {
 }
 
 impl<'a> CanvasPaintState<'a> {
-    fn new() -> CanvasPaintState<'a> {
-        let antialias = if opts::get().enable_canvas_antialiasing {
+    fn new(antialias: bool) -> CanvasPaintState<'a> {
+        let antialias = if antialias {
             AntialiasMode::Default
         } else {
             AntialiasMode::None
@@ -102,7 +100,8 @@ impl<'a> CanvasPaintState<'a> {
 
 impl<'a> CanvasPaintThread<'a> {
     fn new(size: Size2D<i32>,
-           webrender_api_sender: Option<webrender_traits::RenderApiSender>) -> CanvasPaintThread<'a> {
+           webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+           antialias: bool) -> CanvasPaintThread<'a> {
         let draw_target = CanvasPaintThread::create(size);
         let path_builder = draw_target.create_path_builder();
         let webrender_api = webrender_api_sender.map(|wr| wr.create_api());
@@ -110,8 +109,8 @@ impl<'a> CanvasPaintThread<'a> {
         CanvasPaintThread {
             drawtarget: draw_target,
             path_builder: path_builder,
-            state: CanvasPaintState::new(),
-            saved_states: Vec::new(),
+            state: CanvasPaintState::new(antialias),
+            saved_states: vec![],
             webrender_api: webrender_api,
             webrender_image_key: webrender_image_key,
         }
@@ -120,11 +119,12 @@ impl<'a> CanvasPaintThread<'a> {
     /// Creates a new `CanvasPaintThread` and returns an `IpcSender` to
     /// communicate with it.
     pub fn start(size: Size2D<i32>,
-                 webrender_api_sender: Option<webrender_traits::RenderApiSender>)
+                 webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+                 antialias: bool)
                  -> IpcSender<CanvasMsg> {
         let (sender, receiver) = ipc::channel::<CanvasMsg>().unwrap();
         spawn_named("CanvasThread".to_owned(), move || {
-            let mut painter = CanvasPaintThread::new(size, webrender_api_sender);
+            let mut painter = CanvasPaintThread::new(size, webrender_api_sender, antialias);
             loop {
                 let msg = receiver.recv();
                 match msg.unwrap() {
@@ -147,6 +147,12 @@ impl<'a> CanvasPaintThread<'a> {
                             }
                             Canvas2dMsg::DrawImageSelf(image_size, dest_rect, source_rect, smoothing_enabled) => {
                                 painter.draw_image_self(image_size, dest_rect, source_rect, smoothing_enabled)
+                            }
+                            Canvas2dMsg::DrawImageInOther(
+                                renderer, image_size, dest_rect, source_rect, smoothing, sender
+                            ) => {
+                                painter.draw_image_in_other(
+                                    renderer, image_size, dest_rect, source_rect, smoothing, sender)
                             }
                             Canvas2dMsg::MoveTo(ref point) => painter.move_to(point),
                             Canvas2dMsg::LineTo(ref point) => painter.line_to(point),
@@ -371,6 +377,26 @@ impl<'a> CanvasPaintThread<'a> {
         }
     }
 
+    fn draw_image_in_other(&self,
+                           renderer: IpcSender<CanvasMsg>,
+                           image_size: Size2D<f64>,
+                           dest_rect: Rect<f64>,
+                           source_rect: Rect<f64>,
+                           smoothing_enabled: bool,
+                           sender: IpcSender<()>) {
+        let mut image_data = self.read_pixels(source_rect.to_i32(), image_size);
+        // TODO: avoid double byte_swap.
+        byte_swap(&mut image_data);
+
+        let msg = CanvasMsg::Canvas2d(Canvas2dMsg::DrawImage(
+            image_data, source_rect.size, dest_rect, source_rect, smoothing_enabled));
+        renderer.send(msg).unwrap();
+        // We acknowledge to the caller here that the data was sent to the
+        // other canvas so that if JS immediately afterwards try to get the
+        // pixels of the other one, it won't retrieve the other values.
+        sender.send(()).unwrap();
+    }
+
     fn move_to(&self, point: &Point2D<AzFloat>) {
         self.path_builder.move_to(*point)
     }
@@ -494,7 +520,7 @@ impl<'a> CanvasPaintThread<'a> {
     }
 
     fn set_transform(&mut self, transform: &Matrix2D<f32>) {
-        self.state.transform = *transform;
+        self.state.transform = transform.clone();
         self.drawtarget.set_transform(transform)
     }
 
@@ -518,13 +544,11 @@ impl<'a> CanvasPaintThread<'a> {
         self.drawtarget.snapshot().get_data_surface().with_data(|element| {
             if let Some(ref webrender_api) = self.webrender_api {
                 let size = self.drawtarget.get_size();
-                let mut bytes = Vec::new();
-                bytes.extend_from_slice(element);
                 webrender_api.update_image(self.webrender_image_key.unwrap(),
                                            size.width as u32,
                                            size.height as u32,
                                            webrender_traits::ImageFormat::RGBA8,
-                                           bytes);
+                                           element.into());
             }
 
             let pixel_data = CanvasPixelData {
@@ -680,6 +704,14 @@ impl<'a> CanvasPaintThread<'a> {
                                                                self.state.shadow_offset_y as AzFloat),
                                                  (self.state.shadow_blur / 2.0f64) as AzFloat,
                                                  self.state.draw_options.composition);
+    }
+}
+
+impl<'a> Drop for CanvasPaintThread<'a> {
+    fn drop(&mut self) {
+        if let Some(ref mut wr) = self.webrender_api {
+            wr.delete_image(self.webrender_image_key.unwrap());
+        }
     }
 }
 

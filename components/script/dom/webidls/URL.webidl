@@ -3,8 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://url.spec.whatwg.org/#url
-[Constructor(USVString url, optional USVString base)/*,
- Exposed=(Window,Worker)*/]
+[Constructor(USVString url, optional USVString base), Exposed=(Window,Worker)]
 interface URL {
   static USVString domainToASCII(USVString domain);
   static USVString domainToUnicode(USVString domain);
@@ -22,6 +21,11 @@ interface URL {
            attribute USVString search;
   readonly attribute URLSearchParams searchParams;
            attribute USVString hash;
+
+  // https://w3c.github.io/FileAPI/#creating-revoking
+  static DOMString createObjectURL(Blob blob);
+  // static DOMString createFor(Blob blob);
+  static void revokeObjectURL(DOMString url);
 
   // This is only doing as well as gecko right now.
   // https://github.com/servo/servo/issues/7590 is on file for

@@ -18,38 +18,39 @@ use gfx::display_list::{BLUR_INFLATION_FACTOR, OpaqueNode};
 use gfx::text::glyph::ByteIndex;
 use gfx::text::text_run::{TextRun, TextRunSlice};
 use gfx_traits::{FragmentType, LayerId, LayerType, StackingContextId};
-use incremental::{RECONSTRUCT_FLOW, RestyleDamage};
 use inline::{FIRST_FRAGMENT_OF_ELEMENT, InlineFragmentContext, InlineFragmentNodeInfo};
 use inline::{InlineMetrics, LAST_FRAGMENT_OF_ELEMENT};
 use ipc_channel::ipc::IpcSender;
 #[cfg(debug_assertions)]
 use layout_debug;
-use model::{self, IntrinsicISizes, IntrinsicISizesContribution, MaybeAuto, specified};
+use model::{self, Direction, IntrinsicISizes, IntrinsicISizesContribution, MaybeAuto, specified};
 use msg::constellation_msg::PipelineId;
 use net_traits::image::base::{Image, ImageMetadata};
 use net_traits::image_cache_thread::{ImageOrMetadataAvailable, UsePlaceholder};
 use range::*;
 use rustc_serialize::{Encodable, Encoder};
-use script::layout_interface::HTMLCanvasData;
+use script_layout_interface::HTMLCanvasData;
+use script_layout_interface::restyle_damage::{RECONSTRUCT_FLOW, RestyleDamage};
+use script_layout_interface::wrapper_traits::{PseudoElementType, ThreadSafeLayoutElement, ThreadSafeLayoutNode};
 use std::borrow::ToOwned;
 use std::cmp::{max, min};
 use std::collections::LinkedList;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use style::arc_ptr_eq;
 use style::computed_values::content::ContentItem;
-use style::computed_values::{border_collapse, clear, display, mix_blend_mode, overflow_wrap};
-use style::computed_values::{overflow_x, position, text_decoration, transform_style};
-use style::computed_values::{vertical_align, white_space, word_break, z_index};
+use style::computed_values::{border_collapse, box_sizing, clear, color, display, mix_blend_mode};
+use style::computed_values::{overflow_wrap, overflow_x, position, text_decoration};
+use style::computed_values::{transform_style, vertical_align, white_space, word_break, z_index};
 use style::dom::TRestyleDamage;
 use style::logical_geometry::{LogicalMargin, LogicalRect, LogicalSize, WritingMode};
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
+use style::str::char_is_whitespace;
 use style::values::computed::LengthOrPercentageOrNone;
 use style::values::computed::{LengthOrPercentage, LengthOrPercentageOrAuto};
 use text;
 use text::TextRunScanner;
 use url::Url;
-use util;
-use wrapper::{PseudoElementType, ThreadSafeLayoutElement, ThreadSafeLayoutNode};
 
 /// Fragments (`struct Fragment`) are the leaves of the layout tree. They cannot position
 /// themselves. In general, fragments do not have a simple correspondence with CSS fragments in the
@@ -488,6 +489,7 @@ impl ReplacedImageFragmentInfo {
                                           style: &ServoComputedValues,
                                           noncontent_inline_size: Au,
                                           container_inline_size: Au,
+                                          container_block_size: Option<Au>,
                                           fragment_inline_size: Au,
                                           fragment_block_size: Au)
                                           -> Au {
@@ -515,7 +517,7 @@ impl ReplacedImageFragmentInfo {
 
                     let specified_height = ReplacedImageFragmentInfo::style_length(
                         style_block_size,
-                        None);
+                        container_block_size);
                     let specified_height = match specified_height {
                         MaybeAuto::Auto => intrinsic_height,
                         MaybeAuto::Specified(h) => h,
@@ -880,16 +882,23 @@ impl Fragment {
         let size = LogicalSize::new(self.style.writing_mode,
                                     split.inline_size,
                                     self.border_box.size.block);
-        let flags = match self.specific {
-            SpecificFragmentInfo::ScannedText(ref info) => info.flags,
-            _ => ScannedTextFlags::empty()
+        // Preserve the insertion point if it is in this fragment's range or it is at line end.
+        let (flags, insertion_point) = match self.specific {
+            SpecificFragmentInfo::ScannedText(ref info) => {
+                match info.insertion_point {
+                    Some(index) if split.range.contains(index) => (info.flags, info.insertion_point),
+                    Some(index) if index == ByteIndex(text_run.text.chars().count() as isize - 1) &&
+                        index == split.range.end() => (info.flags, info.insertion_point),
+                    _ => (info.flags, None)
+                }
+            },
+            _ => (ScannedTextFlags::empty(), None)
         };
-        // FIXME(pcwalton): This should modify the insertion point as necessary.
         let info = box ScannedTextFragmentInfo::new(
             text_run,
             split.range,
             size,
-            None,
+            insertion_point,
             flags);
         self.transform(size, SpecificFragmentInfo::ScannedText(info))
     }
@@ -1100,6 +1109,20 @@ impl Fragment {
         }
     }
 
+    /// Returns the border width in given direction if this fragment has property
+    /// 'box-sizing: border-box'. The `border_padding` field should have been initialized.
+    pub fn box_sizing_boundary(&self, direction: Direction) -> Au {
+        match (self.style().get_position().box_sizing, direction) {
+            (box_sizing::T::border_box, Direction::Inline) => {
+                self.border_padding.inline_start_end()
+            }
+            (box_sizing::T::border_box, Direction::Block) => {
+                self.border_padding.block_start_end()
+            }
+            _ => Au(0)
+        }
+    }
+
     /// Computes the margins in the inline direction from the containing block inline-size and the
     /// style. After this call, the inline direction of the `margin` field will be correct.
     ///
@@ -1301,6 +1324,10 @@ impl Fragment {
 
     pub fn white_space(&self) -> white_space::T {
         self.style().get_inheritedtext().white_space
+    }
+
+    pub fn color(&self) -> color::T {
+        self.style().get_color().color
     }
 
     /// Returns the text decoration of this fragment, according to the style of the nearest ancestor
@@ -1535,12 +1562,11 @@ impl Fragment {
     /// information are both optional due to the possibility of them being whitespace.
     pub fn calculate_split_position(&self, max_inline_size: Au, starts_line: bool)
                                     -> Option<SplitResult> {
-        let text_fragment_info =
-            if let SpecificFragmentInfo::ScannedText(ref text_fragment_info) = self.specific {
-                text_fragment_info
-            } else {
-                return None
-            };
+        let text_fragment_info = match self.specific {
+            SpecificFragmentInfo::ScannedText(ref text_fragment_info)
+                => text_fragment_info,
+            _   => return None,
+        };
 
         let mut flags = SplitOptions::empty();
         if starts_line {
@@ -1612,14 +1638,13 @@ impl Fragment {
             flags: SplitOptions)
             -> Option<SplitResult>
             where I: Iterator<Item=TextRunSlice<'a>> {
-        let text_fragment_info =
-            if let SpecificFragmentInfo::ScannedText(ref text_fragment_info) = self.specific {
-                text_fragment_info
-            } else {
-                return None
-            };
+        let text_fragment_info = match self.specific {
+            SpecificFragmentInfo::ScannedText(ref text_fragment_info)
+                => text_fragment_info,
+            _   => return None,
+        };
 
-        let mut remaining_inline_size = max_inline_size;
+        let mut remaining_inline_size = max_inline_size - self.border_padding.inline_start_end();
         let mut inline_start_range = Range::new(text_fragment_info.range.begin(), ByteIndex(0));
         let mut inline_end_range = None;
         let mut overflowing = false;
@@ -1655,7 +1680,8 @@ impl Fragment {
             // see if we're going to overflow the line. If so, perform a best-effort split.
             let mut remaining_range = slice.text_run_range();
             let split_is_empty = inline_start_range.is_empty() &&
-                    !self.requires_line_break_afterward_if_wrapping_on_newlines();
+                    !(self.requires_line_break_afterward_if_wrapping_on_newlines() &&
+                      !self.white_space().allow_wrap());
             if split_is_empty {
                 // We're going to overflow the line.
                 overflowing = true;
@@ -1727,7 +1753,7 @@ impl Fragment {
         match (&mut self.specific, &next_fragment.specific) {
             (&mut SpecificFragmentInfo::ScannedText(ref mut this_info),
              &SpecificFragmentInfo::ScannedText(ref other_info)) => {
-                debug_assert!(util::arc_ptr_eq(&this_info.run, &other_info.run));
+                debug_assert!(arc_ptr_eq(&this_info.run, &other_info.run));
                 this_info.range_end_including_stripped_whitespace =
                     other_info.range_end_including_stripped_whitespace;
                 if other_info.requires_line_break_afterward_if_wrapping_on_newlines() {
@@ -1767,7 +1793,9 @@ impl Fragment {
 
     /// Assigns replaced inline-size, padding, and margins for this fragment only if it is replaced
     /// content per CSS 2.1 § 10.3.2.
-    pub fn assign_replaced_inline_size_if_necessary(&mut self, container_inline_size: Au) {
+    pub fn assign_replaced_inline_size_if_necessary(&mut self,
+                                                    container_inline_size: Au,
+                                                    container_block_size: Option<Au>) {
         match self.specific {
             SpecificFragmentInfo::Generic |
             SpecificFragmentInfo::GeneratedContent(_) |
@@ -1833,6 +1861,7 @@ impl Fragment {
                                        .calculate_replaced_inline_size(style,
                                                                        noncontent_inline_size,
                                                                        container_inline_size,
+                                                                       container_block_size,
                                                                        fragment_inline_size,
                                                                        fragment_block_size);
             }
@@ -1844,6 +1873,7 @@ impl Fragment {
                                         .calculate_replaced_inline_size(style,
                                                                         noncontent_inline_size,
                                                                         container_inline_size,
+                                                                        container_block_size,
                                                                         fragment_inline_size,
                                                                         fragment_block_size);
             }
@@ -1967,16 +1997,16 @@ impl Fragment {
                     ascent: computed_block_size + self.border_padding.block_start,
                 }
             }
-            SpecificFragmentInfo::ScannedText(ref text_fragment) => {
+            SpecificFragmentInfo::ScannedText(ref info) => {
                 // Fragments with no glyphs don't contribute any inline metrics.
                 // TODO: Filter out these fragments during flow construction?
-                if text_fragment.content_size.inline == Au(0) {
+                if info.insertion_point.is_none() && info.content_size.inline == Au(0) {
                     return InlineMetrics::new(Au(0), Au(0), Au(0));
                 }
                 // See CSS 2.1 § 10.8.1.
                 let line_height = self.calculate_line_height(layout_context);
                 let font_derived_metrics =
-                    InlineMetrics::from_font_metrics(&text_fragment.run.font_metrics, line_height);
+                    InlineMetrics::from_font_metrics(&info.run.font_metrics, line_height);
                 InlineMetrics {
                     block_size_above_baseline: font_derived_metrics.block_size_above_baseline +
                                                    self.border_padding.block_start,
@@ -1989,9 +2019,10 @@ impl Fragment {
                 // See CSS 2.1 § 10.8.1.
                 let flow = &info.flow_ref;
                 let block_flow = flow.as_block();
+                let is_auto = self.style.get_position().height == LengthOrPercentageOrAuto::Auto;
                 let baseline_offset = match flow.baseline_offset_of_last_line_box_in_flow() {
-                    Some(baseline_offset) => baseline_offset,
-                    None => block_flow.fragment.border_box.size.block,
+                    Some(baseline_offset) if is_auto => baseline_offset,
+                    _ => block_flow.fragment.border_box.size.block,
                 };
                 let start_margin = block_flow.fragment.margin.block_start;
                 let end_margin = block_flow.fragment.margin.block_end;
@@ -2037,7 +2068,8 @@ impl Fragment {
                 // FIXME: Should probably use a whitelist of styles that can safely differ (#3165)
                 if self.style().get_font() != other.style().get_font() ||
                         self.text_decoration() != other.text_decoration() ||
-                        self.white_space() != other.white_space() {
+                        self.white_space() != other.white_space() ||
+                        self.color() != other.color() {
                     return false
                 }
 
@@ -2348,7 +2380,7 @@ impl Fragment {
         match self.specific {
             SpecificFragmentInfo::ScannedText(ref mut scanned_text_fragment_info) => {
                 let leading_whitespace_byte_count = scanned_text_fragment_info.text()
-                    .find(|c| !util::str::char_is_whitespace(c))
+                    .find(|c| !char_is_whitespace(c))
                     .unwrap_or(scanned_text_fragment_info.text().len());
 
                 let whitespace_len = ByteIndex(leading_whitespace_byte_count as isize);
@@ -2372,7 +2404,7 @@ impl Fragment {
                         new_text_string.push(character);
                         continue
                     }
-                    if util::str::char_is_whitespace(character) {
+                    if char_is_whitespace(character) {
                         modified = true;
                         continue
                     }
@@ -2403,7 +2435,7 @@ impl Fragment {
             SpecificFragmentInfo::ScannedText(ref mut scanned_text_fragment_info) => {
                 let mut trailing_whitespace_start_byte = 0;
                 for (i, c) in scanned_text_fragment_info.text().char_indices().rev() {
-                    if !util::str::char_is_whitespace(c) {
+                    if !char_is_whitespace(c) {
                         trailing_whitespace_start_byte = i + c.len_utf8();
                         break;
                     }
@@ -2430,7 +2462,7 @@ impl Fragment {
                         trailing_bidi_control_characters_to_retain.push(character);
                         continue
                     }
-                    if util::str::char_is_whitespace(character) {
+                    if char_is_whitespace(character) {
                         modified = true;
                         continue
                     }

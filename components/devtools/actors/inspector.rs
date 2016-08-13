@@ -106,7 +106,7 @@ impl Actor for NodeActor {
                       stream: &mut TcpStream) -> Result<ActorMessageStatus, ()> {
         Ok(match msg_type {
             "modifyAttributes" => {
-                let target = msg.get("to").unwrap().as_string().unwrap();
+                let target = msg.get("to").unwrap().as_str().unwrap();
                 let mods = msg.get("modifications").unwrap().as_array().unwrap();
                 let modifications = mods.iter().map(|json_mod| {
                     serde_json::from_str(&serde_json::to_string(json_mod).unwrap()).unwrap()
@@ -290,7 +290,7 @@ impl Actor for WalkerActor {
             "documentElement" => {
                 let (tx, rx) = ipc::channel().unwrap();
                 self.script_chan.send(GetDocumentElement(self.pipeline, tx)).unwrap();
-                let doc_elem_info = rx.recv().unwrap();
+                let doc_elem_info = try!(rx.recv().unwrap().ok_or(()));
                 let node = doc_elem_info.encode(registry, true, self.script_chan.clone(), self.pipeline);
 
                 let msg = DocumentElementReply {
@@ -310,13 +310,13 @@ impl Actor for WalkerActor {
             }
 
             "children" => {
-                let target = msg.get("node").unwrap().as_string().unwrap();
+                let target = msg.get("node").unwrap().as_str().unwrap();
                 let (tx, rx) = ipc::channel().unwrap();
                 self.script_chan.send(GetChildren(self.pipeline,
                                                   registry.actor_to_script(target.to_owned()),
                                                   tx))
                                 .unwrap();
-                let children = rx.recv().unwrap();
+                let children = try!(rx.recv().unwrap().ok_or(()));
 
                 let msg = ChildrenReply {
                     hasFirst: true,
@@ -478,7 +478,7 @@ impl Actor for PageStyleActor {
 
             //TODO: query script for box layout properties of node (msg.node)
             "getLayout" => {
-                let target = msg.get("node").unwrap().as_string().unwrap();
+                let target = msg.get("node").unwrap().as_str().unwrap();
                 let (tx, rx) = ipc::channel().unwrap();
                 self.script_chan.send(GetLayout(self.pipeline,
                                       registry.actor_to_script(target.to_owned()),
@@ -490,10 +490,10 @@ impl Actor for PageStyleActor {
                     borderTopWidth, borderRightWidth, borderBottomWidth, borderLeftWidth,
                     paddingTop, paddingRight, paddingBottom, paddingLeft,
                     width, height,
-                } = rx.recv().unwrap();
+                } = try!(rx.recv().unwrap().ok_or(()));
 
                 let auto_margins = msg.get("autoMargins")
-                    .and_then(&Value::as_boolean).unwrap_or(false);
+                    .and_then(&Value::as_bool).unwrap_or(false);
 
                 // http://mxr.mozilla.org/mozilla-central/source/toolkit/devtools/server/actors/styles.js
                 let msg = GetLayoutReply {
@@ -564,7 +564,7 @@ impl Actor for InspectorActor {
 
                 let (tx, rx) = ipc::channel().unwrap();
                 self.script_chan.send(GetRootNode(self.pipeline, tx)).unwrap();
-                let root_info = rx.recv().unwrap();
+                let root_info = try!(rx.recv().unwrap().ok_or(()));
 
                 let node = root_info.encode(registry, false, self.script_chan.clone(), self.pipeline);
 

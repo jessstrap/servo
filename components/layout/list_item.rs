@@ -19,12 +19,13 @@ use fragment::{CoordinateSystem, Fragment, FragmentBorderBoxIterator, GeneratedC
 use generated_content;
 use gfx::display_list::StackingContext;
 use gfx_traits::StackingContextId;
-use incremental::RESOLVE_GENERATED_CONTENT;
 use inline::InlineMetrics;
+use script_layout_interface::restyle_damage::RESOLVE_GENERATED_CONTENT;
 use std::sync::Arc;
 use style::computed_values::{list_style_type, position};
+use style::context::SharedStyleContext;
 use style::logical_geometry::LogicalSize;
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
 use text;
 
 /// A block with the CSS `display` property equal to `list-item`.
@@ -81,14 +82,15 @@ impl Flow for ListItemFlow {
         self.block_flow.bubble_inline_sizes()
     }
 
-    fn assign_inline_sizes(&mut self, layout_context: &LayoutContext) {
-        self.block_flow.assign_inline_sizes(layout_context);
+    fn assign_inline_sizes(&mut self, shared_context: &SharedStyleContext) {
+        self.block_flow.assign_inline_sizes(shared_context);
 
         let mut marker_inline_start = self.block_flow.fragment.border_box.start.i;
 
         for marker in self.marker_fragments.iter_mut().rev() {
             let containing_block_inline_size = self.block_flow.base.block_container_inline_size;
-            marker.assign_replaced_inline_size_if_necessary(containing_block_inline_size);
+            let container_block_size = self.block_flow.explicit_block_containing_size(shared_context);
+            marker.assign_replaced_inline_size_if_necessary(containing_block_inline_size, container_block_size);
 
             // Do this now. There's no need to do this in bubble-widths, since markers do not
             // contribute to the inline size of this flow.
@@ -126,8 +128,8 @@ impl Flow for ListItemFlow {
         self.block_flow.compute_absolute_position(layout_context)
     }
 
-    fn place_float_if_applicable<'a>(&mut self, layout_context: &'a LayoutContext<'a>) {
-        self.block_flow.place_float_if_applicable(layout_context)
+    fn place_float_if_applicable<'a>(&mut self) {
+        self.block_flow.place_float_if_applicable()
     }
 
     fn is_absolute_containing_block(&self) -> bool {

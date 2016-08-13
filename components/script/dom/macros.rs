@@ -47,6 +47,22 @@ macro_rules! make_limited_int_setter(
 );
 
 #[macro_export]
+macro_rules! make_int_setter(
+    ($attr:ident, $htmlname:tt, $default:expr) => (
+        fn $attr(&self, value: i32) {
+            use dom::bindings::inheritance::Castable;
+            use dom::element::Element;
+
+            let element = self.upcast::<Element>();
+            element.set_int_attribute(&atom!($htmlname), value)
+        }
+    );
+    ($attr:ident, $htmlname:tt) => {
+        make_int_setter!($attr, $htmlname, 0);
+    };
+);
+
+#[macro_export]
 macro_rules! make_int_getter(
     ($attr:ident, $htmlname:tt, $default:expr) => (
         fn $attr(&self) -> i32 {
@@ -503,3 +519,18 @@ macro_rules! document_and_element_event_handlers(
         event_handler!(paste, GetOnpaste, SetOnpaste);
     )
 );
+
+#[macro_export]
+macro_rules! rooted_vec {
+    (let mut $name:ident) => {
+        rooted_vec!(let mut $name <- ::std::iter::empty())
+    };
+    (let $name:ident <- $iter:expr) => {
+        let mut __root = $crate::dom::bindings::trace::RootableVec::new_unrooted();
+        let $name = $crate::dom::bindings::trace::RootedVec::new(&mut __root, $iter);
+    };
+    (let mut $name:ident <- $iter:expr) => {
+        let mut __root = $crate::dom::bindings::trace::RootableVec::new_unrooted();
+        let mut $name = $crate::dom::bindings::trace::RootedVec::new(&mut __root, $iter);
+    }
+}

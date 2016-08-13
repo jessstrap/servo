@@ -21,6 +21,7 @@ extern crate device;
 extern crate devtools_traits;
 extern crate flate2;
 extern crate hyper;
+extern crate hyper_serde;
 extern crate immeta;
 extern crate ipc_channel;
 #[macro_use] extern crate lazy_static;
@@ -38,7 +39,7 @@ extern crate rand;
 extern crate rustc_serialize;
 extern crate threadpool;
 extern crate time;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 extern crate tinyfiledialogs;
 extern crate unicase;
 extern crate url;

@@ -13,16 +13,20 @@ def to_rust_ident(name):
 
 
 def to_camel_case(ident):
-    return re.sub("_([a-z])", lambda m: m.group(1).upper(), ident.strip("_").capitalize())
+    return re.sub("(^|_|-)([a-z])", lambda m: m.group(2).upper(), ident.strip("_").strip("-"))
 
 
 class Keyword(object):
     def __init__(self, name, values, gecko_constant_prefix=None,
+                 gecko_enum_prefix=None,
                  extra_gecko_values=None, extra_servo_values=None):
         self.name = name
         self.values = values.split()
+        if gecko_constant_prefix and gecko_enum_prefix:
+            raise TypeError("Only one of gecko_constant_prefix and gecko_enum_prefix can be specified")
         self.gecko_constant_prefix = gecko_constant_prefix or \
             "NS_STYLE_" + self.name.upper().replace("-", "_")
+        self.gecko_enum_prefix = gecko_enum_prefix
         self.extra_gecko_values = (extra_gecko_values or "").split()
         self.extra_servo_values = (extra_servo_values or "").split()
 
@@ -41,13 +45,27 @@ class Keyword(object):
             raise Exception("Bad product: " + product)
 
     def gecko_constant(self, value):
-        return self.gecko_constant_prefix + "_" + value.replace("-moz-", "").replace("-", "_").upper()
+        if self.gecko_enum_prefix:
+            if value == "none":
+                return self.gecko_enum_prefix + "::None_"
+            else:
+                parts = value.replace("-moz-", "").split("-")
+                parts = [p.title() for p in parts]
+                return self.gecko_enum_prefix + "::" + "".join(parts)
+        else:
+            return self.gecko_constant_prefix + "_" + value.replace("-moz-", "").replace("-", "_").upper()
+
+    def needs_cast(self):
+        return self.gecko_enum_prefix is None
+
+    def maybe_cast(self, type_str):
+        return "as " + type_str if self.needs_cast() else ""
 
 
 class Longhand(object):
-    def __init__(self, style_struct, name, derived_from=None, keyword=None,
+    def __init__(self, style_struct, name, animatable=None, derived_from=None, keyword=None,
                  predefined_type=None, custom_cascade=False, experimental=False, internal=False,
-                 need_clone=False, gecko_ffi_name=None):
+                 need_clone=False, need_index=False, gecko_ffi_name=None, depend_on_viewport_size=False):
         self.name = name
         self.keyword = keyword
         self.predefined_type = predefined_type
@@ -57,9 +75,26 @@ class Longhand(object):
         self.experimental = ("layout.%s.enabled" % name) if experimental else None
         self.custom_cascade = custom_cascade
         self.internal = internal
-        self.need_clone = need_clone
+        self.need_index = need_index
         self.gecko_ffi_name = gecko_ffi_name or "m" + self.camel_case
+        self.depend_on_viewport_size = depend_on_viewport_size
         self.derived_from = (derived_from or "").split()
+
+        # This is done like this since just a plain bool argument seemed like
+        # really random.
+        if animatable is None:
+            raise TypeError("animatable should be specified for " + name + ")")
+        if isinstance(animatable, bool):
+            self.animatable = animatable
+        else:
+            assert animatable == "True" or animatable == "False"
+            self.animatable = animatable == "True"
+
+        # NB: Animatable implies clone because a property animation requires a
+        # copy of the computed value.
+        #
+        # See components/style/helpers/animated_properties.mako.rs.
+        self.need_clone = need_clone or self.animatable
 
 
 class Shorthand(object):
@@ -100,11 +135,10 @@ class Method(object):
 
 class StyleStruct(object):
     def __init__(self, name, inherited, gecko_name=None, additional_methods=None):
-        self.servo_struct_name = "Servo" + name
         self.gecko_struct_name = "Gecko" + name
-        self.trait_name = name
-        self.trait_name_lower = name.lower()
-        self.ident = to_rust_ident(self.trait_name_lower)
+        self.name = name
+        self.name_lower = name.lower()
+        self.ident = to_rust_ident(self.name_lower)
         self.longhands = []
         self.inherited = inherited
         self.gecko_name = gecko_name or name

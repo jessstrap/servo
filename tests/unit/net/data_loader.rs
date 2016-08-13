@@ -3,12 +3,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 extern crate hyper;
+extern crate hyper_serde;
 
+use hyper_serde::Serde;
 use ipc_channel::ipc;
 use msg::constellation_msg::{PipelineId, ReferrerPolicy};
 use net_traits::LoadConsumer::Channel;
 use net_traits::ProgressMsg::{Payload, Done};
-use net_traits::{LoadData, LoadContext, NetworkError, LoadOrigin, RequestSource};
+use net_traits::{LoadData, LoadContext, NetworkError, LoadOrigin};
 use self::hyper::header::ContentType;
 use self::hyper::mime::{Mime, TopLevel, SubLevel, Attr, Value};
 use url::Url;
@@ -22,9 +24,6 @@ impl LoadOrigin for DataLoadTest {
     fn referrer_policy(&self) -> Option<ReferrerPolicy> {
         None
     }
-    fn request_source(&self) -> RequestSource {
-        RequestSource::None
-    }
     fn pipeline_id(&self) -> Option<PipelineId> {
         None
     }
@@ -36,18 +35,19 @@ fn assert_parse(url:          &'static str,
                 charset:      Option<String>,
                 data:         Option<Vec<u8>>) {
     use net::data_loader::load;
-    use net::mime_classifier::MIMEClassifier;
+    use net::mime_classifier::MimeClassifier;
     use net::resource_thread::CancellationListener;
     use std::sync::Arc;
 
     let (start_chan, start_port) = ipc::channel().unwrap();
-    let classifier = Arc::new(MIMEClassifier::new());
+    let classifier = Arc::new(MimeClassifier::new());
     load(LoadData::new(LoadContext::Browsing, Url::parse(url).unwrap(), &DataLoadTest),
          Channel(start_chan),
          classifier, CancellationListener::new(None));
 
     let response = start_port.recv().unwrap();
-    assert_eq!(&response.metadata.content_type, &content_type);
+    assert_eq!(&response.metadata.content_type.map(Serde::into_inner),
+               &content_type);
     assert_eq!(&response.metadata.charset,      &charset);
 
     let progress = response.progress_port.recv().unwrap();

@@ -11,13 +11,13 @@ use dom::bindings::codegen::Bindings::BluetoothRemoteGATTDescriptorBinding;
 use dom::bindings::codegen::Bindings::BluetoothRemoteGATTDescriptorBinding::BluetoothRemoteGATTDescriptorMethods;
 use dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding::BluetoothRemoteGATTServerMethods;
 use dom::bindings::codegen::Bindings::BluetoothRemoteGATTServiceBinding::BluetoothRemoteGATTServiceMethods;
-use dom::bindings::error::Error::{Network, Security, Type};
+use dom::bindings::error::Error::{self, InvalidModification, Network, Security};
 use dom::bindings::error::{Fallible, ErrorResult};
 use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, MutHeap, Root};
 use dom::bindings::reflector::{Reflectable, Reflector, reflect_dom_object};
 use dom::bindings::str::{ByteString, DOMString};
-use dom::bluetoothremotegattcharacteristic::BluetoothRemoteGATTCharacteristic;
+use dom::bluetoothremotegattcharacteristic::{BluetoothRemoteGATTCharacteristic, MAXIMUM_ATTRIBUTE_LENGTH};
 use ipc_channel::ipc::{self, IpcSender};
 use net_traits::bluetooth_thread::BluetoothMethodMsg;
 
@@ -63,7 +63,7 @@ impl BluetoothRemoteGATTDescriptor {
         global_ref.as_window().bluetooth_thread()
     }
 
-    pub fn get_instance_id(&self) -> String {
+    fn get_instance_id(&self) -> String {
         self.instanceID.clone()
     }
 }
@@ -101,7 +101,7 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
                 ByteString::new(val)
             },
             Err(error) => {
-                return Err(Type(error))
+                return Err(Error::from(error))
             },
         };
         *self.value.borrow_mut() = Some(value.clone());
@@ -113,6 +113,12 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
         if uuid_is_blacklisted(self.uuid.as_ref(), Blacklist::Writes) {
             return Err(Security)
         }
+        if value.len() > MAXIMUM_ATTRIBUTE_LENGTH {
+            return Err(InvalidModification)
+        }
+        if !self.Characteristic().Service().Device().Gatt().Connected() {
+            return Err(Network)
+        }
         let (sender, receiver) = ipc::channel().unwrap();
         self.get_bluetooth_thread().send(
             BluetoothMethodMsg::WriteValue(self.get_instance_id(), value, sender)).unwrap();
@@ -120,7 +126,7 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
         match result {
             Ok(_) => Ok(()),
             Err(error) => {
-                Err(Type(error))
+                Err(Error::from(error))
             },
         }
     }

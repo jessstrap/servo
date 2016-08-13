@@ -10,9 +10,10 @@
                          additional_methods=[Method("outline_has_nonzero_width", "bool")]) %>
 
 // TODO(pcwalton): `invert`
-${helpers.predefined_type("outline-color", "CSSColor", "::cssparser::Color::CurrentColor")}
+${helpers.predefined_type("outline-color", "CSSColor", "::cssparser::Color::CurrentColor",
+                          animatable=True)}
 
-<%helpers:longhand name="outline-style" need_clone="True">
+<%helpers:longhand name="outline-style" need_clone="True" animatable="False">
     pub use values::specified::BorderStyle as SpecifiedValue;
     pub fn get_initial_value() -> SpecifiedValue { SpecifiedValue::none }
     pub mod computed_value {
@@ -26,11 +27,12 @@ ${helpers.predefined_type("outline-color", "CSSColor", "::cssparser::Color::Curr
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="outline-width">
+<%helpers:longhand name="outline-width" animatable="True">
     use app_units::Au;
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
     impl ToCss for SpecifiedValue {
         fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
@@ -41,7 +43,16 @@ ${helpers.predefined_type("outline-color", "CSSColor", "::cssparser::Color::Curr
     pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
         specified::parse_border_width(input).map(SpecifiedValue)
     }
-    #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            let &SpecifiedValue(length) = self;
+            length.has_viewport_percentage()
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue(pub specified::Length);
     pub mod computed_value {
         use app_units::Au;
@@ -52,17 +63,19 @@ ${helpers.predefined_type("outline-color", "CSSColor", "::cssparser::Color::Curr
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             self.0.to_computed_value(context)
         }
     }
 </%helpers:longhand>
 
 // The -moz-outline-radius-* properties are non-standard and not on a standards track.
+// TODO: Should they animate?
 % for corner in ["topleft", "topright", "bottomright", "bottomleft"]:
     ${helpers.predefined_type("-moz-outline-radius-" + corner, "BorderRadiusSize",
                               "computed::BorderRadiusSize::zero()",
-                              "parse", products="gecko")}
+                              "parse", products="gecko",
+                              animatable=False)}
 % endfor
 
-${helpers.predefined_type("outline-offset", "Length", "Au(0)")}
+${helpers.predefined_type("outline-offset", "Length", "Au(0)", animatable=True)}

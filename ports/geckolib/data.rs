@@ -2,22 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use euclid::Size2D;
 use euclid::size::TypedSize2D;
 use gecko_bindings::bindings::RawServoStyleSet;
 use num_cpus;
-use selector_impl::{Stylist, Stylesheet, SharedStyleContext};
 use std::cmp;
 use std::collections::HashMap;
+use std::env;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use style::animation::Animation;
+use style::context::SharedStyleContext;
 use style::dom::OpaqueNode;
 use style::media_queries::{Device, MediaType};
 use style::parallel::WorkQueueData;
-use util::geometry::ViewportPx;
+use style::selector_matching::Stylist;
+use style::stylesheets::Stylesheet;
+use style::workqueue::WorkQueue;
+use style_traits::ViewportPx;
 use util::thread_state;
-use util::workqueue::WorkQueue;
 
 pub struct PerDocumentStyleData {
     /// Rule processor.
@@ -37,16 +39,26 @@ pub struct PerDocumentStyleData {
 
     // FIXME(bholley): This shouldn't be per-document.
     pub work_queue: WorkQueue<SharedStyleContext, WorkQueueData>,
+
+    pub num_threads: usize,
+}
+
+lazy_static! {
+    pub static ref NUM_THREADS: usize = {
+        match env::var("STYLO_THREADS").map(|s| s.parse::<usize>().expect("invalid STYLO_THREADS")) {
+            Ok(num) => num,
+            _ => cmp::max(num_cpus::get() * 3 / 4, 1),
+        }
+    };
 }
 
 impl PerDocumentStyleData {
     pub fn new() -> PerDocumentStyleData {
         // FIXME(bholley): Real window size.
-        let window_size: TypedSize2D<ViewportPx, f32> = Size2D::typed(800.0, 600.0);
+        let window_size: TypedSize2D<f32, ViewportPx> = TypedSize2D::new(800.0, 600.0);
         let device = Device::new(MediaType::Screen, window_size);
 
         let (new_anims_sender, new_anims_receiver) = channel();
-        let num_threads = cmp::max(num_cpus::get() * 3 / 4, 1);
 
         PerDocumentStyleData {
             stylist: Arc::new(Stylist::new(device)),
@@ -56,12 +68,24 @@ impl PerDocumentStyleData {
             new_animations_receiver: new_anims_receiver,
             running_animations: Arc::new(RwLock::new(HashMap::new())),
             expired_animations: Arc::new(RwLock::new(HashMap::new())),
-            work_queue: WorkQueue::new("StyleWorker", thread_state::LAYOUT, num_threads),
+            work_queue: WorkQueue::new("StyleWorker", thread_state::LAYOUT, *NUM_THREADS),
+            num_threads: *NUM_THREADS,
         }
     }
 
     pub fn borrow_mut_from_raw<'a>(data: *mut RawServoStyleSet) -> &'a mut Self {
         unsafe { &mut *(data as *mut PerDocumentStyleData) }
+    }
+
+    pub fn flush_stylesheets(&mut self) {
+        // The stylist wants to be flushed if either the stylesheets change or the
+        // device dimensions change. When we add support for media queries, we'll
+        // need to detect the latter case and trigger a flush as well.
+        if self.stylesheets_changed {
+            let _ = Arc::get_mut(&mut self.stylist).unwrap()
+                                                   .update(&self.stylesheets, true);
+            self.stylesheets_changed = false;
+        }
     }
 }
 

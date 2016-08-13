@@ -12,6 +12,8 @@ matrix:
       dist: trusty
       script:
          - ./mach build -d --verbose
+         - ./mach build-geckolib
+         - ./mach test-geckolib
          - ./mach test-unit
          - ./mach test-compiletest
          - bash etc/ci/check_no_unwrap.sh
@@ -35,6 +37,9 @@ matrix:
             - xorg-dev
             - ccache
             - libdbus-glib-1-dev
+            - libavformat-dev
+            - libavcodec-dev
+            - libavutil-dev
 
 branches:
   only:

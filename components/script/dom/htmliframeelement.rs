@@ -11,20 +11,22 @@ use dom::bindings::codegen::Bindings::BrowserElementBinding::BrowserElementLocat
 use dom::bindings::codegen::Bindings::BrowserElementBinding::BrowserElementOpenTabEventDetail;
 use dom::bindings::codegen::Bindings::BrowserElementBinding::BrowserElementOpenWindowEventDetail;
 use dom::bindings::codegen::Bindings::BrowserElementBinding::BrowserElementSecurityChangeDetail;
+use dom::bindings::codegen::Bindings::BrowserElementBinding::BrowserElementVisibilityChangeEventDetail;
 use dom::bindings::codegen::Bindings::BrowserElementBinding::BrowserShowModalPromptEventDetail;
 use dom::bindings::codegen::Bindings::HTMLIFrameElementBinding;
 use dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::conversions::ToJSValConvertible;
-use dom::bindings::error::{Error, ErrorResult};
+use dom::bindings::error::{Error, ErrorResult, Fallible};
 use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{Root, LayoutJS};
+use dom::bindings::js::{JS, MutNullableHeap, Root, LayoutJS};
 use dom::bindings::reflector::Reflectable;
 use dom::bindings::str::DOMString;
 use dom::browsingcontext::BrowsingContext;
 use dom::customevent::CustomEvent;
 use dom::document::Document;
+use dom::domtokenlist::DOMTokenList;
 use dom::element::{AttributeMutation, Element, RawLayoutElementHelpers};
 use dom::event::Event;
 use dom::eventtarget::EventTarget;
@@ -34,11 +36,11 @@ use dom::urlhelper::UrlHelper;
 use dom::virtualmethods::VirtualMethods;
 use dom::window::{ReflowReason, Window};
 use ipc_channel::ipc;
-use js::jsapi::{JSAutoCompartment, RootedValue, JSContext, MutableHandleValue};
+use js::jsapi::{JSAutoCompartment, JSContext, MutableHandleValue};
 use js::jsval::{UndefinedValue, NullValue};
-use layout_interface::ReflowQueryType;
-use msg::constellation_msg::{FrameType, LoadData, NavigationDirection, PipelineId, SubpageId};
+use msg::constellation_msg::{FrameType, LoadData, TraversalDirection, PipelineId, SubpageId};
 use net_traits::response::HttpsState;
+use script_layout_interface::message::ReflowQueryType;
 use script_traits::IFrameSandboxState::{IFrameSandboxed, IFrameUnsandboxed};
 use script_traits::{IFrameLoadInfo, MozBrowserEvent, ScriptMsg as ConstellationMsg};
 use std::cell::Cell;
@@ -46,17 +48,20 @@ use string_cache::Atom;
 use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 use style::context::ReflowGoal;
 use url::Url;
-use util::prefs::mozbrowser_enabled;
+use util::prefs::PREFS;
+use util::servo_version;
 
-#[derive(HeapSizeOf)]
-enum SandboxAllowance {
-    AllowNothing = 0x00,
-    AllowSameOrigin = 0x01,
-    AllowTopNavigation = 0x02,
-    AllowForms = 0x04,
-    AllowScripts = 0x08,
-    AllowPointerLock = 0x10,
-    AllowPopups = 0x20
+bitflags! {
+    #[derive(JSTraceable, HeapSizeOf)]
+    flags SandboxAllowance: u8 {
+        const ALLOW_NOTHING = 0x00,
+        const ALLOW_SAME_ORIGIN = 0x01,
+        const ALLOW_TOP_NAVIGATION = 0x02,
+        const ALLOW_FORMS = 0x04,
+        const ALLOW_SCRIPTS = 0x08,
+        const ALLOW_POINTER_LOCK = 0x10,
+        const ALLOW_POPUPS = 0x20
+    }
 }
 
 #[dom_struct]
@@ -64,13 +69,15 @@ pub struct HTMLIFrameElement {
     htmlelement: HTMLElement,
     pipeline_id: Cell<Option<PipelineId>>,
     subpage_id: Cell<Option<SubpageId>>,
-    sandbox: Cell<Option<u8>>,
+    sandbox: MutNullableHeap<JS<DOMTokenList>>,
+    sandbox_allowance: Cell<Option<SandboxAllowance>>,
     load_blocker: DOMRefCell<Option<LoadBlocker>>,
+    visibility: Cell<bool>,
 }
 
 impl HTMLIFrameElement {
     pub fn is_sandboxed(&self) -> bool {
-        self.sandbox.get().is_some()
+        self.sandbox_allowance.get().is_some()
     }
 
     /// <https://html.spec.whatwg.org/multipage/#otherwise-steps-for-iframe-or-frame-elements>,
@@ -138,7 +145,7 @@ impl HTMLIFrameElement {
               .send(ConstellationMsg::ScriptLoadedURLInIFrame(load_info))
               .unwrap();
 
-        if mozbrowser_enabled() {
+        if PREFS.is_mozbrowser_enabled() {
             // https://developer.mozilla.org/en-US/docs/Web/Events/mozbrowserloadstart
             self.dispatch_mozbrowser_event(MozBrowserEvent::LoadStart);
         }
@@ -154,25 +161,11 @@ impl HTMLIFrameElement {
 
     #[allow(unsafe_code)]
     pub fn dispatch_mozbrowser_event(&self, event: MozBrowserEvent) {
-        // TODO(gw): Support mozbrowser event types that have detail which is not a string.
-        // See https://developer.mozilla.org/en-US/docs/Web/API/Using_the_Browser_API
-        // for a list of mozbrowser events.
-        assert!(mozbrowser_enabled());
+        assert!(PREFS.is_mozbrowser_enabled());
 
         if self.Mozbrowser() {
             let window = window_from_node(self);
-            let custom_event = unsafe {
-                let cx = window.get_cx();
-                let _ac = JSAutoCompartment::new(cx, window.reflector().get_jsobject().get());
-                let mut detail = RootedValue::new(cx, UndefinedValue());
-                let event_name = Atom::from(event.name());
-                self.build_mozbrowser_event_detail(event, cx, detail.handle_mut());
-                CustomEvent::new(GlobalRef::Window(window.r()),
-                                 event_name,
-                                 true,
-                                 true,
-                                 detail.handle())
-            };
+            let custom_event = build_mozbrowser_custom_event(&window, event);
             custom_event.upcast::<Event>().fire(self.upcast());
         }
     }
@@ -194,8 +187,10 @@ impl HTMLIFrameElement {
             htmlelement: HTMLElement::new_inherited(localName, prefix, document),
             pipeline_id: Cell::new(None),
             subpage_id: Cell::new(None),
-            sandbox: Cell::new(None),
+            sandbox: Default::default(),
+            sandbox_allowance: Cell::new(None),
             load_blocker: DOMRefCell::new(None),
+            visibility: Cell::new(true),
         }
     }
 
@@ -203,8 +198,9 @@ impl HTMLIFrameElement {
     pub fn new(localName: Atom,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLIFrameElement> {
-        let element = HTMLIFrameElement::new_inherited(localName, prefix, document);
-        Node::reflect_node(box element, document, HTMLIFrameElementBinding::Wrap)
+        Node::reflect_node(box HTMLIFrameElement::new_inherited(localName, prefix, document),
+                           document,
+                           HTMLIFrameElementBinding::Wrap)
     }
 
     #[inline]
@@ -219,6 +215,26 @@ impl HTMLIFrameElement {
 
     pub fn pipeline(&self) -> Option<PipelineId> {
         self.pipeline_id.get()
+    }
+
+    pub fn change_visibility_status(&self, visibility: bool) {
+        if self.visibility.get() != visibility {
+            self.visibility.set(visibility);
+
+            // Visibility changes are only exposed to Mozbrowser iframes
+            if self.Mozbrowser() {
+                self.dispatch_mozbrowser_event(MozBrowserEvent::VisibilityChange(visibility));
+            }
+        }
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        if let Some(pipeline_id) = self.pipeline_id.get() {
+            let window = window_from_node(self);
+            let window = window.r();
+            let msg = ConstellationMsg::SetVisible(pipeline_id, visible);
+            window.constellation_chan().send(msg).unwrap();
+        }
     }
 
     /// https://html.spec.whatwg.org/multipage/#iframe-load-event-steps steps 1-4
@@ -306,99 +322,108 @@ impl HTMLIFrameElementLayoutMethods for LayoutJS<HTMLIFrameElement> {
     }
 }
 
-pub trait MozBrowserEventDetailBuilder {
-    #[allow(unsafe_code)]
-    unsafe fn build_mozbrowser_event_detail(&self,
-                                            event: MozBrowserEvent,
-                                            cx: *mut JSContext,
-                                            rval: MutableHandleValue);
+#[allow(unsafe_code)]
+pub fn build_mozbrowser_custom_event(window: &Window, event: MozBrowserEvent) -> Root<CustomEvent> {
+    // TODO(gw): Support mozbrowser event types that have detail which is not a string.
+    // See https://developer.mozilla.org/en-US/docs/Web/API/Using_the_Browser_API
+    // for a list of mozbrowser events.
+    let cx = window.get_cx();
+    let _ac = JSAutoCompartment::new(cx, window.reflector().get_jsobject().get());
+    rooted!(in(cx) let mut detail = UndefinedValue());
+    let event_name = Atom::from(event.name());
+    unsafe { build_mozbrowser_event_detail(event, cx, detail.handle_mut()); }
+    CustomEvent::new(GlobalRef::Window(window),
+                     event_name,
+                     true,
+                     true,
+                     detail.handle())
 }
 
-impl MozBrowserEventDetailBuilder for HTMLIFrameElement {
-    #[allow(unsafe_code)]
-    unsafe fn build_mozbrowser_event_detail(&self,
-                                            event: MozBrowserEvent,
-                                            cx: *mut JSContext,
-                                            rval: MutableHandleValue) {
-        match event {
-            MozBrowserEvent::AsyncScroll | MozBrowserEvent::Close | MozBrowserEvent::ContextMenu |
-            MozBrowserEvent::LoadEnd | MozBrowserEvent::LoadStart |
-            MozBrowserEvent::Connected | MozBrowserEvent::OpenSearch  |
-            MozBrowserEvent::UsernameAndPasswordRequired => {
-                rval.set(NullValue());
-            }
-            MozBrowserEvent::Error(error_type, description, report) => {
-                BrowserElementErrorEventDetail {
-                    type_: Some(DOMString::from(error_type.name())),
-                    description: description.map(DOMString::from),
-                    report: report.map(DOMString::from),
-                }.to_jsval(cx, rval);
-            },
-            MozBrowserEvent::SecurityChange(https_state) => {
-                BrowserElementSecurityChangeDetail {
-                    // https://developer.mozilla.org/en-US/docs/Web/Events/mozbrowsersecuritychange
-                    state: Some(DOMString::from(match https_state {
-                        HttpsState::Modern => "secure",
-                        HttpsState::Deprecated => "broken",
-                        HttpsState::None => "insecure",
-                    }.to_owned())),
-                    // FIXME - Not supported yet:
-                    trackingContent: None,
-                    mixedContent: None,
-                    trackingState: None,
-                    extendedValidation: None,
-                    mixedState: None,
-                }.to_jsval(cx, rval);
-            }
-            MozBrowserEvent::TitleChange(ref string) => {
-                string.to_jsval(cx, rval);
-            }
-            MozBrowserEvent::LocationChange(uri, can_go_back, can_go_forward) => {
-                BrowserElementLocationChangeEventDetail {
-                    uri: Some(DOMString::from(uri)),
-                    canGoBack: Some(can_go_back),
-                    canGoForward: Some(can_go_forward),
-                }.to_jsval(cx, rval);
-            }
-            MozBrowserEvent::OpenTab(url) => {
-                BrowserElementOpenTabEventDetail {
-                    url: Some(DOMString::from(url)),
-                }.to_jsval(cx, rval);
-            }
-            MozBrowserEvent::OpenWindow(url, target, features) => {
-                BrowserElementOpenWindowEventDetail {
-                    url: Some(DOMString::from(url)),
-                    target: target.map(DOMString::from),
-                    features: features.map(DOMString::from),
-                }.to_jsval(cx, rval);
-            }
-            MozBrowserEvent::IconChange(rel, href, sizes) => {
-                BrowserElementIconChangeEventDetail {
-                    rel: Some(DOMString::from(rel)),
-                    href: Some(DOMString::from(href)),
-                    sizes: Some(DOMString::from(sizes)),
-                }.to_jsval(cx, rval);
-            }
-            MozBrowserEvent::ShowModalPrompt(prompt_type, title, message, return_value) => {
-                BrowserShowModalPromptEventDetail {
-                    promptType: Some(DOMString::from(prompt_type)),
-                    title: Some(DOMString::from(title)),
-                    message: Some(DOMString::from(message)),
-                    returnValue: Some(DOMString::from(return_value)),
-                }.to_jsval(cx, rval)
-            }
+#[allow(unsafe_code)]
+unsafe fn build_mozbrowser_event_detail(event: MozBrowserEvent,
+                                        cx: *mut JSContext,
+                                        rval: MutableHandleValue) {
+    match event {
+        MozBrowserEvent::AsyncScroll | MozBrowserEvent::Close | MozBrowserEvent::ContextMenu |
+        MozBrowserEvent::LoadEnd | MozBrowserEvent::LoadStart |
+        MozBrowserEvent::Connected | MozBrowserEvent::OpenSearch  |
+        MozBrowserEvent::UsernameAndPasswordRequired => {
+            rval.set(NullValue());
+        }
+        MozBrowserEvent::Error(error_type, description, report) => {
+            BrowserElementErrorEventDetail {
+                type_: Some(DOMString::from(error_type.name())),
+                description: Some(DOMString::from(description)),
+                report: Some(DOMString::from(report)),
+                version: Some(DOMString::from_string(servo_version().into())),
+            }.to_jsval(cx, rval);
+        },
+        MozBrowserEvent::SecurityChange(https_state) => {
+            BrowserElementSecurityChangeDetail {
+                // https://developer.mozilla.org/en-US/docs/Web/Events/mozbrowsersecuritychange
+                state: Some(DOMString::from(match https_state {
+                    HttpsState::Modern => "secure",
+                    HttpsState::Deprecated => "broken",
+                    HttpsState::None => "insecure",
+                }.to_owned())),
+                // FIXME - Not supported yet:
+                trackingContent: None,
+                mixedContent: None,
+                trackingState: None,
+                extendedValidation: None,
+                mixedState: None,
+            }.to_jsval(cx, rval);
+        }
+        MozBrowserEvent::TitleChange(ref string) => {
+            string.to_jsval(cx, rval);
+        }
+        MozBrowserEvent::LocationChange(url, can_go_back, can_go_forward) => {
+            BrowserElementLocationChangeEventDetail {
+                url: Some(DOMString::from(url)),
+                canGoBack: Some(can_go_back),
+                canGoForward: Some(can_go_forward),
+            }.to_jsval(cx, rval);
+        }
+        MozBrowserEvent::OpenTab(url) => {
+            BrowserElementOpenTabEventDetail {
+                url: Some(DOMString::from(url)),
+            }.to_jsval(cx, rval);
+        }
+        MozBrowserEvent::OpenWindow(url, target, features) => {
+            BrowserElementOpenWindowEventDetail {
+                url: Some(DOMString::from(url)),
+                target: target.map(DOMString::from),
+                features: features.map(DOMString::from),
+            }.to_jsval(cx, rval);
+        }
+        MozBrowserEvent::IconChange(rel, href, sizes) => {
+            BrowserElementIconChangeEventDetail {
+                rel: Some(DOMString::from(rel)),
+                href: Some(DOMString::from(href)),
+                sizes: Some(DOMString::from(sizes)),
+            }.to_jsval(cx, rval);
+        }
+        MozBrowserEvent::ShowModalPrompt(prompt_type, title, message, return_value) => {
+            BrowserShowModalPromptEventDetail {
+                promptType: Some(DOMString::from(prompt_type)),
+                title: Some(DOMString::from(title)),
+                message: Some(DOMString::from(message)),
+                returnValue: Some(DOMString::from(return_value)),
+            }.to_jsval(cx, rval)
+        }
+        MozBrowserEvent::VisibilityChange(visibility) => {
+            BrowserElementVisibilityChangeEventDetail {
+                visible: Some(visibility),
+            }.to_jsval(cx, rval);
         }
     }
 }
 
-pub fn Navigate(iframe: &HTMLIFrameElement, direction: NavigationDirection) -> ErrorResult {
+pub fn Navigate(iframe: &HTMLIFrameElement, direction: TraversalDirection) -> ErrorResult {
     if iframe.Mozbrowser() {
         if iframe.upcast::<Node>().is_in_doc() {
             let window = window_from_node(iframe);
-
-            let pipeline_info = Some((window.pipeline(),
-                                      iframe.subpage_id().unwrap()));
-            let msg = ConstellationMsg::Navigate(pipeline_info, direction);
+            let msg = ConstellationMsg::TraverseHistory(iframe.pipeline(), direction);
             window.constellation_chan().send(msg).unwrap();
         }
 
@@ -422,13 +447,8 @@ impl HTMLIFrameElementMethods for HTMLIFrameElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-iframe-sandbox
-    fn Sandbox(&self) -> DOMString {
-        self.upcast::<Element>().get_string_attribute(&atom!("sandbox"))
-    }
-
-    // https://html.spec.whatwg.org/multipage/#dom-iframe-sandbox
-    fn SetSandbox(&self, sandbox: DOMString) {
-        self.upcast::<Element>().set_tokenlist_attribute(&atom!("sandbox"), sandbox);
+    fn Sandbox(&self) -> Root<DOMTokenList> {
+        self.sandbox.or_init(|| DOMTokenList::new(self.upcast::<Element>(), &atom!("sandbox")))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-iframe-contentwindow
@@ -476,12 +496,12 @@ impl HTMLIFrameElementMethods for HTMLIFrameElement {
 
     // https://developer.mozilla.org/en-US/docs/Web/API/HTMLIFrameElement/goBack
     fn GoBack(&self) -> ErrorResult {
-        Navigate(self, NavigationDirection::Back(1))
+        Navigate(self, TraversalDirection::Back(1))
     }
 
     // https://developer.mozilla.org/en-US/docs/Web/API/HTMLIFrameElement/goForward
     fn GoForward(&self) -> ErrorResult {
-        Navigate(self, NavigationDirection::Forward(1))
+        Navigate(self, TraversalDirection::Forward(1))
     }
 
     // https://developer.mozilla.org/en-US/docs/Web/API/HTMLIFrameElement/reload
@@ -498,6 +518,30 @@ impl HTMLIFrameElementMethods for HTMLIFrameElement {
         }
     }
 
+    // https://developer.mozilla.org/en-US/docs/Web/API/HTMLIFrameElement/setVisible
+    fn SetVisible(&self, visible: bool) -> ErrorResult {
+        if self.Mozbrowser() {
+            self.set_visible(visible);
+            Ok(())
+        } else {
+            debug!("this frame is not mozbrowser: mozbrowser attribute missing, or not a top
+                level window, or mozbrowser preference not set (use --pref dom.mozbrowser.enabled)");
+            Err(Error::NotSupported)
+        }
+    }
+
+    // https://developer.mozilla.org/en-US/docs/Web/API/HTMLIFrameElement/getVisible
+    fn GetVisible(&self) -> Fallible<bool> {
+        if self.Mozbrowser() {
+            Ok(self.visibility.get())
+        } else {
+            debug!("this frame is not mozbrowser: mozbrowser attribute missing, or not a top
+                level window, or mozbrowser preference not set (use --pref dom.mozbrowser.enabled)");
+            Err(Error::NotSupported)
+        }
+    }
+
+
     // https://developer.mozilla.org/en-US/docs/Web/API/HTMLIFrameElement/stop
     fn Stop(&self) -> ErrorResult {
         Err(Error::NotSupported)
@@ -512,6 +556,21 @@ impl HTMLIFrameElementMethods for HTMLIFrameElement {
     make_getter!(Height, "height");
     // https://html.spec.whatwg.org/multipage/#dom-dim-height
     make_dimension_setter!(SetHeight, "height");
+
+    // check-tidy: no specs after this line
+    fn SetMozprivatebrowsing(&self, value: bool) {
+        let element = self.upcast::<Element>();
+        element.set_bool_attribute(&Atom::from("mozprivatebrowsing"), value);
+    }
+
+    fn Mozprivatebrowsing(&self) -> bool {
+        if window_from_node(self).is_mozbrowser() {
+            let element = self.upcast::<Element>();
+            element.has_attribute(&Atom::from("mozprivatebrowsing"))
+        } else {
+            false
+        }
+    }
 }
 
 impl VirtualMethods for HTMLIFrameElement {
@@ -523,18 +582,18 @@ impl VirtualMethods for HTMLIFrameElement {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
         match attr.local_name() {
             &atom!("sandbox") => {
-                self.sandbox.set(mutation.new_value(attr).map(|value| {
-                    let mut modes = SandboxAllowance::AllowNothing as u8;
+                self.sandbox_allowance.set(mutation.new_value(attr).map(|value| {
+                    let mut modes = ALLOW_NOTHING;
                     for token in value.as_tokens() {
                         modes |= match &*token.to_ascii_lowercase() {
-                            "allow-same-origin" => SandboxAllowance::AllowSameOrigin,
-                            "allow-forms" => SandboxAllowance::AllowForms,
-                            "allow-pointer-lock" => SandboxAllowance::AllowPointerLock,
-                            "allow-popups" => SandboxAllowance::AllowPopups,
-                            "allow-scripts" => SandboxAllowance::AllowScripts,
-                            "allow-top-navigation" => SandboxAllowance::AllowTopNavigation,
-                            _ => SandboxAllowance::AllowNothing
-                        } as u8;
+                            "allow-same-origin" => ALLOW_SAME_ORIGIN,
+                            "allow-forms" => ALLOW_FORMS,
+                            "allow-pointer-lock" => ALLOW_POINTER_LOCK,
+                            "allow-popups" => ALLOW_POPUPS,
+                            "allow-scripts" => ALLOW_SCRIPTS,
+                            "allow-top-navigation" => ALLOW_TOP_NAVIGATION,
+                            _ => ALLOW_NOTHING
+                        };
                     }
                     modes
                 }));

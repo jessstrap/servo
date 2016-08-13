@@ -15,7 +15,6 @@ extern crate app_units;
 
 extern crate azure;
 extern crate euclid;
-extern crate gfx;
 extern crate gfx_traits;
 extern crate gleam;
 extern crate image;
@@ -39,12 +38,12 @@ extern crate webrender_traits;
 pub use compositor_thread::CompositorProxy;
 pub use compositor::IOCompositor;
 use euclid::size::TypedSize2D;
-use gfx::paint_thread::ChromeToPaintMsg;
+use gfx_traits::ChromeToPaintMsg;
 use ipc_channel::ipc::IpcSender;
 use msg::constellation_msg::PipelineId;
 use script_traits::{ConstellationControlMsg, LayoutControlMsg};
 use std::sync::mpsc::Sender;
-use util::geometry::PagePx;
+use style_traits::PagePx;
 
 mod compositor;
 mod compositor_layer;
@@ -56,7 +55,7 @@ pub mod windowing;
 
 pub struct SendableFrameTree {
     pub pipeline: CompositionPipeline,
-    pub size: Option<TypedSize2D<PagePx, f32>>,
+    pub size: Option<TypedSize2D<f32, PagePx>>,
     pub children: Vec<SendableFrameTree>,
 }
 

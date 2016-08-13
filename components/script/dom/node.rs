@@ -5,7 +5,6 @@
 //! The core DOM types. Defines the basic DOM hierarchy as well as all the HTML elements.
 
 use app_units::Au;
-use core::nonzero::NonZero;
 use devtools_traits::NodeInfo;
 use document_loader::DocumentLoader;
 use dom::attr::Attr;
@@ -22,14 +21,13 @@ use dom::bindings::codegen::UnionTypes::NodeOrString;
 use dom::bindings::conversions::{self, DerivedFrom};
 use dom::bindings::error::{Error, ErrorResult, Fallible};
 use dom::bindings::global::GlobalRef;
-use dom::bindings::inheritance::{Castable, CharacterDataTypeId};
-use dom::bindings::inheritance::{EventTargetTypeId, NodeTypeId};
+use dom::bindings::inheritance::{Castable, CharacterDataTypeId, ElementTypeId};
+use dom::bindings::inheritance::{EventTargetTypeId, HTMLElementTypeId, NodeTypeId};
 use dom::bindings::js::Root;
 use dom::bindings::js::RootedReference;
 use dom::bindings::js::{JS, LayoutJS, MutNullableHeap};
 use dom::bindings::reflector::{Reflectable, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
-use dom::bindings::trace::RootedVec;
 use dom::bindings::xmlname::namespace_from_domstring;
 use dom::characterdata::{CharacterData, LayoutCharacterDataHelpers};
 use dom::document::{Document, DocumentSource, IsHTMLDocument};
@@ -38,7 +36,7 @@ use dom::documenttype::DocumentType;
 use dom::element::{Element, ElementCreator};
 use dom::eventtarget::EventTarget;
 use dom::htmlbodyelement::HTMLBodyElement;
-use dom::htmlcanvaselement::{LayoutHTMLCanvasElementHelpers, HTMLCanvasData};
+use dom::htmlcanvaselement::LayoutHTMLCanvasElementHelpers;
 use dom::htmlcollection::HTMLCollection;
 use dom::htmlelement::HTMLElement;
 use dom::htmliframeelement::{HTMLIFrameElement, HTMLIFrameElementLayoutMethods};
@@ -57,11 +55,13 @@ use euclid::size::Size2D;
 use heapsize::{HeapSizeOf, heap_size_of};
 use html5ever::tree_builder::QuirksMode;
 use js::jsapi::{JSContext, JSObject, JSRuntime};
-use layout_interface::Msg;
 use libc::{self, c_void, uintptr_t};
 use msg::constellation_msg::PipelineId;
 use parse::html::parse_html_fragment;
 use ref_slice::ref_slice;
+use script_layout_interface::message::Msg;
+use script_layout_interface::{HTMLCanvasData, OpaqueStyleAndLayoutData};
+use script_layout_interface::{LayoutNodeType, LayoutElementType, TrustedNodeAddress};
 use script_traits::UntrustedNodeAddress;
 use selectors::matching::matches;
 use selectors::parser::Selector;
@@ -74,6 +74,7 @@ use std::iter::{self, FilterMap, Peekable};
 use std::mem;
 use std::ops::Range;
 use string_cache::{Atom, Namespace, QualName};
+use style::dom::OpaqueNode;
 use style::selector_impl::ServoSelectorImpl;
 use url::Url;
 use util::thread_state;
@@ -158,7 +159,9 @@ bitflags! {
         const SEQUENTIALLY_FOCUSABLE = 0x20,
 
         /// Whether any ancestor is a fragmentation container
-        const CAN_BE_FRAGMENTED = 0x40
+        const CAN_BE_FRAGMENTED = 0x40,
+        #[doc = "Specifies whether this node needs to be dirted when viewport size changed."]
+        const DIRTY_ON_VIEWPORT_SIZE_CHANGE = 0x80
     }
 }
 
@@ -171,7 +174,7 @@ impl NodeFlags {
 impl Drop for Node {
     #[allow(unsafe_code)]
     fn drop(&mut self) {
-        self.style_and_layout_data.get().map(|d| d.dispose(self));
+        self.style_and_layout_data.get().map(|d| self.dispose(d));
     }
 }
 
@@ -184,29 +187,17 @@ enum SuppressObserver {
     Unsuppressed
 }
 
-#[derive(Copy, Clone, HeapSizeOf)]
-pub struct OpaqueStyleAndLayoutData {
-    #[ignore_heap_size_of = "TODO(#6910) Box value that should be counted but \
-                             the type lives in layout"]
-    pub ptr: NonZero<*mut ()>
-}
-
-#[allow(unsafe_code)]
-unsafe impl Send for OpaqueStyleAndLayoutData {}
-
-no_jsmanaged_fields!(OpaqueStyleAndLayoutData);
-
-impl OpaqueStyleAndLayoutData {
-    /// Sends the style and layout data, if any, back to the layout thread to be destroyed.
-    pub fn dispose(self, node: &Node) {
-        debug_assert!(thread_state::get().is_script());
-        let win = window_from_node(node);
-        node.style_and_layout_data.set(None);
-        win.layout_chan().send(Msg::ReapStyleAndLayoutData(self)).unwrap();
-    }
-}
-
 impl Node {
+    /// Sends the style and layout data, if any, back to the layout thread to be destroyed.
+    pub fn dispose(&self, data: OpaqueStyleAndLayoutData) {
+        debug_assert!(thread_state::get().is_script());
+        let win = window_from_node(self);
+        self.style_and_layout_data.set(None);
+        if win.layout_chan().send(Msg::ReapStyleAndLayoutData(data)).is_err() {
+            warn!("layout thread unreachable - leaking layout data");
+        }
+    }
+
     /// Adds a new child to the end of this node's list of children.
     ///
     /// Fails unless `new_child` is disconnected from the tree.
@@ -292,7 +283,7 @@ impl Node {
         for node in child.traverse_preorder() {
             node.set_flag(IS_IN_DOC, false);
             vtable_for(&&*node).unbind_from_tree(&context);
-            node.style_and_layout_data.get().map(|d| d.dispose(&node));
+            node.style_and_layout_data.get().map(|d| node.dispose(d));
         }
 
         self.owner_doc().content_and_heritage_changed(self, NodeDamage::OtherNodeDamage);
@@ -340,7 +331,7 @@ impl<'a> Iterator for QuerySelectorIterator {
 
 impl Node {
     pub fn teardown(&self) {
-        self.style_and_layout_data.get().map(|d| d.dispose(self));
+        self.style_and_layout_data.get().map(|d| self.dispose(d));
         for kid in self.children() {
             kid.teardown();
         }
@@ -488,19 +479,7 @@ impl Node {
             return
         }
 
-        // 2. Dirty descendants.
-        fn dirty_subtree(node: &Node) {
-            // Stop if this subtree is already dirty.
-            if node.is_dirty() { return }
-
-            node.set_flag(IS_DIRTY | HAS_DIRTY_DESCENDANTS, true);
-
-            for kid in node.children() {
-                dirty_subtree(kid.r());
-            }
-        }
-
-        dirty_subtree(self);
+        self.set_flag(IS_DIRTY, true);
 
         // 4. Dirty ancestors.
         for ancestor in self.ancestors() {
@@ -750,7 +729,10 @@ impl Node {
             Err(()) => Err(Error::Syntax),
             // Step 3.
             Ok(selectors) => {
-                Ok(QuerySelectorIterator::new(self.traverse_preorder(), selectors))
+                let mut descendants = self.traverse_preorder();
+                // Skip the root of the tree.
+                assert!(&*descendants.next().unwrap() == self);
+                Ok(QuerySelectorIterator::new(descendants, selectors))
             }
         }
     }
@@ -974,6 +956,7 @@ pub trait LayoutNodeHelpers {
     fn image_url(&self) -> Option<Url>;
     fn canvas_data(&self) -> Option<HTMLCanvasData>;
     fn iframe_pipeline_id(&self) -> PipelineId;
+    fn opaque(&self) -> OpaqueNode;
 }
 
 impl LayoutNodeHelpers for LayoutJS<Node> {
@@ -1113,6 +1096,13 @@ impl LayoutNodeHelpers for LayoutJS<Node> {
         let iframe_element = self.downcast::<HTMLIFrameElement>()
             .expect("not an iframe element!");
         iframe_element.pipeline_id().unwrap()
+    }
+
+    #[allow(unsafe_code)]
+    fn opaque(&self) -> OpaqueNode {
+        unsafe {
+            OpaqueNode(self.get_jsobject() as usize)
+        }
     }
 }
 
@@ -1297,6 +1287,31 @@ impl TreeIterator {
             depth: 0,
         }
     }
+
+    pub fn next_skipping_children(&mut self) -> Option<Root<Node>> {
+        let current = match self.current.take() {
+            None => return None,
+            Some(current) => current,
+        };
+
+        self.next_skipping_children_impl(current)
+    }
+
+    fn next_skipping_children_impl(&mut self, current: Root<Node>) -> Option<Root<Node>> {
+        for ancestor in current.inclusive_ancestors() {
+            if self.depth == 0 {
+                break;
+            }
+            if let Some(next_sibling) = ancestor.GetNextSibling() {
+                self.current = Some(next_sibling);
+                return Some(current);
+            }
+            self.depth -= 1;
+        }
+        debug_assert!(self.depth == 0);
+        self.current = None;
+        Some(current)
+    }
 }
 
 impl Iterator for TreeIterator {
@@ -1313,19 +1328,8 @@ impl Iterator for TreeIterator {
             self.depth += 1;
             return Some(current);
         };
-        for ancestor in current.inclusive_ancestors() {
-            if self.depth == 0 {
-                break;
-            }
-            if let Some(next_sibling) = ancestor.GetNextSibling() {
-                self.current = Some(next_sibling);
-                return Some(current);
-            }
-            self.depth -= 1;
-        }
-        debug_assert!(self.depth == 0);
-        self.current = None;
-        Some(current)
+
+        self.next_skipping_children_impl(current)
     }
 }
 
@@ -1561,7 +1565,7 @@ impl Node {
                 parent.ranges.increase_above(parent, index, count);
             }
         }
-        let mut new_nodes = RootedVec::new();
+        rooted_vec!(let mut new_nodes);
         let new_nodes = if let NodeTypeId::DocumentFragment = node.type_id() {
             // Step 3.
             new_nodes.extend(node.children().map(|kid| JS::from_ref(&*kid)));
@@ -1605,9 +1609,9 @@ impl Node {
             Node::adopt(node, &*parent.owner_doc());
         }
         // Step 2.
-        let removed_nodes = parent.children().collect::<RootedVec<_>>();
+        rooted_vec!(let removed_nodes <- parent.children());
         // Step 3.
-        let mut added_nodes = RootedVec::new();
+        rooted_vec!(let mut added_nodes);
         let added_nodes = if let Some(node) = node.as_ref() {
             if let NodeTypeId::DocumentFragment = node.type_id() {
                 added_nodes.extend(node.children().map(|child| JS::from_ref(&*child)));
@@ -1721,7 +1725,8 @@ impl Node {
                 let document = Document::new(window, None,
                                              Some((*document.url()).clone()),
                                              is_html_doc, None,
-                                             None, DocumentSource::NotFromParser, loader);
+                                             None, DocumentSource::NotFromParser, loader,
+                                             None, None);
                 Root::upcast::<Node>(document)
             },
             NodeTypeId::Element(..) => {
@@ -2151,7 +2156,7 @@ impl NodeMethods for Node {
         };
 
         // Step 12.
-        let mut nodes = RootedVec::new();
+        rooted_vec!(let mut nodes);
         let nodes = if node.type_id() == NodeTypeId::DocumentFragment {
             nodes.extend(node.children().map(|node| JS::from_ref(&*node)));
             nodes.r()
@@ -2413,17 +2418,6 @@ impl NodeMethods for Node {
     }
 }
 
-
-
-/// The address of a node known to be valid. These are sent from script to layout,
-/// and are also used in the HTML parser interface.
-
-#[derive(Clone, PartialEq, Eq, Copy)]
-pub struct TrustedNodeAddress(pub *const c_void);
-
-#[allow(unsafe_code)]
-unsafe impl Send for TrustedNodeAddress {}
-
 pub fn document_from_node<T: DerivedFrom<Node> + Reflectable>(derived: &T) -> Root<Document> {
     derived.upcast().owner_doc()
 }
@@ -2645,6 +2639,59 @@ impl UniqueId {
                 *ptr = Some(box Uuid::new_v4());
             }
             &(&*ptr).as_ref().unwrap()
+        }
+    }
+}
+
+impl Into<LayoutNodeType> for NodeTypeId {
+    #[inline(always)]
+    fn into(self) -> LayoutNodeType {
+        match self {
+            NodeTypeId::CharacterData(CharacterDataTypeId::Comment) =>
+                LayoutNodeType::Comment,
+            NodeTypeId::Document(..) =>
+                LayoutNodeType::Document,
+            NodeTypeId::DocumentFragment =>
+                LayoutNodeType::DocumentFragment,
+            NodeTypeId::DocumentType =>
+                LayoutNodeType::DocumentType,
+            NodeTypeId::Element(e) =>
+                LayoutNodeType::Element(e.into()),
+            NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) =>
+                LayoutNodeType::ProcessingInstruction,
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text) =>
+                LayoutNodeType::Text,
+        }
+    }
+}
+
+impl Into<LayoutElementType> for ElementTypeId {
+    #[inline(always)]
+    fn into(self) -> LayoutElementType {
+        match self {
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLCanvasElement) =>
+                LayoutElementType::HTMLCanvasElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLIFrameElement) =>
+                LayoutElementType::HTMLIFrameElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLImageElement) =>
+                LayoutElementType::HTMLImageElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLInputElement) =>
+                LayoutElementType::HTMLInputElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLObjectElement) =>
+                LayoutElementType::HTMLObjectElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableCellElement(_)) =>
+                LayoutElementType::HTMLTableCellElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableColElement) =>
+                LayoutElementType::HTMLTableColElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableElement) =>
+                LayoutElementType::HTMLTableElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableRowElement) =>
+                LayoutElementType::HTMLTableRowElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableSectionElement) =>
+                LayoutElementType::HTMLTableSectionElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTextAreaElement) =>
+                LayoutElementType::HTMLTextAreaElement,
+            _ => LayoutElementType::Element,
         }
     }
 }

@@ -15,27 +15,35 @@
 //!
 //! [glutin]: https://github.com/tomaka/glutin
 
-#![feature(start)]
+#![feature(start, core_intrinsics)]
 
 #[cfg(target_os = "android")]
 #[macro_use]
 extern crate android_glue;
-extern crate env_logger;
+#[cfg(not(target_os = "android"))]
+extern crate backtrace;
 // The window backed by glutin
 extern crate glutin_app as app;
 #[cfg(target_os = "android")]
 extern crate libc;
-#[cfg(target_os = "android")]
 #[macro_use]
 extern crate log;
 // The Servo engine
 extern crate servo;
+#[cfg(not(target_os = "android"))]
+#[macro_use]
+extern crate sig;
 
+use backtrace::Backtrace;
 use servo::Browser;
 use servo::compositing::windowing::WindowEvent;
 use servo::util::opts::{self, ArgumentParsingResult};
-use servo::util::panicking::initiate_panic_hook;
+use servo::util::servo_version;
+use std::env;
+use std::panic;
+use std::process;
 use std::rc::Rc;
+use std::thread;
 
 pub mod platform {
     #[cfg(target_os = "macos")]
@@ -48,7 +56,36 @@ pub mod platform {
     pub fn deinit() {}
 }
 
+#[cfg(not(target_os = "android"))]
+fn install_crash_handler() {
+    use backtrace::Backtrace;
+    use sig::ffi::Sig;
+    use std::intrinsics::abort;
+    use std::thread;
+
+    fn handler(_sig: i32) {
+        let name = thread::current().name()
+                                    .map(|n| format!(" for thread \"{}\"", n))
+                                    .unwrap_or("".to_owned());
+        println!("Stack trace{}\n{:?}", name, Backtrace::new());
+        unsafe {
+            abort();
+        }
+    }
+
+    signal!(Sig::SEGV, handler); // handle segfaults
+    signal!(Sig::ILL, handler); // handle stack overflow and unsupported CPUs
+    signal!(Sig::IOT, handler); // handle double panics
+    signal!(Sig::BUS, handler); // handle invalid memory access
+}
+
+#[cfg(target_os = "android")]
+fn install_crash_handler() {
+}
+
 fn main() {
+    install_crash_handler();
+
     // Parse the command line options and store them globally
     let opts_result = opts::from_cmdline_args(&*args());
 
@@ -62,13 +99,40 @@ fn main() {
         None
     };
 
-    initiate_panic_hook();
-    env_logger::init().unwrap();
+    // TODO: once log-panics is released, can this be replaced by
+    // log_panics::init()?
+    panic::set_hook(Box::new(|info| {
+        warn!("Panic hook called.");
+        let msg = match info.payload().downcast_ref::<&'static str>() {
+            Some(s) => *s,
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => &**s,
+                None => "Box<Any>",
+            },
+        };
+        let current_thread = thread::current();
+        let name = current_thread.name().unwrap_or("<unnamed>");
+        if let Some(location) = info.location() {
+            println!("{} (thread {}, at {}:{})", msg, name, location.file(), location.line());
+        } else {
+            println!("{} (thread {})", msg, name);
+        }
+        if env::var("RUST_BACKTRACE").is_ok() {
+            println!("{:?}", Backtrace::new());
+        }
+
+        error!("{}", msg);
+    }));
 
     setup_logging();
 
     if let Some(token) = content_process_token {
         return servo::run_content_process(token)
+    }
+
+    if opts::get().is_printing_version {
+        println!("{}", servo_version());
+        process::exit(0);
     }
 
     let window = app::create_window(None);
@@ -78,6 +142,8 @@ fn main() {
     let mut browser = BrowserWrapper {
         browser: Browser::new(window.clone()),
     };
+
+    browser.browser.setup_logging();
 
     register_glutin_resize_handler(&window, &mut browser);
 

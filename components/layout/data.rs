@@ -3,8 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use construct::ConstructionResult;
-use incremental::RestyleDamage;
-use style::servo::PrivateStyleData;
+use script_layout_interface::restyle_damage::RestyleDamage;
+use style::data::PrivateStyleData;
 
 /// Data that layout associates with a node.
 pub struct PrivateLayoutData {

@@ -21,24 +21,26 @@ use gfx::display_list::{OpaqueNode, StackingContext};
 use gfx::font::FontMetrics;
 use gfx::font_context::FontContext;
 use gfx_traits::StackingContextId;
-use incremental::{BUBBLE_ISIZES, REFLOW, REFLOW_OUT_OF_FLOW, REPAINT, RESOLVE_GENERATED_CONTENT};
+use gfx_traits::print_tree::PrintTree;
 use layout_debug;
 use model::IntrinsicISizesContribution;
 use range::{Range, RangeIndex};
+use script_layout_interface::restyle_damage::{BUBBLE_ISIZES, REFLOW};
+use script_layout_interface::restyle_damage::{REFLOW_OUT_OF_FLOW, RESOLVE_GENERATED_CONTENT};
+use script_layout_interface::wrapper_traits::PseudoElementType;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{fmt, i32, isize, mem};
+use style::arc_ptr_eq;
 use style::computed_values::{display, overflow_x, position, text_align, text_justify};
 use style::computed_values::{text_overflow, vertical_align, white_space};
+use style::context::{SharedStyleContext, StyleContext};
 use style::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
 use style::values::computed::LengthOrPercentage;
 use text;
 use unicode_bidi;
-use util;
-use util::print_tree::PrintTree;
-use wrapper::PseudoElementType;
 
 // From gfxFontConstants.h in Firefox
 static FONT_SUBSCRIPT_OFFSET_RATIO: f32 = 0.20;
@@ -356,8 +358,12 @@ impl LineBreaker {
             let need_to_merge = match (&mut result.specific, &candidate.specific) {
                 (&mut SpecificFragmentInfo::ScannedText(ref mut result_info),
                  &SpecificFragmentInfo::ScannedText(ref candidate_info)) => {
+                    result.margin.inline_end == Au(0) &&
+                    candidate.margin.inline_start == Au(0) &&
+                    result.border_padding.inline_end == Au(0) &&
+                    candidate.border_padding.inline_start == Au(0) &&
                     result_info.selected() == candidate_info.selected() &&
-                    util::arc_ptr_eq(&result_info.run, &candidate_info.run) &&
+                    arc_ptr_eq(&result_info.run, &candidate_info.run) &&
                         inline_contexts_are_equal(&result.inline_context,
                                                   &candidate.inline_context)
                 }
@@ -456,10 +462,12 @@ impl LineBreaker {
             kind: FloatKind::Left,
         });
 
+        let fragment_margin_box_inline_size = first_fragment.margin_box_inline_size();
+
         // Simple case: if the fragment fits, then we can stop here.
-        if line_bounds.size.inline > first_fragment.margin_box_inline_size() {
+        if line_bounds.size.inline > fragment_margin_box_inline_size {
             debug!("LineBreaker: fragment fits on line {}", self.lines.len());
-            return (line_bounds, first_fragment.margin_box_inline_size());
+            return (line_bounds, fragment_margin_box_inline_size);
         }
 
         // If not, but we can't split the fragment, then we'll place the line here and it will
@@ -468,7 +476,7 @@ impl LineBreaker {
             debug!("LineBreaker: line doesn't fit, but is unsplittable");
         }
 
-        (line_bounds, first_fragment.margin_box_inline_size())
+        (line_bounds, fragment_margin_box_inline_size)
     }
 
     /// Performs float collision avoidance. This is called when adding a fragment is going to
@@ -632,7 +640,23 @@ impl LineBreaker {
         // Push the first fragment onto the line we're working on and start off the next line with
         // the second fragment. If there's no second fragment, the next line will start off empty.
         match (inline_start_fragment, inline_end_fragment) {
-            (Some(inline_start_fragment), Some(inline_end_fragment)) => {
+            (Some(mut inline_start_fragment), Some(mut inline_end_fragment)) => {
+                inline_start_fragment.border_padding.inline_end = Au(0);
+                if let Some(ref mut inline_context) = inline_start_fragment.inline_context {
+                    for node in &mut inline_context.nodes {
+                        node.flags.remove(LAST_FRAGMENT_OF_ELEMENT);
+                    }
+                }
+                inline_start_fragment.border_box.size.inline += inline_start_fragment.border_padding.inline_start;
+
+                inline_end_fragment.border_padding.inline_start = Au(0);
+                if let Some(ref mut inline_context) = inline_end_fragment.inline_context {
+                    for node in &mut inline_context.nodes {
+                        node.flags.remove(FIRST_FRAGMENT_OF_ELEMENT);
+                    }
+                }
+                inline_end_fragment.border_box.size.inline += inline_end_fragment.border_padding.inline_end;
+
                 self.push_fragment_to_line(layout_context,
                                            inline_start_fragment,
                                            LineFlushMode::Flush);
@@ -1347,7 +1371,7 @@ impl Flow for InlineFlow {
 
     /// Recursively (top-down) determines the actual inline-size of child contexts and fragments.
     /// When called on this context, the context has had its inline-size set by the parent context.
-    fn assign_inline_sizes(&mut self, _: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, _: &SharedStyleContext) {
         let _scope = layout_debug_scope!("inline::assign_inline_sizes {:x}", self.base.debug_id());
 
         // Initialize content fragment inline-sizes if they haven't been initialized already.
@@ -1359,6 +1383,7 @@ impl Flow for InlineFlow {
 
         let inline_size = self.base.block_container_inline_size;
         let container_mode = self.base.block_container_writing_mode;
+        let container_block_size = self.base.block_container_explicit_block_size;
         self.base.position.size.inline = inline_size;
 
         {
@@ -1368,7 +1393,7 @@ impl Flow for InlineFlow {
                 fragment.compute_border_and_padding(inline_size, border_collapse);
                 fragment.compute_block_direction_margins(inline_size);
                 fragment.compute_inline_direction_margins(inline_size);
-                fragment.assign_replaced_inline_size_if_necessary(inline_size);
+                fragment.assign_replaced_inline_size_if_necessary(inline_size, container_block_size);
             }
         }
 
@@ -1464,7 +1489,7 @@ impl Flow for InlineFlow {
             // This is preorder because the block-size of an absolute flow may depend on
             // the block-size of its containing block, which may also be an absolute flow.
             (&mut *self as &mut Flow).traverse_preorder_absolute_flows(
-                &mut AbsoluteAssignBSizesTraversal(layout_context));
+                &mut AbsoluteAssignBSizesTraversal(layout_context.shared_context()));
         }
 
         self.base.position.size.block = match self.lines.last() {
@@ -1640,10 +1665,6 @@ impl Flow for InlineFlow {
 
     fn build_display_list(&mut self, state: &mut DisplayListBuildState) {
         self.build_display_list_for_inline(state);
-
-        for fragment in &mut self.fragments.fragments {
-            fragment.restyle_damage.remove(REPAINT);
-        }
     }
 
     fn repair_style(&mut self, _: &Arc<ServoComputedValues>) {}
@@ -1778,7 +1799,7 @@ impl InlineFragmentContext {
             return false
         }
         for (this_node, other_node) in self.nodes.iter().zip(&other.nodes) {
-            if !util::arc_ptr_eq(&this_node.style, &other_node.style) {
+            if !arc_ptr_eq(&this_node.style, &other_node.style) {
                 return false
             }
         }

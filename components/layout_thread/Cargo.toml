@@ -1,0 +1,41 @@
+[package]
+name = "layout_thread"
+version = "0.0.1"
+authors = ["The Servo Project Developers"]
+license = "MPL-2.0"
+publish = false
+
+[lib]
+name = "layout_thread"
+path = "lib.rs"
+
+[dependencies]
+app_units = "0.3"
+azure = {git = "https://github.com/servo/rust-azure", features = ["plugins"]}
+euclid = "0.9"
+fnv = "1.0"
+gfx = {path = "../gfx"}
+gfx_traits = {path = "../gfx_traits"}
+heapsize = "0.3.0"
+heapsize_plugin = "0.1.2"
+ipc-channel = "0.5"
+layout = {path = "../layout"}
+layout_traits = {path = "../layout_traits"}
+log = "0.3.5"
+msg = {path = "../msg"}
+net_traits = {path = "../net_traits"}
+plugins = {path = "../plugins"}
+profile_traits = {path = "../profile_traits"}
+script = {path = "../script"}
+script_layout_interface = {path = "../script_layout_interface"}
+script_traits = {path = "../script_traits"}
+serde_json = "0.8"
+serde_macros = "0.8"
+style = {path = "../style"}
+url = {version = "1.2", features = ["heap_size"]}
+util = {path = "../util"}
+
+[dependencies.webrender_traits]
+git = "https://github.com/servo/webrender_traits"
+default_features = false
+features = ["serde_macros"]

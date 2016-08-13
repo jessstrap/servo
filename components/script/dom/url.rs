@@ -3,18 +3,25 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use dom::bindings::cell::DOMRefCell;
+use dom::bindings::codegen::Bindings::BlobBinding::BlobMethods;
 use dom::bindings::codegen::Bindings::URLBinding::{self, URLMethods};
 use dom::bindings::error::{Error, ErrorResult, Fallible};
 use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, MutNullableHeap, Root};
 use dom::bindings::reflector::{Reflectable, Reflector, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
+use dom::blob::Blob;
 use dom::urlhelper::UrlHelper;
 use dom::urlsearchparams::URLSearchParams;
+use ipc_channel::ipc;
+use net_traits::blob_url_store::{get_blob_origin, parse_blob_url};
+use net_traits::filemanager_thread::{SelectedFileId, FileManagerThreadMsg};
+use net_traits::{IpcSend, CoreResourceMsg};
 use std::borrow::ToOwned;
 use std::default::Default;
 use url::quirks::domain_to_unicode;
 use url::{Host, Url};
+use uuid::Uuid;
 
 // https://url.spec.whatwg.org/#url
 #[dom_struct]
@@ -104,6 +111,66 @@ impl URL {
 
     pub fn DomainToUnicode(_: GlobalRef, origin: USVString) -> USVString {
         USVString(domain_to_unicode(&origin.0))
+    }
+
+    // https://w3c.github.io/FileAPI/#dfn-createObjectURL
+    pub fn CreateObjectURL(global: GlobalRef, blob: &Blob) -> DOMString {
+        /// XXX: Second field is an unicode-serialized Origin, it is a temporary workaround
+        ///      and should not be trusted. See issue https://github.com/servo/servo/issues/11722
+        let origin = get_blob_origin(&global.get_url());
+
+        if blob.IsClosed() {
+            // Generate a dummy id
+            let id = Uuid::new_v4().simple().to_string();
+            return DOMString::from(URL::unicode_serialization_blob_url(&origin, &id));
+        }
+
+        let id = blob.get_blob_url_id();
+
+        DOMString::from(URL::unicode_serialization_blob_url(&origin, &id.0))
+    }
+
+    // https://w3c.github.io/FileAPI/#dfn-revokeObjectURL
+    pub fn RevokeObjectURL(global: GlobalRef, url: DOMString) {
+        /*
+            If the url refers to a Blob that has a readability state of CLOSED OR
+            if the value provided for the url argument is not a Blob URL, OR
+            if the value provided for the url argument does not have an entry in the Blob URL Store,
+
+            this method call does nothing. User agents may display a message on the error console.
+
+            NOTE: The first step is unnecessary, since closed blobs do not exist in the store
+        */
+        let origin = get_blob_origin(&global.get_url());
+
+        if let Ok(url) = Url::parse(&url) {
+             if let Ok((id, _, _)) = parse_blob_url(&url) {
+                let resource_threads = global.resource_threads();
+                let id = SelectedFileId(id.simple().to_string());
+                let (tx, rx) = ipc::channel().unwrap();
+                let msg = FileManagerThreadMsg::RevokeBlobURL(id, origin, tx);
+                let _ = resource_threads.send(CoreResourceMsg::ToFileManager(msg));
+
+                let _ = rx.recv().unwrap();
+            }
+        }
+    }
+
+    // https://w3c.github.io/FileAPI/#unicodeSerializationOfBlobURL
+    fn unicode_serialization_blob_url(origin: &str, id: &str) -> String {
+        // Step 1, 2
+        let mut result = "blob:".to_string();
+
+        // Step 3
+        result.push_str(origin);
+
+        // Step 4
+        result.push('/');
+
+        // Step 5
+        result.push_str(id);
+
+        result
     }
 }
 

@@ -19,10 +19,14 @@ cache:
 install:
   - bash -lc "echo $MSYSTEM; pacman --needed --noconfirm -Sy pacman-mirrors"
   - bash -lc "pacman --noconfirm -Sy"
-  - bash -lc "pacman -Sy --needed --noconfirm git mingw-w64-x86_64-toolchain mingw-w64-x86_64-freetype mingw-w64-x86_64-icu mingw-w64-x86_64-nspr mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-expat mingw-w64-x86_64-cmake tar diffutils patch patchutils make python2-setuptools"
+  - bash -lc "pacman -Sy --needed --noconfirm git mingw-w64-x86_64-toolchain mingw-w64-x86_64-freetype mingw-w64-x86_64-icu mingw-w64-x86_64-nspr mingw-w64-x86_64-ca-certificates mingw-w64-x86_64-expat mingw-w64-x86_64-cmake tar diffutils patch patchutils make python2-setuptools mingw-w64-x86_64-ffmpeg"
   - bash -lc "easy_install-2.7 pip virtualenv"
   - bash -lc "mv /mingw64/bin/python2.exe /mingw64/bin/python2-mingw64.exe"
   - bash -lc "mv /mingw64/bin/python2.7.exe /mingw64/bin/python2.7-mingw64.exe"
+  # Downgrade GCC to 5.4.0-1 - https://github.com/servo/servo/issues/12512
+  - set GCC_URL=http://repo.msys2.org/mingw/x86_64/mingw-w64-x86_64-gcc
+  - set GCC_EXT=5.4.0-1-any.pkg.tar.xz
+  - bash -lc "pacman -U --noconfirm $GCC_URL-$GCC_EXT $GCC_URL-ada-$GCC_EXT $GCC_URL-fortran-$GCC_EXT $GCC_URL-libgfortran-$GCC_EXT $GCC_URL-libs-$GCC_EXT $GCC_URL-objc-$GCC_EXT"
 
 # Uncomment these lines to expose RDP access information to the build machine in the build log.
 #init:

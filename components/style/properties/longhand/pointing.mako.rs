@@ -6,18 +6,21 @@
 
 <% data.new_style_struct("Pointing", inherited=True, gecko_name="UserInterface") %>
 
-<%helpers:longhand name="cursor">
+<%helpers:longhand name="cursor" animatable="False">
     pub use self::computed_value::T as SpecifiedValue;
+    use values::NoViewportPercentage;
     use values::computed::ComputedValueAsSpecified;
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
 
     pub mod computed_value {
         use cssparser::ToCss;
         use std::fmt;
         use style_traits::cursor::Cursor;
 
-        #[derive(Clone, PartialEq, Eq, Copy, Debug, HeapSizeOf)]
+        #[derive(Clone, PartialEq, Eq, Copy, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub enum T {
             AutoCursor,
             SpecifiedCursor(Cursor),
@@ -53,16 +56,20 @@
 // NB: `pointer-events: auto` (and use of `pointer-events` in anything that isn't SVG, in fact)
 // is nonstandard, slated for CSS4-UI.
 // TODO(pcwalton): SVG-only values.
-${helpers.single_keyword("pointer-events", "auto none")}
+${helpers.single_keyword("pointer-events", "auto none", animatable=False)}
 
-${helpers.single_keyword("-moz-user-input", "none enabled disabled", products="gecko",
-                         gecko_ffi_name="mUserInput", gecko_constant_prefix="NS_STYLE_USER_INPUT")}
+${helpers.single_keyword("-moz-user-input", "none enabled disabled",
+                         products="gecko", gecko_ffi_name="mUserInput",
+                         gecko_constant_prefix="NS_STYLE_USER_INPUT",
+                         animatable=False)}
 
-${helpers.single_keyword("-moz-user-modify", "read-only read-write write-only", products="gecko",
-                         gecko_ffi_name="mUserModify", gecko_constant_prefix="NS_STYLE_USER_MODIFY")}
+${helpers.single_keyword("-moz-user-modify", "read-only read-write write-only",
+                         products="gecko", gecko_ffi_name="mUserModify",
+                         gecko_constant_prefix="NS_STYLE_USER_MODIFY",
+                         animatable=False)}
 
 ${helpers.single_keyword("-moz-user-focus",
                          "ignore normal select-after select-before select-menu select-same select-all none",
-                         products="gecko",
-                         gecko_ffi_name="mUserFocus",
-                         gecko_constant_prefix="NS_STYLE_USER_FOCUS")}
+                         products="gecko", gecko_ffi_name="mUserFocus",
+                         gecko_enum_prefix="StyleUserFocus",
+                         animatable=False)}

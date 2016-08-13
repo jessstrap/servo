@@ -11,31 +11,34 @@ use euclid::size::TypedSize2D;
 #[cfg(not(target_os = "windows"))]
 use gaol;
 use gfx::font_cache_thread::FontCacheThread;
-use gfx::paint_thread::{ChromeToPaintMsg, LayoutToPaintMsg, PaintThread};
+use gfx::paint_thread::{LayoutToPaintMsg, PaintThread};
+use gfx_traits::ChromeToPaintMsg;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
 use layers::geometry::DevicePixel;
 use layout_traits::LayoutThreadFactory;
-use msg::constellation_msg::{FrameId, FrameType, LoadData, PanicMsg, PipelineId};
-use msg::constellation_msg::{PipelineNamespaceId, SubpageId, WindowSizeData};
-use net_traits::ResourceThreads;
+use msg::constellation_msg::{FrameId, FrameType, LoadData, PipelineId};
+use msg::constellation_msg::{PipelineNamespaceId, SubpageId};
 use net_traits::bluetooth_thread::BluetoothMethodMsg;
 use net_traits::image_cache_thread::ImageCacheThread;
+use net_traits::{ResourceThreads, IpcSend};
 use profile_traits::mem as profile_mem;
 use profile_traits::time;
 use script_traits::{ConstellationControlMsg, InitialScriptState, MozBrowserEvent};
-use script_traits::{LayoutControlMsg, LayoutMsg, NewLayoutInfo, ScriptMsg};
-use script_traits::{ScriptThreadFactory, TimerEventRequest};
+use script_traits::{LayoutControlMsg, LayoutMsg, NewLayoutInfo, ScriptMsg, SWManagerMsg, SWManagerSenders};
+use script_traits::{ScriptThreadFactory, TimerEventRequest, WindowSizeData};
 use std::collections::HashMap;
+use std::env;
+use std::ffi::OsStr;
 use std::io::Error as IOError;
 use std::process;
 use std::sync::mpsc::{Sender, channel};
+use style_traits::{PagePx, ViewportPx};
 use url::Url;
 use util;
-use util::geometry::{PagePx, ViewportPx};
 use util::ipc::OptionalIpcSender;
 use util::opts::{self, Opts};
-use util::prefs::{self, Pref};
+use util::prefs::{PREFS, Pref};
 use webrender_traits;
 
 pub enum ChildProcess {
@@ -59,12 +62,19 @@ pub struct Pipeline {
     pub url: Url,
     /// The title of the most recently-loaded page.
     pub title: Option<String>,
-    pub size: Option<TypedSize2D<PagePx, f32>>,
+    pub size: Option<TypedSize2D<f32, PagePx>>,
     /// Whether this pipeline is currently running animations. Pipelines that are running
     /// animations cause composites to be continually scheduled.
     pub running_animations: bool,
     pub children: Vec<FrameId>,
+    /// Whether this pipeline is considered distinct from public pipelines.
     pub is_private: bool,
+    /// Whether this pipeline should be treated as visible for the purposes of scheduling and
+    /// resource management.
+    pub visible: bool,
+    /// Frame that contains this Pipeline. Can be `None` if the pipeline is not apart of the
+    /// frame tree.
+    pub frame: Option<FrameId>,
 }
 
 /// Initial setup data needed to construct a pipeline.
@@ -81,8 +91,6 @@ pub struct InitialPipelineState {
     pub constellation_chan: IpcSender<ScriptMsg>,
     /// A channel for the layout thread to send messages to the constellation.
     pub layout_to_constellation_chan: IpcSender<LayoutMsg>,
-    /// A channel to report panics
-    pub panic_chan: IpcSender<PanicMsg>,
     /// A channel to schedule timer events.
     pub scheduler_chan: IpcSender<TimerEventRequest>,
     /// A channel to the compositor.
@@ -91,6 +99,8 @@ pub struct InitialPipelineState {
     pub devtools_chan: Option<Sender<DevtoolsControlMsg>>,
     /// A channel to the bluetooth thread.
     pub bluetooth_thread: IpcSender<BluetoothMethodMsg>,
+    /// A channel to the service worker manager thread
+    pub swmanager_thread: IpcSender<SWManagerMsg>,
     /// A channel to the image cache thread.
     pub image_cache_thread: ImageCacheThread,
     /// A channel to the font cache thread.
@@ -102,9 +112,9 @@ pub struct InitialPipelineState {
     /// A channel to the memory profiler thread.
     pub mem_profiler_chan: profile_mem::ProfilerChan,
     /// Information about the initial window size.
-    pub window_size: Option<TypedSize2D<PagePx, f32>>,
+    pub window_size: Option<TypedSize2D<f32, PagePx>>,
     /// Information about the device pixel ratio.
-    pub device_pixel_ratio: ScaleFactor<ViewportPx, DevicePixel, f32>,
+    pub device_pixel_ratio: ScaleFactor<f32, ViewportPx, DevicePixel>,
     /// A channel to the script thread, if applicable. If this is `Some`,
     /// then `parent_info` must also be `Some`.
     pub script_chan: Option<IpcSender<ConstellationControlMsg>>,
@@ -112,8 +122,12 @@ pub struct InitialPipelineState {
     pub load_data: LoadData,
     /// The ID of the pipeline namespace for this script thread.
     pub pipeline_namespace_id: PipelineNamespaceId,
+    /// Pipeline visibility is inherited from parent
+    pub parent_visibility: Option<bool>,
     /// Optional webrender api (if enabled).
     pub webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+    /// Whether this pipeline is considered private.
+    pub is_private: bool,
 }
 
 impl Pipeline {
@@ -145,10 +159,10 @@ impl Pipeline {
                     frame_type: frame_type,
                     load_data: state.load_data.clone(),
                     paint_chan: layout_to_paint_chan.clone().to_opaque(),
-                    panic_chan: state.panic_chan.clone(),
                     pipeline_port: pipeline_port,
                     layout_to_constellation_chan: state.layout_to_constellation_chan.clone(),
                     content_process_shutdown_chan: layout_content_process_shutdown_chan.clone(),
+                    layout_threads: opts::get().layout_threads,
                 };
 
                 if let Err(e) = script_chan.send(ConstellationControlMsg::AttachLayout(new_layout_info)) {
@@ -168,7 +182,6 @@ impl Pipeline {
                             layout_to_paint_port,
                             chrome_to_paint_port,
                             state.compositor_proxy.clone_compositor_proxy(),
-                            state.panic_chan.clone(),
                             state.font_cache_thread.clone(),
                             state.time_profiler_chan.clone(),
                             state.mem_profiler_chan.clone());
@@ -210,6 +223,7 @@ impl Pipeline {
                 scheduler_chan: state.scheduler_chan,
                 devtools_chan: script_to_devtools_chan,
                 bluetooth_thread: state.bluetooth_thread,
+                swmanager_thread: state.swmanager_thread,
                 image_cache_thread: state.image_cache_thread,
                 font_cache_thread: state.font_cache_thread,
                 resource_threads: state.resource_threads,
@@ -219,10 +233,9 @@ impl Pipeline {
                 layout_to_constellation_chan: state.layout_to_constellation_chan,
                 script_chan: script_chan.clone(),
                 load_data: state.load_data.clone(),
-                panic_chan: state.panic_chan,
                 script_port: script_port,
                 opts: (*opts::get()).clone(),
-                prefs: prefs::get_cloned(),
+                prefs: PREFS.cloned(),
                 layout_to_paint_chan: layout_to_paint_chan,
                 pipeline_port: pipeline_port,
                 pipeline_namespace_id: state.pipeline_namespace_id,
@@ -249,8 +262,12 @@ impl Pipeline {
                                      pipeline_chan,
                                      state.compositor_proxy,
                                      chrome_to_paint_chan,
+                                     state.is_private,
                                      state.load_data.url,
-                                     state.window_size);
+                                     state.window_size,
+                                     state.parent_visibility.unwrap_or(true));
+
+        pipeline.notify_visibility();
 
         Ok((pipeline, child_process))
     }
@@ -261,8 +278,10 @@ impl Pipeline {
            layout_chan: IpcSender<LayoutControlMsg>,
            compositor_proxy: Box<CompositorProxy + 'static + Send>,
            chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
+           is_private: bool,
            url: Url,
-           size: Option<TypedSize2D<PagePx, f32>>)
+           size: Option<TypedSize2D<f32, PagePx>>,
+           visible: bool)
            -> Pipeline {
         Pipeline {
             id: id,
@@ -276,7 +295,9 @@ impl Pipeline {
             children: vec!(),
             size: size,
             running_animations: false,
-            is_private: false,
+            visible: visible,
+            is_private: is_private,
+            frame: None,
         }
     }
 
@@ -356,9 +377,9 @@ impl Pipeline {
     }
 
     pub fn trigger_mozbrowser_event(&self,
-                                     subpage_id: SubpageId,
+                                     subpage_id: Option<SubpageId>,
                                      event: MozBrowserEvent) {
-        assert!(prefs::mozbrowser_enabled());
+        assert!(PREFS.is_mozbrowser_enabled());
 
         let event = ConstellationControlMsg::MozBrowserEvent(self.id,
                                                              subpage_id,
@@ -367,6 +388,22 @@ impl Pipeline {
             warn!("Sending mozbrowser event to script failed ({}).", e);
         }
     }
+
+    fn notify_visibility(&self) {
+        self.script_chan.send(ConstellationControlMsg::ChangeFrameVisibilityStatus(self.id, self.visible))
+                        .expect("Pipeline script chan");
+
+        self.compositor_proxy.send(CompositorMsg::PipelineVisibilityChanged(self.id, self.visible));
+    }
+
+    pub fn change_visibility(&mut self, visible: bool) {
+        if visible == self.visible {
+            return;
+        }
+        self.visible = visible;
+        self.notify_visibility();
+    }
+
 }
 
 #[derive(Deserialize, Serialize)]
@@ -378,6 +415,7 @@ pub struct UnprivilegedPipelineContent {
     scheduler_chan: IpcSender<TimerEventRequest>,
     devtools_chan: Option<IpcSender<ScriptToDevtoolsControlMsg>>,
     bluetooth_thread: IpcSender<BluetoothMethodMsg>,
+    swmanager_thread: IpcSender<SWManagerMsg>,
     image_cache_thread: ImageCacheThread,
     font_cache_thread: FontCacheThread,
     resource_threads: ResourceThreads,
@@ -386,7 +424,6 @@ pub struct UnprivilegedPipelineContent {
     window_size: Option<WindowSizeData>,
     script_chan: IpcSender<ConstellationControlMsg>,
     load_data: LoadData,
-    panic_chan: IpcSender<PanicMsg>,
     script_port: IpcReceiver<ConstellationControlMsg>,
     layout_to_paint_chan: OptionalIpcSender<LayoutToPaintMsg>,
     opts: Opts,
@@ -412,7 +449,6 @@ impl UnprivilegedPipelineContent {
             control_port: self.script_port,
             constellation_chan: self.constellation_chan,
             scheduler_chan: self.scheduler_chan,
-            panic_chan: self.panic_chan.clone(),
             bluetooth_thread: self.bluetooth_thread,
             resource_threads: self.resource_threads,
             image_cache_thread: self.image_cache_thread.clone(),
@@ -430,7 +466,6 @@ impl UnprivilegedPipelineContent {
                     layout_pair,
                     self.pipeline_port,
                     self.layout_to_constellation_chan,
-                    self.panic_chan,
                     self.script_chan,
                     self.layout_to_paint_chan,
                     self.image_cache_thread,
@@ -438,7 +473,8 @@ impl UnprivilegedPipelineContent {
                     self.time_profiler_chan,
                     self.mem_profiler_chan,
                     self.layout_content_process_shutdown_chan,
-                    self.webrender_api_sender);
+                    self.webrender_api_sender,
+                    opts::get().layout_threads);
 
         if wait_for_completion {
             let _ = self.script_content_process_shutdown_port.recv();
@@ -451,7 +487,18 @@ impl UnprivilegedPipelineContent {
         use gaol::sandbox::{self, Sandbox, SandboxMethods};
         use ipc_channel::ipc::IpcOneShotServer;
         use sandboxing::content_process_sandbox_profile;
-        use std::env;
+
+        impl CommandMethods for sandbox::Command {
+            fn arg<T>(&mut self, arg: T)
+                where T: AsRef<OsStr> {
+                self.arg(arg);
+            }
+
+            fn env<T, U>(&mut self, key: T, val: U)
+                where T: AsRef<OsStr>, U: AsRef<OsStr> {
+                self.env(key, val);
+            }
+        }
 
         // Note that this function can panic, due to process creation,
         // avoiding this panic would require a mechanism for dealing
@@ -463,11 +510,7 @@ impl UnprivilegedPipelineContent {
         // If there is a sandbox, use the `gaol` API to create the child process.
         let child_process = if opts::get().sandbox {
             let mut command = sandbox::Command::me().expect("Failed to get current sandbox.");
-            command.arg("--content-process").arg(token);
-
-            if let Ok(value) = env::var("RUST_BACKTRACE") {
-                command.env("RUST_BACKTRACE", value);
-            }
+            self.setup_common(&mut command, token);
 
             let profile = content_process_sandbox_profile();
             ChildProcess::Sandboxed(Sandbox::new(profile).start(&mut command)
@@ -476,12 +519,7 @@ impl UnprivilegedPipelineContent {
             let path_to_self = env::current_exe()
                 .expect("Failed to get current executor.");
             let mut child_process = process::Command::new(path_to_self);
-            child_process.arg("--content-process");
-            child_process.arg(token);
-
-            if let Ok(value) = env::var("RUST_BACKTRACE") {
-                child_process.env("RUST_BACKTRACE", value);
-            }
+            self.setup_common(&mut child_process, token);
 
             ChildProcess::Unsandboxed(child_process.spawn()
                                       .expect("Failed to start unsandboxed child process!"))
@@ -499,11 +537,55 @@ impl UnprivilegedPipelineContent {
         process::exit(1);
     }
 
+    fn setup_common<C: CommandMethods>(&self, command: &mut C, token: String) {
+        C::arg(command, "--content-process");
+        C::arg(command, token);
+
+        if let Ok(value) = env::var("RUST_BACKTRACE") {
+            C::env(command, "RUST_BACKTRACE", value);
+        }
+
+        if let Ok(value) = env::var("RUST_LOG") {
+            C::env(command, "RUST_LOG", value);
+        }
+    }
+
+    pub fn constellation_chan(&self) -> IpcSender<ScriptMsg> {
+        self.constellation_chan.clone()
+    }
+
     pub fn opts(&self) -> Opts {
         self.opts.clone()
     }
 
     pub fn prefs(&self) -> HashMap<String, Pref> {
         self.prefs.clone()
+    }
+
+    pub fn swmanager_senders(&self) -> SWManagerSenders {
+        SWManagerSenders {
+            swmanager_sender: self.swmanager_thread.clone(),
+            resource_sender: self.resource_threads.sender()
+        }
+    }
+}
+
+trait CommandMethods {
+    fn arg<T>(&mut self, arg: T)
+        where T: AsRef<OsStr>;
+
+    fn env<T, U>(&mut self, key: T, val: U)
+        where T: AsRef<OsStr>, U: AsRef<OsStr>;
+}
+
+impl CommandMethods for process::Command {
+    fn arg<T>(&mut self, arg: T)
+        where T: AsRef<OsStr> {
+        self.arg(arg);
+    }
+
+    fn env<T, U>(&mut self, key: T, val: U)
+        where T: AsRef<OsStr>, U: AsRef<OsStr> {
+        self.env(key, val);
     }
 }

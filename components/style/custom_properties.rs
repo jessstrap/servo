@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! Support for [custom properties for cascading variables][custom].
+//!
+//! [custom]: https://drafts.csswg.org/css-variables/
+
 use cssparser::{Delimiter, Parser, SourcePosition, ToCss, Token, TokenSerializationType};
 use properties::DeclaredValue;
 use std::ascii::AsciiExt;
@@ -23,7 +27,8 @@ pub fn parse_name(s: &str) -> Result<&str, ()> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct SpecifiedValue {
     css: String,
 
@@ -41,7 +46,8 @@ pub struct BorrowedSpecifiedValue<'a> {
     references: Option<&'a HashSet<Name>>,
 }
 
-#[derive(Clone, HeapSizeOf, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct ComputedValue {
     css: String,
     first_token_type: TokenSerializationType,
@@ -188,7 +194,7 @@ fn parse_declaration_value_block(input: &mut Parser,
                 let token_slice = input.slice_from(token_start);
                 if !token_slice.ends_with("*/") {
                     missing_closing_characters.push_str(
-                        if token_slice.ends_with("*") { "/" } else { "*/" })
+                        if token_slice.ends_with('*') { "/" } else { "*/" })
                 }
                 token.serialization_type()
             }

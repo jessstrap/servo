@@ -2,6 +2,7 @@
 name = "gfx_tests"
 version = "0.0.1"
 authors = ["The Servo Project Developers"]
+license = "MPL-2.0"
 
 [lib]
 name = "gfx_tests"
@@ -10,5 +11,5 @@ doctest = false
 
 [dependencies]
 gfx = {path = "../../../components/gfx"}
-ipc-channel = {git = "https://github.com/servo/ipc-channel"}
+ipc-channel = "0.5"
 style = {path = "../../../components/style"}
