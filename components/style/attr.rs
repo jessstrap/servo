@@ -2,29 +2,36 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! Parsed representations of [DOM attributes][attr].
+//!
+//! [attr]: https://dom.spec.whatwg.org/#interface-attr
+
 use app_units::Au;
 use cssparser::{self, Color, RGBA};
 use euclid::num::Zero;
 use num_traits::ToPrimitive;
 use std::ascii::AsciiExt;
 use std::str::FromStr;
+use str::{HTML_SPACE_CHARACTERS, read_exponent, read_fraction};
+use str::{read_numbers, split_commas, split_html_space_chars};
+#[cfg(not(feature = "gecko"))] use str::str_join;
 use string_cache::{Atom, Namespace};
 use url::Url;
-use util::str::{HTML_SPACE_CHARACTERS, read_exponent, read_fraction};
-use util::str::{read_numbers, split_commas, split_html_space_chars};
 use values::specified::Length;
 
 // Duplicated from script::dom::values.
 const UNSIGNED_LONG_MAX: u32 = 2147483647;
 
-#[derive(Clone, Copy, Debug, HeapSizeOf, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum LengthOrPercentageOrAuto {
     Auto,
     Percentage(f32),
     Length(Au),
 }
 
-#[derive(PartialEq, Clone, HeapSizeOf)]
+#[derive(PartialEq, Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum AttrValue {
     String(String),
     TokenList(String, Vec<Atom>),
@@ -86,17 +93,17 @@ pub fn parse_double(string: &str) -> Result<f64, ()> {
     let trimmed = string.trim_matches(HTML_SPACE_CHARACTERS);
     let mut input = trimmed.chars().peekable();
 
-    let (value, divisor) = match input.peek() {
+    let (value, divisor, chars_skipped) = match input.peek() {
         None => return Err(()),
         Some(&'-') => {
             input.next();
-            (-1f64, -1f64)
+            (-1f64, -1f64, 1)
         }
         Some(&'+') => {
             input.next();
-            (1f64, 1f64)
+            (1f64, 1f64, 1)
         }
-        _ => (1f64, 1f64)
+        _ => (1f64, 1f64, 0)
     };
 
     let (value, value_digits) = if let Some(&'.') = input.peek() {
@@ -106,11 +113,11 @@ pub fn parse_double(string: &str) -> Result<f64, ()> {
         (value * read_val.and_then(|result| result.to_f64()).unwrap_or(1f64), read_digits)
     };
 
-    let input = trimmed.chars().skip(value_digits).peekable();
+    let input = trimmed.chars().skip(value_digits + chars_skipped).peekable();
 
     let (mut value, fraction_digits) = read_fraction(input, divisor, value);
 
-    let input = trimmed.chars().skip(value_digits + fraction_digits).peekable();
+    let input = trimmed.chars().skip(value_digits + chars_skipped + fraction_digits).peekable();
 
     if let Some(exp) = read_exponent(input) {
         value *= 10f64.powi(exp)
@@ -142,7 +149,6 @@ impl AttrValue {
 
     #[cfg(not(feature = "gecko"))] // Gecko can't borrow atoms as UTF-8.
     pub fn from_atomic_tokens(atoms: Vec<Atom>) -> AttrValue {
-        use util::str::str_join;
         // TODO(ajeffrey): effecient conversion of Vec<Atom> to String
         let tokens = String::from(str_join(&atoms, "\x20"));
         AttrValue::TokenList(tokens, atoms)
@@ -330,8 +336,6 @@ impl ::std::ops::Deref for AttrValue {
     }
 }
 
-/// HTML5 § 2.4.4.5.
-///
 /// https://html.spec.whatwg.org/multipage/#rules-for-parsing-non-zero-dimension-values
 pub fn parse_nonzero_length(value: &str) -> LengthOrPercentageOrAuto {
     match parse_length(value) {
@@ -341,7 +345,9 @@ pub fn parse_nonzero_length(value: &str) -> LengthOrPercentageOrAuto {
     }
 }
 
-/// Parses a legacy color per HTML5 § 2.4.6. If unparseable, `Err` is returned.
+/// Parses a [legacy color][color]. If unparseable, `Err` is returned.
+///
+/// [color]: https://html.spec.whatwg.org/multipage/#rules-for-parsing-a-legacy-colour-value
 pub fn parse_legacy_color(mut input: &str) -> Result<RGBA, ()> {
     // Steps 1 and 2.
     if input.is_empty() {
@@ -469,10 +475,10 @@ pub fn parse_legacy_color(mut input: &str) -> Result<RGBA, ()> {
     }
 }
 
-/// TODO: this function can be rewritten to return Result<LengthOrPercentage, _>
-/// Parses a dimension value per HTML5 § 2.4.4.4. If unparseable, `Auto` is
-/// returned.
-/// https://html.spec.whatwg.org/multipage/#rules-for-parsing-dimension-values
+/// Parses a [dimension value][dim]. If unparseable, `Auto` is returned.
+///
+/// [dim]: https://html.spec.whatwg.org/multipage/#rules-for-parsing-dimension-values
+// TODO: this function can be rewritten to return Result<LengthOrPercentage, _>
 pub fn parse_length(mut value: &str) -> LengthOrPercentageOrAuto {
     // Steps 1 & 2 are not relevant
 
@@ -485,7 +491,7 @@ pub fn parse_length(mut value: &str) -> LengthOrPercentageOrAuto {
     }
 
     // Step 5
-    if value.starts_with("+") {
+    if value.starts_with('+') {
         value = &value[1..]
     }
 
@@ -538,7 +544,9 @@ pub fn parse_length(mut value: &str) -> LengthOrPercentageOrAuto {
     }
 }
 
-#[derive(Clone, HeapSizeOf, Debug)]
+/// A struct that uniquely identifies an element's attribute.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct AttrIdentifier {
     pub local_name: Atom,
     pub name: Atom,

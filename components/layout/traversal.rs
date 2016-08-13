@@ -10,22 +10,27 @@ use display_list_builder::DisplayListBuildState;
 use flow::{CAN_BE_FRAGMENTED, Flow, ImmutableFlowUtils, PostorderFlowTraversal};
 use flow::{PreorderFlowTraversal, self};
 use gfx::display_list::OpaqueNode;
-use incremental::{BUBBLE_ISIZES, REFLOW, REFLOW_OUT_OF_FLOW, REPAINT, RestyleDamage};
+use script_layout_interface::restyle_damage::{BUBBLE_ISIZES, REFLOW, REFLOW_OUT_OF_FLOW, REPAINT, RestyleDamage};
+use script_layout_interface::wrapper_traits::{LayoutNode, ThreadSafeLayoutNode};
 use std::mem;
-use style::context::StyleContext;
-use style::matching::MatchMethods;
-use style::traversal::{DomTraversalContext, STYLE_BLOOM};
-use style::traversal::{put_thread_local_bloom_filter, recalc_style_at};
+use style::context::SharedStyleContext;
+use style::dom::TNode;
+use style::selector_impl::ServoSelectorImpl;
+use style::traversal::RestyleResult;
+use style::traversal::{DomTraversalContext, remove_from_bloom_filter, recalc_style_at};
 use util::opts;
-use util::tid::tid;
-use wrapper::{LayoutNode, ServoLayoutNode, ThreadSafeLayoutNode};
+use wrapper::{LayoutNodeLayoutData, ThreadSafeLayoutNodeHelpers};
 
 pub struct RecalcStyleAndConstructFlows<'lc> {
     context: LayoutContext<'lc>,
     root: OpaqueNode,
 }
 
-impl<'lc, 'ln> DomTraversalContext<ServoLayoutNode<'ln>> for RecalcStyleAndConstructFlows<'lc> {
+impl<'lc, N> DomTraversalContext<N> for RecalcStyleAndConstructFlows<'lc>
+    where N: LayoutNode + TNode,
+          N::ConcreteElement: ::selectors::Element<Impl=ServoSelectorImpl>
+
+{
     type SharedContext = SharedLayoutContext;
     #[allow(unsafe_code)]
     fn new<'a>(shared: &'a Self::SharedContext, root: OpaqueNode) -> Self {
@@ -65,8 +70,17 @@ impl<'lc, 'ln> DomTraversalContext<ServoLayoutNode<'ln>> for RecalcStyleAndConst
         }
     }
 
-    fn process_preorder(&self, node: ServoLayoutNode<'ln>) { recalc_style_at(&self.context, self.root, node); }
-    fn process_postorder(&self, node: ServoLayoutNode<'ln>) { construct_flows_at(&self.context, self.root, node); }
+    fn process_preorder(&self, node: N) -> RestyleResult {
+        // FIXME(pcwalton): Stop allocating here. Ideally this should just be
+        // done by the HTML parser.
+        node.initialize_data();
+
+        recalc_style_at(&self.context, self.root, node)
+    }
+
+    fn process_postorder(&self, node: N) {
+        construct_flows_at(&self.context, self.root, node);
+    }
 }
 
 /// A bottom-up, parallelizable traversal.
@@ -85,7 +99,7 @@ fn construct_flows_at<'a, N: LayoutNode>(context: &'a LayoutContext<'a>, root: O
 
         // Always reconstruct if incremental layout is turned off.
         let nonincremental_layout = opts::get().nonincremental_layout;
-        if nonincremental_layout || node.has_dirty_descendants() {
+        if nonincremental_layout || node.is_dirty() || node.has_dirty_descendants() {
             let mut flow_constructor = FlowConstructor::new(context);
             if nonincremental_layout || !flow_constructor.repair_if_possible(&tnode) {
                 flow_constructor.process(&tnode);
@@ -106,29 +120,7 @@ fn construct_flows_at<'a, N: LayoutNode>(context: &'a LayoutContext<'a>, root: O
         node.set_dirty_descendants(false);
     }
 
-    let unsafe_layout_node = node.to_unsafe();
-
-    let (mut bf, old_node, old_generation) =
-        STYLE_BLOOM.with(|style_bloom| {
-            mem::replace(&mut *style_bloom.borrow_mut(), None)
-            .expect("The bloom filter should have been set by style recalc.")
-        });
-
-    assert_eq!(old_node, unsafe_layout_node);
-    assert_eq!(old_generation, context.shared_context().generation);
-
-    match node.layout_parent_node(root) {
-        None => {
-            debug!("[{}] - {:X}, and deleting BF.", tid(), unsafe_layout_node.0);
-            // If this is the reflow root, eat the thread-local bloom filter.
-        }
-        Some(parent) => {
-            // Otherwise, put it back, but remove this node.
-            node.remove_from_bloom_filter(&mut *bf);
-            let unsafe_parent = parent.to_unsafe();
-            put_thread_local_bloom_filter(bf, &unsafe_parent, &context.shared_context());
-        },
-    };
+    remove_from_bloom_filter(context, root, node);
 }
 
 /// The bubble-inline-sizes traversal, the first part of layout computation. This computes
@@ -153,13 +145,13 @@ impl<'a> PostorderFlowTraversal for BubbleISizes<'a> {
 /// The assign-inline-sizes traversal. In Gecko this corresponds to `Reflow`.
 #[derive(Copy, Clone)]
 pub struct AssignISizes<'a> {
-    pub layout_context: &'a LayoutContext<'a>,
+    pub shared_context: &'a SharedStyleContext,
 }
 
 impl<'a> PreorderFlowTraversal for AssignISizes<'a> {
     #[inline]
     fn process(&self, flow: &mut Flow) {
-        flow.assign_inline_sizes(self.layout_context);
+        flow.assign_inline_sizes(self.shared_context);
     }
 
     #[inline]

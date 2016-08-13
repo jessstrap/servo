@@ -6,13 +6,24 @@
 
 <% data.new_style_struct("InheritedText", inherited=True, gecko_name="Text") %>
 
-<%helpers:longhand name="line-height">
+<%helpers:longhand name="line-height" animatable="True">
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
     use values::CSSFloat;
+    use values::HasViewportPercentage;
 
-    #[derive(Debug, Clone, PartialEq, Copy, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedValue::LengthOrPercentage(length) => length.has_viewport_percentage(),
+                _ => false
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Copy)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Normal,
         % if product == "gecko":
@@ -61,7 +72,8 @@
         use app_units::Au;
         use std::fmt;
         use values::CSSFloat;
-        #[derive(PartialEq, Copy, Clone, HeapSizeOf, Debug)]
+        #[derive(PartialEq, Copy, Clone, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub enum T {
             Normal,
             % if product == "gecko":
@@ -90,7 +102,7 @@
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::Normal => computed_value::T::Normal,
                 % if product == "gecko":
@@ -118,10 +130,12 @@
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="text-align">
+<%helpers:longhand name="text-align" animatable="False">
     pub use self::computed_value::T as SpecifiedValue;
     use values::computed::ComputedValueAsSpecified;
+    use values::NoViewportPercentage;
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
     pub mod computed_value {
         macro_rules! define_text_align {
             ( $( $name: ident ( $string: expr ) => $discriminant: expr, )+ ) => {
@@ -177,12 +191,24 @@
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="letter-spacing">
+// FIXME: This prop should be animatable.
+<%helpers:longhand name="letter-spacing" animatable="False">
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
-    #[derive(Debug, Clone, Copy, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedValue::Specified(length) => length.has_viewport_percentage(),
+                _ => false
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Normal,
         Specified(specified::Length),
@@ -199,7 +225,8 @@
 
     pub mod computed_value {
         use app_units::Au;
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<Au>);
     }
 
@@ -221,7 +248,7 @@
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::Normal => computed_value::T(None),
                 SpecifiedValue::Specified(l) =>
@@ -239,15 +266,26 @@
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="word-spacing">
+<%helpers:longhand name="word-spacing" animatable="False">
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
-    #[derive(Debug, Clone, Copy, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedValue::Specified(length) => length.has_viewport_percentage(),
+                _ => false
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Normal,
-        Specified(specified::Length),  // FIXME(SimonSapin) support percentages
+        Specified(specified::LengthOrPercentage),
     }
 
     impl ToCss for SpecifiedValue {
@@ -260,9 +298,10 @@
     }
 
     pub mod computed_value {
-        use app_units::Au;
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
-        pub struct T(pub Option<Au>);
+        use values::computed::LengthOrPercentage;
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+        pub struct T(pub Option<LengthOrPercentage>);
     }
 
     impl ToCss for computed_value::T {
@@ -283,11 +322,11 @@
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::Normal => computed_value::T(None),
                 SpecifiedValue::Specified(l) =>
-                    computed_value::T(Some(l.to_computed_value(context)))
+                    computed_value::T(Some(l.to_computed_value(context))),
             }
         }
     }
@@ -296,43 +335,52 @@
         if input.try(|input| input.expect_ident_matching("normal")).is_ok() {
             Ok(SpecifiedValue::Normal)
         } else {
-            specified::Length::parse_non_negative(input).map(SpecifiedValue::Specified)
+            specified::LengthOrPercentage::parse_non_negative(input)
+                                          .map(SpecifiedValue::Specified)
         }
     }
 </%helpers:longhand>
 
 ${helpers.predefined_type("text-indent",
                           "LengthOrPercentage",
-                          "computed::LengthOrPercentage::Length(Au(0))")}
+                          "computed::LengthOrPercentage::Length(Au(0))",
+                          animatable=True)}
 
 // Also known as "word-wrap" (which is more popular because of IE), but this is the preferred
 // name per CSS-TEXT 6.2.
 ${helpers.single_keyword("overflow-wrap",
                          "normal break-word",
-                         gecko_constant_prefix="NS_STYLE_OVERFLOWWRAP")}
+                         gecko_constant_prefix="NS_STYLE_OVERFLOWWRAP",
+                         animatable=False)}
 
 // TODO(pcwalton): Support `word-break: keep-all` once we have better CJK support.
 ${helpers.single_keyword("word-break",
                          "normal break-all",
                          extra_gecko_values="keep-all",
-                         gecko_constant_prefix="NS_STYLE_WORDBREAK")}
+                         gecko_constant_prefix="NS_STYLE_WORDBREAK",
+                         animatable=False)}
 
 // TODO(pcwalton): Support `text-justify: distribute`.
 ${helpers.single_keyword("text-justify",
                          "auto none inter-word",
-                         products="servo")}
+                         products="servo",
+                         animatable=False)}
 
 <%helpers:longhand name="-servo-text-decorations-in-effect"
-                derived_from="display text-decoration" need_clone="True" products="servo">
+                   derived_from="display text-decoration"
+                   need_clone="True" products="servo"
+                   animatable="False">
     use cssparser::{RGBA, ToCss};
     use std::fmt;
 
+    use values:: NoViewportPercentage;
     use values::computed::ComputedValueAsSpecified;
-    use properties::style_struct_traits::{Box, Color, Text};
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
 
-    #[derive(Clone, PartialEq, Copy, Debug, HeapSizeOf)]
+    #[derive(Clone, PartialEq, Copy, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue {
         pub underline: Option<RGBA>,
         pub overline: Option<RGBA>,
@@ -359,7 +407,7 @@ ${helpers.single_keyword("text-justify",
         }
     }
 
-    fn maybe<Cx: TContext>(flag: bool, context: &Cx) -> Option<RGBA> {
+    fn maybe(flag: bool, context: &Context) -> Option<RGBA> {
         if flag {
             Some(context.style().get_color().clone_color())
         } else {
@@ -367,7 +415,7 @@ ${helpers.single_keyword("text-justify",
         }
     }
 
-    fn derive<Cx: TContext>(context: &Cx) -> computed_value::T {
+    fn derive(context: &Context) -> computed_value::T {
         // Start with no declarations if this is an atomic inline-level box; otherwise, start with the
         // declarations in effect and add in the text decorations that this block specifies.
         let mut result = match context.style().get_box().clone_display() {
@@ -391,22 +439,26 @@ ${helpers.single_keyword("text-justify",
     }
 
     #[inline]
-    pub fn derive_from_text_decoration<Cx: TContext>(context: &mut Cx) {
+    pub fn derive_from_text_decoration(context: &mut Context) {
         let derived = derive(context);
         context.mutate_style().mutate_inheritedtext().set__servo_text_decorations_in_effect(derived);
     }
 
     #[inline]
-    pub fn derive_from_display<Cx: TContext>(context: &mut Cx) {
+    pub fn derive_from_display(context: &mut Context) {
         let derived = derive(context);
         context.mutate_style().mutate_inheritedtext().set__servo_text_decorations_in_effect(derived);
     }
 </%helpers:longhand>
 
-<%helpers:single_keyword_computed name="white-space" values="normal pre nowrap pre-wrap pre-line",
-                                  gecko_constant_prefix="NS_STYLE_WHITESPACE">
+<%helpers:single_keyword_computed name="white-space"
+                                  values="normal pre nowrap pre-wrap pre-line"
+                                  gecko_constant_prefix="NS_STYLE_WHITESPACE"
+                                  animatable="False">
     use values::computed::ComputedValueAsSpecified;
+    use values::NoViewportPercentage;
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
 
     impl SpecifiedValue {
         pub fn allow_wrap(&self) -> bool {
@@ -441,15 +493,33 @@ ${helpers.single_keyword("text-justify",
     }
 </%helpers:single_keyword_computed>
 
-<%helpers:longhand name="text-shadow">
+<%helpers:longhand name="text-shadow" animatable="True">
     use cssparser::{self, ToCss};
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
-    #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            let &SpecifiedValue(ref vec) = self;
+            vec.iter().any(|ref x| x .has_viewport_percentage())
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue(Vec<SpecifiedTextShadow>);
 
-    #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedTextShadow {
+        fn has_viewport_percentage(&self) -> bool {
+            self.offset_x.has_viewport_percentage() ||
+            self.offset_y.has_viewport_percentage() ||
+            self.blur_radius.has_viewport_percentage()
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedTextShadow {
         pub offset_x: specified::Length,
         pub offset_y: specified::Length,
@@ -461,10 +531,12 @@ ${helpers.single_keyword("text-justify",
         use app_units::Au;
         use cssparser::Color;
 
-        #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+        #[derive(Clone, PartialEq, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Vec<TextShadow>);
 
-        #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+        #[derive(Clone, PartialEq, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct TextShadow {
             pub offset_x: Au,
             pub offset_y: Au,
@@ -603,7 +675,7 @@ ${helpers.single_keyword("text-justify",
     impl ToComputedValue for SpecifiedValue {
         type ComputedValue = computed_value::T;
 
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             computed_value::T(self.0.iter().map(|value| {
                 computed_value::TextShadow {
                     offset_x: value.offset_x.to_computed_value(context),
@@ -624,16 +696,22 @@ ${helpers.single_keyword("text-justify",
 // TODO(pcwalton): `full-width`
 ${helpers.single_keyword("text-transform",
                          "none capitalize uppercase lowercase",
-                         extra_gecko_values="full-width")}
+                         extra_gecko_values="full-width",
+                         animatable=False)}
 
-${helpers.single_keyword("text-rendering", "auto optimizespeed optimizelegibility geometricprecision")}
+${helpers.single_keyword("text-rendering",
+                         "auto optimizespeed optimizelegibility geometricprecision",
+                         animatable=False)}
 
 // CSS Text Module Level 3
 // https://www.w3.org/TR/css-text-3/
-${helpers.single_keyword("hyphens", "none manual auto", products="gecko")}
+${helpers.single_keyword("hyphens", "none manual auto",
+                         products="gecko", animatable=False)}
 
 // CSS Ruby Layout Module Level 1
 // https://www.w3.org/TR/css-ruby-1/
-${helpers.single_keyword("ruby-align", "start center space-between space-around", products="gecko")}
+${helpers.single_keyword("ruby-align", "start center space-between space-around",
+                         products="gecko", animatable=False)}
 
-${helpers.single_keyword("ruby-position", "over under", products="gecko")}
+${helpers.single_keyword("ruby-position", "over under",
+                         products="gecko", animatable=False)}

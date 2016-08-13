@@ -6,12 +6,24 @@
 
 <% data.new_style_struct("Column", inherited=False) %>
 
-<%helpers:longhand name="column-width" experimental="True">
+// FIXME: This prop should be animatable.
+<%helpers:longhand name="column-width" experimental="True" animatable="False">
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
-    #[derive(Debug, Clone, Copy, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedValue::Specified(length) => length.has_viewport_percentage(),
+                _ => false
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Auto,
         Specified(specified::Length),
@@ -28,7 +40,8 @@
 
     pub mod computed_value {
         use app_units::Au;
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<Au>);
     }
 
@@ -50,7 +63,7 @@
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::Auto => computed_value::T(None),
                 SpecifiedValue::Specified(l) =>
@@ -68,11 +81,16 @@
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="column-count" experimental="True">
+// FIXME: This prop should be animatable.
+<%helpers:longhand name="column-count" experimental="True" animatable="False">
     use cssparser::ToCss;
     use std::fmt;
+    use values::NoViewportPercentage;
 
-    #[derive(Debug, Clone, Copy, PartialEq, HeapSizeOf)]
+    impl NoViewportPercentage for SpecifiedValue {}
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Auto,
         Specified(u32),
@@ -88,7 +106,8 @@
     }
 
     pub mod computed_value {
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<u32>);
     }
 
@@ -110,7 +129,7 @@
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, _context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, _context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::Auto => computed_value::T(None),
                 SpecifiedValue::Specified(count) =>
@@ -133,12 +152,24 @@
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="column-gap" experimental="True">
+// FIXME: This prop should be animatable.
+<%helpers:longhand name="column-gap" experimental="True" animatable="False">
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
-    #[derive(Debug, Clone, Copy, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedValue::Specified(length) => length.has_viewport_percentage(),
+                _ => false
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Normal,
         Specified(specified::Length),
@@ -155,7 +186,8 @@
 
     pub mod computed_value {
         use app_units::Au;
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<Au>);
     }
 
@@ -177,7 +209,7 @@
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::Normal => computed_value::T(None),
                 SpecifiedValue::Specified(l) =>

@@ -73,24 +73,25 @@ use html5ever::tree_builder::{LimitedQuirks, NoQuirks, Quirks};
 use ref_filter_map::ref_filter_map;
 use selectors::matching::{DeclarationBlock, ElementFlags, matches};
 use selectors::matching::{HAS_SLOW_SELECTOR, HAS_EDGE_CHILD_SELECTOR, HAS_SLOW_SELECTOR_LATER_SIBLINGS};
-use selectors::matching::{common_style_affecting_attributes, rare_style_affecting_attributes};
 use selectors::parser::{AttrSelector, NamespaceConstraint, parse_author_origin_selector_list_from_str};
-use smallvec::VecLike;
 use std::ascii::AsciiExt;
 use std::borrow::Cow;
 use std::cell::{Cell, Ref};
+use std::convert::TryFrom;
 use std::default::Default;
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use string_cache::{Atom, BorrowedAtom, BorrowedNamespace, Namespace, QualName};
+use string_cache::{Atom, Namespace, QualName};
 use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 use style::element_state::*;
+use style::matching::{common_style_affecting_attributes, rare_style_affecting_attributes};
 use style::parser::ParserContextExtraData;
 use style::properties::DeclaredValue;
 use style::properties::longhands::{self, background_image, border_spacing, font_family, overflow_x, font_size};
 use style::properties::{PropertyDeclaration, PropertyDeclarationBlock, parse_style_attribute};
 use style::selector_impl::{NonTSPseudoClass, ServoSelectorImpl};
+use style::sink::Push;
 use style::values::CSSFloat;
 use style::values::specified::{self, CSSColor, CSSRGBA, LengthOrPercentage};
 
@@ -102,6 +103,7 @@ use style::values::specified::{self, CSSColor, CSSRGBA, LengthOrPercentage};
 pub struct Element {
     node: Node,
     local_name: Atom,
+    tag_name: TagName,
     namespace: Namespace,
     prefix: Option<DOMString>,
     attrs: DOMRefCell<Vec<JS<Attr>>>,
@@ -126,8 +128,10 @@ pub enum AdjacentPosition {
     BeforeEnd,
 }
 
-impl AdjacentPosition {
-    pub fn parse(position: &str) -> Fallible<AdjacentPosition> {
+impl<'a> TryFrom<&'a str> for AdjacentPosition {
+    type Err = Error;
+
+    fn try_from(position: &'a str) -> Result<AdjacentPosition, Self::Err> {
         match_ignore_ascii_case! { &*position,
             "beforebegin" => Ok(AdjacentPosition::BeforeBegin),
             "afterbegin"  => Ok(AdjacentPosition::AfterBegin),
@@ -162,6 +166,7 @@ impl Element {
         Element {
             node: Node::new_inherited(document),
             local_name: local_name,
+            tag_name: TagName::new(),
             namespace: namespace,
             prefix: prefix,
             attrs: DOMRefCell::new(vec![]),
@@ -275,7 +280,7 @@ pub trait LayoutElementHelpers {
 
     #[allow(unsafe_code)]
     unsafe fn synthesize_presentational_hints_for_legacy_attributes<V>(&self, &mut V)
-        where V: VecLike<DeclarationBlock<Vec<PropertyDeclaration>>>;
+        where V: Push<DeclarationBlock<Vec<PropertyDeclaration>>>;
     #[allow(unsafe_code)]
     unsafe fn get_colspan(self) -> u32;
     #[allow(unsafe_code)]
@@ -308,7 +313,7 @@ impl LayoutElementHelpers for LayoutJS<Element> {
 
     #[allow(unsafe_code)]
     unsafe fn synthesize_presentational_hints_for_legacy_attributes<V>(&self, hints: &mut V)
-        where V: VecLike<DeclarationBlock<Vec<PropertyDeclaration>>>
+        where V: Push<DeclarationBlock<Vec<PropertyDeclaration>>>
     {
         #[inline]
         fn from_declaration(rule: PropertyDeclaration) -> DeclarationBlock<Vec<PropertyDeclaration>> {
@@ -344,7 +349,8 @@ impl LayoutElementHelpers for LayoutJS<Element> {
         if let Some(url) = background {
             hints.push(from_declaration(
                 PropertyDeclaration::BackgroundImage(DeclaredValue::Value(
-                    background_image::SpecifiedValue(Some(specified::Image::Url(url)))))));
+                    background_image::SpecifiedValue(Some(
+                        specified::Image::Url(url, specified::UrlExtraData { })))))));
         }
 
         let color = if let Some(this) = self.downcast::<HTMLFontElement>() {
@@ -1363,17 +1369,20 @@ impl ElementMethods for Element {
 
     // https://dom.spec.whatwg.org/#dom-element-tagname
     fn TagName(&self) -> DOMString {
-        let qualified_name = match self.prefix {
-            Some(ref prefix) => {
-                Cow::Owned(format!("{}:{}", &**prefix, &*self.local_name))
-            },
-            None => Cow::Borrowed(&*self.local_name)
-        };
-        DOMString::from(if self.html_element_in_html_document() {
-            qualified_name.to_ascii_uppercase()
-        } else {
-            qualified_name.into_owned()
-        })
+        let name = self.tag_name.or_init(|| {
+            let qualified_name = match self.prefix {
+                Some(ref prefix) => {
+                    Cow::Owned(format!("{}:{}", &**prefix, &*self.local_name))
+                },
+                None => Cow::Borrowed(&*self.local_name)
+            };
+            if self.html_element_in_html_document() {
+                Atom::from(qualified_name.to_ascii_uppercase())
+            } else {
+                Atom::from(qualified_name)
+            }
+        });
+        DOMString::from(&*name)
     }
 
     // https://dom.spec.whatwg.org/#dom-element-id
@@ -2028,7 +2037,7 @@ impl ElementMethods for Element {
     // https://dom.spec.whatwg.org/#dom-element-insertadjacentelement
     fn InsertAdjacentElement(&self, where_: DOMString, element: &Element)
                              -> Fallible<Option<Root<Element>>> {
-        let where_ = try!(AdjacentPosition::parse(&*where_));
+        let where_ = try!(AdjacentPosition::try_from(&*where_));
         let inserted_node = try!(self.insert_adjacent(where_, element.upcast()));
         Ok(inserted_node.map(|node| Root::downcast(node).unwrap()))
     }
@@ -2040,7 +2049,7 @@ impl ElementMethods for Element {
         let text = Text::new(data, &document_from_node(self));
 
         // Step 2.
-        let where_ = try!(AdjacentPosition::parse(&*where_));
+        let where_ = try!(AdjacentPosition::try_from(&*where_));
         self.insert_adjacent(where_, text.upcast()).map(|_| ())
     }
 
@@ -2048,7 +2057,7 @@ impl ElementMethods for Element {
     fn InsertAdjacentHTML(&self, position: DOMString, text: DOMString)
                           -> ErrorResult {
         // Step 1.
-        let position = try!(AdjacentPosition::parse(&*position));
+        let position = try!(AdjacentPosition::try_from(&*position));
 
         let context = match position {
             AdjacentPosition::BeforeBegin | AdjacentPosition::AfterEnd => {
@@ -2069,14 +2078,14 @@ impl ElementMethods for Element {
         let context = match context.downcast::<Element>() {
             Some(elem) if elem.local_name() != &atom!("html") ||
                           !elem.html_element_in_html_document() => Root::from_ref(elem),
-            _ => Root::upcast(HTMLBodyElement::new(atom!("body"), None, &*context.owner_doc()))
+            _ => Root::upcast(HTMLBodyElement::new(atom!("body"), None, &*context.owner_doc())),
         };
 
         // Step 3.
         let fragment = try!(context.upcast::<Node>().parse_fragment(text));
 
         // Step 4.
-        context.insert_adjacent(position, fragment.upcast()).map(|_| ())
+        self.insert_adjacent(position, fragment.upcast()).map(|_| ())
     }
 }
 
@@ -2215,11 +2224,47 @@ impl VirtualMethods for Element {
             }
         }
     }
+
+    fn adopting_steps(&self, old_doc: &Document) {
+        self.super_type().unwrap().adopting_steps(old_doc);
+
+        if document_from_node(self).is_html_document() != old_doc.is_html_document() {
+            self.tag_name.clear();
+        }
+    }
+}
+
+impl<'a> ::selectors::MatchAttrGeneric for Root<Element> {
+    type Impl = ServoSelectorImpl;
+
+    fn match_attr<F>(&self, attr: &AttrSelector<ServoSelectorImpl>, test: F) -> bool
+        where F: Fn(&str) -> bool
+    {
+        use ::selectors::Element;
+        let local_name = {
+            if self.is_html_element_in_html_document() {
+                &attr.lower_name
+            } else {
+                &attr.name
+            }
+        };
+        match attr.namespace {
+            NamespaceConstraint::Specific(ref ns) => {
+                self.get_attribute(ns, local_name)
+                    .map_or(false, |attr| {
+                        test(&attr.value())
+                    })
+            },
+            NamespaceConstraint::Any => {
+                self.attrs.borrow().iter().any(|attr| {
+                    attr.local_name() == local_name && test(&attr.value())
+                })
+            }
+        }
+    }
 }
 
 impl<'a> ::selectors::Element for Root<Element> {
-    type Impl = ServoSelectorImpl;
-
     fn parent_element(&self) -> Option<Root<Element>> {
         self.upcast::<Node>().GetParentElement()
     }
@@ -2254,12 +2299,12 @@ impl<'a> ::selectors::Element for Root<Element> {
         })
     }
 
-    fn get_local_name(&self) -> BorrowedAtom {
-        BorrowedAtom(self.local_name())
+    fn get_local_name(&self) -> &Atom {
+        self.local_name()
     }
 
-    fn get_namespace(&self) -> BorrowedNamespace {
-        BorrowedNamespace(self.namespace())
+    fn get_namespace(&self) -> &Namespace {
+        self.namespace()
     }
 
     fn match_non_ts_pseudo_class(&self, pseudo_class: NonTSPseudoClass) -> bool {
@@ -2292,7 +2337,8 @@ impl<'a> ::selectors::Element for Root<Element> {
             NonTSPseudoClass::Checked |
             NonTSPseudoClass::Indeterminate |
             NonTSPseudoClass::ReadWrite |
-            NonTSPseudoClass::PlaceholderShown =>
+            NonTSPseudoClass::PlaceholderShown |
+            NonTSPseudoClass::Target =>
                 Element::state(self).contains(pseudo_class.state_flag()),
         }
     }
@@ -2313,31 +2359,6 @@ impl<'a> ::selectors::Element for Root<Element> {
             let tokens = tokens.as_tokens();
             for token in tokens {
                 callback(token);
-            }
-        }
-    }
-
-    fn match_attr<F>(&self, attr: &AttrSelector, test: F) -> bool
-        where F: Fn(&str) -> bool
-    {
-        let local_name = {
-            if self.is_html_element_in_html_document() {
-                &attr.lower_name
-            } else {
-                &attr.name
-            }
-        };
-        match attr.namespace {
-            NamespaceConstraint::Specific(ref ns) => {
-                self.get_attribute(ns, local_name)
-                    .map_or(false, |attr| {
-                        test(&attr.value())
-                    })
-            },
-            NamespaceConstraint::Any => {
-                self.attrs.borrow().iter().any(|attr| {
-                    attr.local_name() == local_name && test(&attr.value())
-                })
             }
         }
     }
@@ -2519,8 +2540,13 @@ impl Element {
         self.state.get().contains(IN_ACTIVE_STATE)
     }
 
+    /// https://html.spec.whatwg.org/multipage/#concept-selector-active
     pub fn set_active_state(&self, value: bool) {
-        self.set_state(IN_ACTIVE_STATE, value)
+        self.set_state(IN_ACTIVE_STATE, value);
+
+        if let Some(parent) = self.upcast::<Node>().GetParentElement() {
+            parent.set_active_state(value);
+        }
     }
 
     pub fn focus_state(&self) -> bool {
@@ -2573,6 +2599,14 @@ impl Element {
             self.set_state(IN_PLACEHOLDER_SHOWN_STATE, value);
             self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
         }
+    }
+
+    pub fn target_state(&self) -> bool {
+        self.state.get().contains(IN_TARGET_STATE)
+    }
+
+    pub fn set_target_state(&self, value: bool) {
+       self.set_state(IN_TARGET_STATE, value)
     }
 }
 
@@ -2668,5 +2702,40 @@ impl AtomicElementFlags {
 
     fn insert(&self, flags: ElementFlags) {
         self.0.fetch_or(flags.bits() as usize, Ordering::Relaxed);
+    }
+}
+
+/// A holder for an element's "tag name", which will be lazily
+/// resolved and cached. Should be reset when the document
+/// owner changes.
+#[derive(JSTraceable, HeapSizeOf)]
+struct TagName {
+    ptr: DOMRefCell<Option<Atom>>,
+}
+
+impl TagName {
+    fn new() -> TagName {
+        TagName { ptr: DOMRefCell::new(None) }
+    }
+
+    /// Retrieve a copy of the current inner value. If it is `None`, it is
+    /// initialized with the result of `cb` first.
+    fn or_init<F>(&self, cb: F) -> Atom
+        where F: FnOnce() -> Atom
+    {
+        match &mut *self.ptr.borrow_mut() {
+            &mut Some(ref name) => name.clone(),
+            ptr => {
+                let name = cb();
+                *ptr = Some(name.clone());
+                name
+            }
+        }
+    }
+
+    /// Clear the cached tag name, so that it will be re-calculated the
+    /// next time that `or_init()` is called.
+    fn clear(&self) {
+        *self.ptr.borrow_mut() = None;
     }
 }

@@ -13,7 +13,7 @@
  */
 
 // https://fetch.spec.whatwg.org/#bodyinit
-typedef (Blob or /*BufferSource or FormData or */DOMString or URLSearchParams) BodyInit;
+typedef (Blob or /*BufferSource or */ FormData or DOMString or URLSearchParams) BodyInit;
 
 enum XMLHttpRequestResponseType {
   "",
@@ -24,8 +24,7 @@ enum XMLHttpRequestResponseType {
   "text"
 };
 
-[Constructor/*,
- Exposed=Window,Worker*/]
+[Constructor, Exposed=(Window,Worker)]
 interface XMLHttpRequest : XMLHttpRequestEventTarget {
   // event handler
   attribute EventHandler onreadystatechange;

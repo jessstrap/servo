@@ -29,7 +29,6 @@ use gfx::display_list::{LayeredItem, LayerInfo, LineDisplayItem, OpaqueNode};
 use gfx::display_list::{SolidColorDisplayItem, StackingContext, StackingContextType};
 use gfx::display_list::{TextDisplayItem, TextOrientation, WebRenderImageInfo};
 use gfx::paint_thread::THREAD_TINT_COLORS;
-use gfx::text::glyph::ByteIndex;
 use gfx_traits::{color, ScrollPolicy, StackingContextId};
 use inline::{FIRST_FRAGMENT_OF_ELEMENT, InlineFlow, LAST_FRAGMENT_OF_ELEMENT};
 use ipc_channel::ipc;
@@ -38,18 +37,20 @@ use model::{self, MaybeAuto, ToGfxMatrix};
 use net_traits::image::base::PixelFormat;
 use net_traits::image_cache_thread::UsePlaceholder;
 use range::Range;
+use script_layout_interface::restyle_damage::REPAINT;
 use std::default::Default;
 use std::sync::Arc;
 use std::{cmp, f32};
 use style::computed_values::filter::Filter;
+use style::computed_values::text_shadow::TextShadow;
 use style::computed_values::{_servo_overflow_clip_box as overflow_clip_box};
 use style::computed_values::{background_attachment, background_clip, background_origin};
 use style::computed_values::{background_repeat, background_size, border_style};
 use style::computed_values::{cursor, image_rendering, overflow_x, pointer_events, position};
 use style::computed_values::{transform, transform_style, visibility};
 use style::logical_geometry::{LogicalPoint, LogicalRect, LogicalSize, WritingMode};
-use style::properties::style_structs::ServoBorder;
-use style::properties::{self, ComputedValues, ServoComputedValues};
+use style::properties::style_structs;
+use style::properties::{self, ServoComputedValues};
 use style::values::RGBA;
 use style::values::computed;
 use style::values::computed::{LengthOrNone, LengthOrPercentage, LengthOrPercentageOrAuto, LinearGradient};
@@ -257,14 +258,12 @@ pub trait FragmentDisplayListBuilding {
     /// Creates the text display item for one text fragment. This can be called multiple times for
     /// one fragment if there are text shadows.
     ///
-    /// `shadow_blur_radius` will be `Some` if this is a shadow, even if the blur radius is zero.
+    /// `text_shadow` will be `Some` if this is rendering a shadow.
     fn build_display_list_for_text_fragment(&self,
                                             state: &mut DisplayListBuildState,
                                             text_fragment: &ScannedTextFragmentInfo,
-                                            text_color: RGBA,
                                             stacking_relative_content_box: &Rect<Au>,
-                                            shadow_blur_radius: Option<Au>,
-                                            offset: &Point2D<Au>,
+                                            text_shadow: Option<&TextShadow>,
                                             clip: &ClippingRegion);
 
     /// Creates the display item for a text decoration: underline, overline, or line-through.
@@ -315,7 +314,7 @@ fn handle_overlapping_radii(size: &Size2D<Au>, radii: &BorderRadii<Au>) -> Borde
     }
 }
 
-fn build_border_radius(abs_bounds: &Rect<Au>, border_style: &ServoBorder) -> BorderRadii<Au> {
+fn build_border_radius(abs_bounds: &Rect<Au>, border_style: &style_structs::Border) -> BorderRadii<Au> {
     // TODO(cgaebel): Support border radii even in the case of multiple border widths.
     // This is an extension of supporting elliptical radii. For now, all percentage
     // radii will be relative to the width.
@@ -377,7 +376,7 @@ impl FragmentDisplayListBuilding for Fragment {
         let base = state.create_base_display_item(&bounds,
                                                   &clip,
                                                   self.node,
-                                                  style.get_cursor(Cursor::DefaultCursor),
+                                                  style.get_cursor(Cursor::Default),
                                                   display_list_section);
         state.add_display_item(
             DisplayItem::SolidColorClass(box SolidColorDisplayItem {
@@ -399,7 +398,7 @@ impl FragmentDisplayListBuilding for Fragment {
                                                                        gradient,
                                                                        style);
             }
-            Some(computed::Image::Url(ref image_url)) => {
+            Some(computed::Image::Url(ref image_url, ref _extra_data)) => {
                 self.build_display_list_for_background_image(state,
                                                              style,
                                                              display_list_section,
@@ -521,9 +520,9 @@ impl FragmentDisplayListBuilding for Fragment {
             };
 
             // Use `background-position` to get the offset.
-            let horizontal_position = model::specified(background.background_position.horizontal,
+            let horizontal_position = model::specified(background.background_position.0.horizontal,
                                                        bounds.size.width - image_size.width);
-            let vertical_position = model::specified(background.background_position.vertical,
+            let vertical_position = model::specified(background.background_position.0.vertical,
                                                      bounds.size.height - image_size.height);
 
             let abs_x = border.left + virtual_origin_x + horizontal_position + origin_x;
@@ -569,7 +568,7 @@ impl FragmentDisplayListBuilding for Fragment {
             let base = state.create_base_display_item(&bounds,
                                                       &clip,
                                                       self.node,
-                                                      style.get_cursor(Cursor::DefaultCursor),
+                                                      style.get_cursor(Cursor::Default),
                                                       display_list_section);
             state.add_display_item(DisplayItem::ImageClass(box ImageDisplayItem {
                 base: base,
@@ -697,7 +696,7 @@ impl FragmentDisplayListBuilding for Fragment {
         let base = state.create_base_display_item(absolute_bounds,
                                                   &clip,
                                                   self.node,
-                                                  style.get_cursor(Cursor::DefaultCursor),
+                                                  style.get_cursor(Cursor::Default),
                                                   display_list_section);
         let gradient_display_item = DisplayItem::GradientClass(box GradientDisplayItem {
             base: base,
@@ -727,7 +726,7 @@ impl FragmentDisplayListBuilding for Fragment {
             let base = state.create_base_display_item(&bounds,
                                                       &clip,
                                                       self.node,
-                                                      style.get_cursor(Cursor::DefaultCursor),
+                                                      style.get_cursor(Cursor::Default),
                                                       display_list_section);
             state.add_display_item(DisplayItem::BoxShadowClass(box BoxShadowDisplayItem {
                 base: base,
@@ -799,7 +798,7 @@ impl FragmentDisplayListBuilding for Fragment {
         let base = state.create_base_display_item(&bounds,
                                                   &clip,
                                                   self.node,
-                                                  style.get_cursor(Cursor::DefaultCursor),
+                                                  style.get_cursor(Cursor::Default),
                                                   display_list_section);
         state.add_display_item(DisplayItem::BorderClass(box BorderDisplayItem {
             base: base,
@@ -842,7 +841,7 @@ impl FragmentDisplayListBuilding for Fragment {
         let base = state.create_base_display_item(&bounds,
                                                   &clip,
                                                   self.node,
-                                                  style.get_cursor(Cursor::DefaultCursor),
+                                                  style.get_cursor(Cursor::Default),
                                                   DisplayListSection::Outlines);
         state.add_display_item(DisplayItem::BorderClass(box BorderDisplayItem {
             base: base,
@@ -867,7 +866,7 @@ impl FragmentDisplayListBuilding for Fragment {
         let base = state.create_base_display_item(stacking_relative_border_box,
                                                   clip,
                                                   self.node,
-                                                  style.get_cursor(Cursor::DefaultCursor),
+                                                  style.get_cursor(Cursor::Default),
                                                   DisplayListSection::Content);
         state.add_display_item(DisplayItem::BorderClass(box BorderDisplayItem {
             base: base,
@@ -888,7 +887,7 @@ impl FragmentDisplayListBuilding for Fragment {
         let base = state.create_base_display_item(&baseline,
                                                   clip,
                                                   self.node,
-                                                  style.get_cursor(Cursor::DefaultCursor),
+                                                  style.get_cursor(Cursor::Default),
                                                   DisplayListSection::Content);
         state.add_display_item(DisplayItem::LineClass(box LineDisplayItem {
             base: base,
@@ -905,7 +904,7 @@ impl FragmentDisplayListBuilding for Fragment {
         let base = state.create_base_display_item(stacking_relative_border_box,
                                                   clip,
                                                   self.node,
-                                                  self.style.get_cursor(Cursor::DefaultCursor),
+                                                  self.style.get_cursor(Cursor::Default),
                                                   DisplayListSection::Content);
         state.add_display_item(DisplayItem::BorderClass(box BorderDisplayItem {
             base: base,
@@ -956,7 +955,7 @@ impl FragmentDisplayListBuilding for Fragment {
             let base = state.create_base_display_item(stacking_relative_border_box,
                                                       &clip,
                                                       self.node,
-                                                      self.style.get_cursor(Cursor::DefaultCursor),
+                                                      self.style.get_cursor(Cursor::Default),
                                                       display_list_section);
             state.add_display_item(
                 DisplayItem::SolidColorClass(box SolidColorDisplayItem {
@@ -970,7 +969,8 @@ impl FragmentDisplayListBuilding for Fragment {
             Some(insertion_point_index) => insertion_point_index,
             None => return,
         };
-        let range = Range::new(ByteIndex(0), insertion_point_index);
+        let range = Range::new(scanned_text_fragment_info.range.begin(),
+                               insertion_point_index - scanned_text_fragment_info.range.begin());
         let advance = scanned_text_fragment_info.run.advance_for_range(&range);
 
         let insertion_point_bounds;
@@ -981,14 +981,14 @@ impl FragmentDisplayListBuilding for Fragment {
                                        stacking_relative_border_box.origin.y),
                           Size2D::new(INSERTION_POINT_LOGICAL_WIDTH,
                                       stacking_relative_border_box.size.height));
-            cursor = Cursor::TextCursor;
+            cursor = Cursor::Text;
         } else {
             insertion_point_bounds =
                 Rect::new(Point2D::new(stacking_relative_border_box.origin.x,
                                        stacking_relative_border_box.origin.y + advance),
                           Size2D::new(stacking_relative_border_box.size.width,
                                       INSERTION_POINT_LOGICAL_WIDTH));
-            cursor = Cursor::VerticalTextCursor;
+            cursor = Cursor::VerticalText;
         };
 
         let base = state.create_base_display_item(&insertion_point_bounds,
@@ -1011,6 +1011,7 @@ impl FragmentDisplayListBuilding for Fragment {
                           display_list_section: DisplayListSection,
                           clip: &ClippingRegion,
                           stacking_relative_display_port: &Rect<Au>) {
+        self.restyle_damage.remove(REPAINT);
         if self.style().get_inheritedbox().visibility != visibility::T::visible {
             return
         }
@@ -1148,32 +1149,19 @@ impl FragmentDisplayListBuilding for Fragment {
                 // NB: According to CSS-BACKGROUNDS, text shadows render in *reverse* order (front
                 // to back).
 
-                // TODO(emilio): Allow changing more properties by ::selection
-                let text_color = if text_fragment.selected() {
-                    self.selected_style().get_color().color
-                } else {
-                    self.style().get_color().color
-                };
-
                 for text_shadow in self.style.get_inheritedtext().text_shadow.0.iter().rev() {
-                    let offset = &Point2D::new(text_shadow.offset_x, text_shadow.offset_y);
-                    let color = self.style().resolve_color(text_shadow.color);
                     self.build_display_list_for_text_fragment(state,
                                                               &**text_fragment,
-                                                              color,
                                                               &stacking_relative_content_box,
-                                                              Some(text_shadow.blur_radius),
-                                                              offset,
+                                                              Some(text_shadow),
                                                               clip);
                 }
 
                 // Create the main text display item.
                 self.build_display_list_for_text_fragment(state,
                                                           &**text_fragment,
-                                                          text_color,
                                                           &stacking_relative_content_box,
                                                           None,
-                                                          &Point2D::new(Au(0), Au(0)),
                                                           clip);
 
                 if opts::get().show_debug_fragment_borders {
@@ -1208,7 +1196,7 @@ impl FragmentDisplayListBuilding for Fragment {
                         &stacking_relative_content_box,
                         clip,
                         self.node,
-                        self.style.get_cursor(Cursor::DefaultCursor),
+                        self.style.get_cursor(Cursor::Default),
                         DisplayListSection::Content);
                     let item = DisplayItem::IframeClass(box IframeDisplayItem {
                         base: base,
@@ -1235,7 +1223,7 @@ impl FragmentDisplayListBuilding for Fragment {
                         &stacking_relative_content_box,
                         clip,
                         self.node,
-                        self.style.get_cursor(Cursor::DefaultCursor),
+                        self.style.get_cursor(Cursor::Default),
                         DisplayListSection::Content);
                     state.add_display_item(DisplayItem::ImageClass(box ImageDisplayItem {
                         base: base,
@@ -1271,7 +1259,7 @@ impl FragmentDisplayListBuilding for Fragment {
                         &stacking_relative_content_box,
                         clip,
                         self.node,
-                        self.style.get_cursor(Cursor::DefaultCursor),
+                        self.style.get_cursor(Cursor::Default),
                         DisplayListSection::Content);
                     let display_item = match canvas_data {
                         CanvasData::Pixels(canvas_data) => {
@@ -1537,20 +1525,31 @@ impl FragmentDisplayListBuilding for Fragment {
     fn build_display_list_for_text_fragment(&self,
                                             state: &mut DisplayListBuildState,
                                             text_fragment: &ScannedTextFragmentInfo,
-                                            text_color: RGBA,
                                             stacking_relative_content_box: &Rect<Au>,
-                                            shadow_blur_radius: Option<Au>,
-                                            offset: &Point2D<Au>,
+                                            text_shadow: Option<&TextShadow>,
                                             clip: &ClippingRegion) {
+        // TODO(emilio): Allow changing more properties by ::selection
+        let text_color = if let Some(shadow) = text_shadow {
+            // If we're painting a shadow, paint the text the same color as the shadow.
+            self.style().resolve_color(shadow.color)
+        } else if text_fragment.selected() {
+            // Otherwise, paint the text with the color as described in its styling.
+            self.selected_style().get_color().color
+        } else {
+            self.style().get_color().color
+        };
+        let offset = text_shadow.map(|s| Point2D::new(s.offset_x, s.offset_y)).unwrap_or_else(Point2D::zero);
+        let shadow_blur_radius = text_shadow.map(|s| s.blur_radius).unwrap_or(Au(0));
+
         // Determine the orientation and cursor to use.
         let (orientation, cursor) = if self.style.writing_mode.is_vertical() {
             if self.style.writing_mode.is_sideways_left() {
-                (TextOrientation::SidewaysLeft, Cursor::VerticalTextCursor)
+                (TextOrientation::SidewaysLeft, Cursor::VerticalText)
             } else {
-                (TextOrientation::SidewaysRight, Cursor::VerticalTextCursor)
+                (TextOrientation::SidewaysRight, Cursor::VerticalText)
             }
         } else {
-            (TextOrientation::Upright, Cursor::TextCursor)
+            (TextOrientation::Upright, Cursor::Text)
         };
 
         // Compute location of the baseline.
@@ -1558,7 +1557,7 @@ impl FragmentDisplayListBuilding for Fragment {
         // FIXME(pcwalton): Get the real container size.
         let container_size = Size2D::zero();
         let metrics = &text_fragment.run.font_metrics;
-        let stacking_relative_content_box = stacking_relative_content_box.translate(offset);
+        let stacking_relative_content_box = stacking_relative_content_box.translate(&offset);
         let baseline_origin = stacking_relative_content_box.origin +
             LogicalPoint::new(self.style.writing_mode,
                               Au(0),
@@ -1578,19 +1577,17 @@ impl FragmentDisplayListBuilding for Fragment {
             text_color: text_color.to_gfx_color(),
             orientation: orientation,
             baseline_origin: baseline_origin,
-            blur_radius: shadow_blur_radius.unwrap_or(Au(0)),
+            blur_radius: shadow_blur_radius,
         }));
 
         // Create display items for text decorations.
         let mut text_decorations = self.style()
                                        .get_inheritedtext()
                                        ._servo_text_decorations_in_effect;
-        if shadow_blur_radius.is_some() {
-            // If we're painting a shadow, paint the decorations the same color as the shadow.
-            text_decorations.underline = text_decorations.underline.map(|_| text_color);
-            text_decorations.overline = text_decorations.overline.map(|_| text_color);
-            text_decorations.line_through = text_decorations.line_through.map(|_| text_color);
-        }
+        // Note that the text decoration colors are always the same as the text color.
+        text_decorations.underline = text_decorations.underline.map(|_| text_color);
+        text_decorations.overline = text_decorations.overline.map(|_| text_color);
+        text_decorations.line_through = text_decorations.line_through.map(|_| text_color);
 
         let stacking_relative_content_box =
             LogicalRect::from_physical(self.style.writing_mode,
@@ -1605,7 +1602,7 @@ impl FragmentDisplayListBuilding for Fragment {
                                                         underline_color,
                                                         &stacking_relative_box,
                                                         clip,
-                                                        shadow_blur_radius.unwrap_or(Au(0)));
+                                                        shadow_blur_radius);
         }
 
         if let Some(ref overline_color) = text_decorations.overline {
@@ -1615,7 +1612,7 @@ impl FragmentDisplayListBuilding for Fragment {
                                                         overline_color,
                                                         &stacking_relative_box,
                                                         clip,
-                                                        shadow_blur_radius.unwrap_or(Au(0)));
+                                                        shadow_blur_radius);
         }
 
         if let Some(ref line_through_color) = text_decorations.line_through {
@@ -1627,7 +1624,7 @@ impl FragmentDisplayListBuilding for Fragment {
                                                         line_through_color,
                                                         &stacking_relative_box,
                                                         clip,
-                                                        shadow_blur_radius.unwrap_or(Au(0)));
+                                                        shadow_blur_radius);
         }
     }
 
@@ -1649,7 +1646,7 @@ impl FragmentDisplayListBuilding for Fragment {
             &shadow_bounds(&stacking_relative_box, blur_radius, Au(0)),
             clip,
             self.node,
-            self.style.get_cursor(Cursor::DefaultCursor),
+            self.style.get_cursor(Cursor::Default),
             DisplayListSection::Content);
         state.add_display_item(DisplayItem::BoxShadowClass(box BoxShadowDisplayItem {
             base: base,

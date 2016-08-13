@@ -15,11 +15,12 @@ use flow::{Flow, FlowClass, OpaqueFlow};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use gfx::display_list::StackingContext;
 use gfx_traits::StackingContextId;
+use gfx_traits::print_tree::PrintTree;
 use std::fmt;
 use std::sync::Arc;
+use style::context::SharedStyleContext;
 use style::logical_geometry::LogicalSize;
 use style::properties::ServoComputedValues;
-use util::print_tree::PrintTree;
 
 /// A table formatting context.
 pub struct TableCaptionFlow {
@@ -55,9 +56,9 @@ impl Flow for TableCaptionFlow {
         self.block_flow.bubble_inline_sizes();
     }
 
-    fn assign_inline_sizes(&mut self, ctx: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, shared_context: &SharedStyleContext) {
         debug!("assign_inline_sizes({}): assigning inline_size for flow", "table_caption");
-        self.block_flow.assign_inline_sizes(ctx);
+        self.block_flow.assign_inline_sizes(shared_context);
     }
 
     fn assign_block_size<'a>(&mut self, layout_context: &'a LayoutContext<'a>) {

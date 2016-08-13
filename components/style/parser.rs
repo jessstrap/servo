@@ -2,11 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! The context within which CSS code is parsed.
 
 use cssparser::{Parser, SourcePosition};
 use error_reporting::ParseErrorReporter;
 #[cfg(feature = "gecko")]
 use gecko_bindings::ptr::{GeckoArcPrincipal, GeckoArcURI};
+use selector_impl::TheSelectorImpl;
 use selectors::parser::ParserContext as SelectorParserContext;
 use stylesheets::Origin;
 use url::Url;
@@ -36,7 +38,7 @@ impl ParserContextExtraData {
 pub struct ParserContext<'a> {
     pub stylesheet_origin: Origin,
     pub base_url: &'a Url,
-    pub selector_context: SelectorParserContext,
+    pub selector_context: SelectorParserContext<TheSelectorImpl>,
     pub error_reporter: Box<ParseErrorReporter + Send>,
     pub extra_data: ParserContextExtraData,
 }

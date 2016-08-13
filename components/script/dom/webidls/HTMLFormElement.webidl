@@ -4,6 +4,7 @@
 
 // https://html.spec.whatwg.org/multipage/#htmlformelement
 //[OverrideBuiltins]
+[Exposed=(Window,Worker)]
 interface HTMLFormElement : HTMLElement {
            attribute DOMString acceptCharset;
            attribute DOMString action;
@@ -17,7 +18,7 @@ interface HTMLFormElement : HTMLElement {
 
   [SameObject] readonly attribute HTMLFormControlsCollection elements;
   readonly attribute unsigned long length;
-  //getter Element (unsigned long index);
+  getter Element? (unsigned long index);
   //getter (RadioNodeList or Element) (DOMString name);
 
   void submit();

@@ -12,13 +12,16 @@ use euclid::size::Size2D;
 use flow;
 use flow_ref::FlowRef;
 use fragment::{Fragment, FragmentBorderBoxIterator, SpecificFragmentInfo};
-use gfx::display_list::OpaqueNode;
+use gfx::display_list::{DisplayItemMetadata, DisplayList, OpaqueNode, ScrollOffsetMap};
 use gfx_traits::LayerId;
-use layout_thread::LayoutThreadData;
+use ipc_channel::ipc::IpcSender;
 use opaque_node::OpaqueNodeMethods;
-use script::layout_interface::{ContentBoxResponse, NodeOverflowResponse, ContentBoxesResponse, NodeGeometryResponse};
-use script::layout_interface::{HitTestResponse, LayoutRPC, OffsetParentResponse, NodeLayerIdResponse};
-use script::layout_interface::{ResolvedStyleResponse, MarginStyleResponse};
+use script_layout_interface::rpc::{ContentBoxResponse, ContentBoxesResponse};
+use script_layout_interface::rpc::{HitTestResponse, LayoutRPC};
+use script_layout_interface::rpc::{MarginStyleResponse, NodeGeometryResponse};
+use script_layout_interface::rpc::{NodeLayerIdResponse, NodeOverflowResponse};
+use script_layout_interface::rpc::{OffsetParentResponse, ResolvedStyleResponse};
+use script_layout_interface::wrapper_traits::{LayoutNode, ThreadSafeLayoutNode};
 use script_traits::LayoutMsg as ConstellationMsg;
 use script_traits::UntrustedNodeAddress;
 use sequential;
@@ -27,14 +30,61 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use string_cache::Atom;
 use style::computed_values;
+use style::context::StyleContext;
 use style::logical_geometry::{WritingMode, BlockFlowDirection, InlineBaseDirection};
-use style::properties::ComputedValues;
 use style::properties::longhands::{display, position};
 use style::properties::style_structs;
 use style::selector_impl::PseudoElement;
-use style::values::AuExtensionMethods;
+use style::selector_matching::Stylist;
+use style::values::LocalToCss;
 use style_traits::cursor::Cursor;
-use wrapper::{LayoutNode, ThreadSafeLayoutNode};
+use wrapper::{LayoutNodeLayoutData, ThreadSafeLayoutNodeHelpers};
+
+/// Mutable data belonging to the LayoutThread.
+///
+/// This needs to be protected by a mutex so we can do fast RPCs.
+pub struct LayoutThreadData {
+    /// The channel on which messages can be sent to the constellation.
+    pub constellation_chan: IpcSender<ConstellationMsg>,
+
+    /// The root stacking context.
+    pub display_list: Option<Arc<DisplayList>>,
+
+    /// Performs CSS selector matching and style resolution.
+    pub stylist: Arc<Stylist>,
+
+    /// A queued response for the union of the content boxes of a node.
+    pub content_box_response: Rect<Au>,
+
+    /// A queued response for the content boxes of a node.
+    pub content_boxes_response: Vec<Rect<Au>>,
+
+    /// A queued response for the client {top, left, width, height} of a node in pixels.
+    pub client_rect_response: Rect<i32>,
+
+    pub layer_id_response: Option<LayerId>,
+
+    /// A queued response for the node at a given point
+    pub hit_test_response: (Option<DisplayItemMetadata>, bool),
+
+    /// A pair of overflow property in x and y
+    pub overflow_response: NodeOverflowResponse,
+
+    /// A queued response for the scroll {top, left, width, height} of a node in pixels.
+    pub scroll_area_response: Rect<i32>,
+
+    /// A queued response for the resolved style property of an element.
+    pub resolved_style_response: Option<String>,
+
+    /// A queued response for the offset parent/rect of a node.
+    pub offset_parent_response: OffsetParentResponse,
+
+    /// A queued response for the offset parent/rect of a node.
+    pub margin_style_response: MarginStyleResponse,
+
+    /// Scroll offsets of stacking contexts. This will only be populated if WebRender is in use.
+    pub stacking_context_scroll_offsets: ScrollOffsetMap,
+}
 
 pub struct LayoutRPCImpl(pub Arc<Mutex<LayoutThreadData>>);
 
@@ -74,7 +124,7 @@ impl LayoutRPC for LayoutRPCImpl {
         if update_cursor {
             // Compute the new cursor.
             let cursor = match *result {
-                None => Cursor::DefaultCursor,
+                None => Cursor::Default,
                 Some(dim) => dim.pointing.unwrap(),
             };
             rw_data.constellation_chan.send(ConstellationMsg::SetCursor(cursor)).unwrap();
@@ -84,15 +134,23 @@ impl LayoutRPC for LayoutRPCImpl {
         }
     }
 
-    fn nodes_from_point(&self, point: Point2D<f32>) -> Vec<UntrustedNodeAddress> {
-        let point = Point2D::new(Au::from_f32_px(point.x), Au::from_f32_px(point.y));
+    fn nodes_from_point(&self,
+                        page_point: Point2D<f32>,
+                        client_point: Point2D<f32>) -> Vec<UntrustedNodeAddress> {
+        let page_point = Point2D::new(Au::from_f32_px(page_point.x),
+                                      Au::from_f32_px(page_point.y));
+        let client_point = Point2D::new(Au::from_f32_px(client_point.x),
+                                        Au::from_f32_px(client_point.y));
+
         let nodes_from_point_list = {
             let &LayoutRPCImpl(ref rw_data) = self;
             let rw_data = rw_data.lock().unwrap();
             let result = match rw_data.display_list {
                 None => panic!("Tried to hit test without a DisplayList"),
                 Some(ref display_list) => {
-                    display_list.hit_test(&point, &rw_data.stacking_context_scroll_offsets)
+                    display_list.hit_test(&page_point,
+                                          &client_point,
+                                          &rw_data.stacking_context_scroll_offsets)
                 }
             };
 
@@ -100,6 +158,7 @@ impl LayoutRPC for LayoutRPCImpl {
         };
 
         nodes_from_point_list.iter()
+           .rev()
            .map(|metadata| metadata.node.to_untrusted_node_address())
            .collect()
     }
@@ -399,7 +458,7 @@ impl ParentOffsetBorderBoxIterator {
 
 impl FragmentBorderBoxIterator for FragmentLocatingFragmentIterator {
     fn process(&mut self, fragment: &Fragment, _: i32, border_box: &Rect<Au>) {
-        let style_structs::ServoBorder {
+        let style_structs::Border {
             border_top_width: top_width,
             border_right_width: right_width,
             border_bottom_width: bottom_width,
@@ -425,7 +484,7 @@ impl FragmentBorderBoxIterator for UnioningFragmentScrollAreaIterator {
         // increase in size. To work around this, we store the original elements padding
         // rectangle as `origin_rect` and the union of all child elements padding and
         // margin rectangles as `union_rect`.
-        let style_structs::ServoBorder {
+        let style_structs::Border {
             border_top_width: top_border,
             border_right_width: right_border,
             border_bottom_width: bottom_border,
@@ -564,11 +623,39 @@ pub fn process_node_scroll_area_request< N: LayoutNode>(requested_node: N, layou
     }
 }
 
+/// Ensures that a node's data, and all its parents' is initialized. This is
+/// needed to resolve style lazily.
+fn ensure_node_data_initialized<N: LayoutNode>(node: &N) {
+    let mut cur = Some(node.clone());
+    while let Some(current) = cur {
+        if current.borrow_data().is_some() {
+            break;
+        }
+
+        current.initialize_data();
+        cur = current.parent_node();
+    }
+}
+
 /// Return the resolved value of property for a given (pseudo)element.
 /// https://drafts.csswg.org/cssom/#resolved-value
-pub fn process_resolved_style_request<N: LayoutNode>(
-            requested_node: N, pseudo: &Option<PseudoElement>,
-            property: &Atom, layout_root: &mut FlowRef) -> Option<String> {
+pub fn process_resolved_style_request<'a, N, C>(requested_node: N,
+                                                style_context: &'a C,
+                                                pseudo: &Option<PseudoElement>,
+                                                property: &Atom,
+                                                layout_root: &mut FlowRef) -> Option<String>
+    where N: LayoutNode,
+          C: StyleContext<'a>
+{
+    use style::traversal::ensure_node_styled;
+
+    // This node might have display: none, or it's style might be not up to
+    // date, so we might need to do style recalc.
+    //
+    // FIXME(emilio): Is a bit shame we have to do this instead of in style.
+    ensure_node_data_initialized(&requested_node);
+    ensure_node_styled(requested_node, style_context);
+
     let layout_node = requested_node.to_threadsafe();
     let layout_node = match *pseudo {
         Some(PseudoElement::Before) => layout_node.get_before_pseudo(),

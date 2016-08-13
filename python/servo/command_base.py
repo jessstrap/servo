@@ -7,12 +7,16 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
+import gzip
+import itertools
+import locale
 import os
 from os import path
 import contextlib
 import subprocess
 from subprocess import PIPE
 import sys
+import tarfile
 import platform
 
 import toml
@@ -33,6 +37,55 @@ def cd(new_path):
         os.chdir(previous_path)
 
 
+@contextlib.contextmanager
+def setlocale(name):
+    """Context manager for changing the current locale"""
+    saved_locale = locale.setlocale(locale.LC_ALL)
+    try:
+        yield locale.setlocale(locale.LC_ALL, name)
+    finally:
+        locale.setlocale(locale.LC_ALL, saved_locale)
+
+
+def archive_deterministically(dir_to_archive, dest_archive, prepend_path=None):
+    """Create a .tar.gz archive in a deterministic (reproducible) manner.
+
+    See https://reproducible-builds.org/docs/archives/ for more details."""
+
+    def reset(tarinfo):
+        """Helper to reset owner/group and modification time for tar entries"""
+        tarinfo.uid = tarinfo.gid = 0
+        tarinfo.uname = tarinfo.gname = "root"
+        tarinfo.mtime = 0
+        return tarinfo
+
+    dest_archive = os.path.abspath(dest_archive)
+    with cd(dir_to_archive):
+        current_dir = "."
+        file_list = [current_dir]
+        for root, dirs, files in os.walk(current_dir):
+            for name in itertools.chain(dirs, files):
+                file_list.append(os.path.join(root, name))
+
+        # Sort file entries with the fixed locale
+        with setlocale('C'):
+            file_list.sort(cmp=locale.strcoll)
+
+        # Use a temporary file and atomic rename to avoid partially-formed
+        # packaging (in case of exceptional situations like running out of disk space).
+        # TODO do this in a temporary folder after #11983 is fixed
+        temp_file = '{}.temp~'.format(dest_archive)
+        with os.fdopen(os.open(temp_file, os.O_WRONLY | os.O_CREAT, 0644), 'w') as out_file:
+            with gzip.GzipFile('wb', fileobj=out_file, mtime=0) as gzip_file:
+                with tarfile.open(fileobj=gzip_file, mode='w:') as tar_file:
+                    for entry in file_list:
+                        arcname = entry
+                        if prepend_path is not None:
+                            arcname = os.path.normpath(os.path.join(prepend_path, arcname))
+                        tar_file.add(entry, filter=reset, recursive=False, arcname=arcname)
+        os.rename(temp_file, dest_archive)
+
+
 def host_triple():
     os_type = platform.system().lower()
     if os_type == "linux":
@@ -41,7 +94,9 @@ def host_triple():
         os_type = "apple-darwin"
     elif os_type == "android":
         os_type = "linux-androideabi"
-    elif os_type == "windows" or os_type.startswith("mingw64_nt-") or os_type.startswith("cygwin_nt-"):
+    elif os_type == "windows":
+        os_type = "pc-windows-msvc"
+    elif os_type.startswith("mingw64_nt-") or os_type.startswith("cygwin_nt-"):
         os_type = "pc-windows-gnu"
     elif os_type == "freebsd":
         os_type = "unknown-freebsd"
@@ -102,7 +157,20 @@ def check_call(*args, **kwargs):
         print(' '.join(args[0]))
     # we have to use shell=True in order to get PATH handling
     # when looking for the binary on Windows
-    return subprocess.check_call(*args, shell=sys.platform == 'win32', **kwargs)
+    proc = subprocess.Popen(*args, shell=sys.platform == 'win32', **kwargs)
+    status = None
+    # Leave it to the subprocess to handle Ctrl+C. If it terminates as
+    # a result of Ctrl+C, proc.wait() will return a status code, and,
+    # we get out of the loop. If it doesn't, like e.g. gdb, we continue
+    # waiting.
+    while status is None:
+        try:
+            status = proc.wait()
+        except KeyboardInterrupt:
+            pass
+
+    if status:
+        raise subprocess.CalledProcessError(status, ' '.join(*args))
 
 
 def is_windows():
@@ -171,9 +239,7 @@ class CommandBase(object):
         self.config["tools"].setdefault("system-cargo", False)
         self.config["tools"].setdefault("rust-root", "")
         self.config["tools"].setdefault("cargo-root", "")
-        if not self.config["tools"]["system-rust"]:
-            self.config["tools"]["rust-root"] = path.join(
-                context.sharedir, "rust", self.rust_path())
+        self.set_use_stable_rust(False)
         if not self.config["tools"]["system-cargo"]:
             self.config["tools"]["cargo-root"] = path.join(
                 context.sharedir, "cargo", self.cargo_build_id())
@@ -192,16 +258,34 @@ class CommandBase(object):
         self.config["android"].setdefault("platform", "android-18")
         self.config["android"].setdefault("target", "arm-linux-androideabi")
 
-    _rust_path = None
+    _use_stable_rust = False
+    _rust_version = None
+    _rust_version_is_stable = False
     _cargo_build_id = None
 
+    def set_use_stable_rust(self, use_stable_rust=True):
+        self._use_stable_rust = use_stable_rust
+        if not self.config["tools"]["system-rust"]:
+            self.config["tools"]["rust-root"] = path.join(
+                self.context.sharedir, "rust", self.rust_path())
+
+    def use_stable_rust(self):
+        return self._use_stable_rust
+
     def rust_path(self):
-        if self._rust_path is None:
-            filename = path.join(self.context.topdir, "rust-nightly-date")
+        version = self.rust_version()
+        if self._use_stable_rust:
+            return "%s/rustc-%s-%s" % (version, version, host_triple())
+        else:
+            return "%s/rustc-nightly-%s" % (version, host_triple())
+
+    def rust_version(self):
+        if self._rust_version is None or self._use_stable_rust != self._rust_version_is_stable:
+            filename = path.join(self.context.topdir,
+                                 "rust-stable-version" if self._use_stable_rust else "rust-nightly-date")
             with open(filename) as f:
-                date = f.read().strip()
-            self._rust_path = ("%s/rustc-nightly-%s" % (date, host_triple()))
-        return self._rust_path
+                self._rust_version = f.read().strip()
+        return self._rust_version
 
     def cargo_build_id(self):
         if self._cargo_build_id is None:
@@ -264,7 +348,7 @@ class CommandBase(object):
                                   " --release" if release else ""))
         sys.exit()
 
-    def build_env(self, hosts_file_path=None, target=None):
+    def build_env(self, hosts_file_path=None, target=None, is_build=False):
         """Return an extended environment dictionary."""
         env = os.environ.copy()
         if sys.platform == "win32" and type(env['PATH']) == unicode:
@@ -304,8 +388,7 @@ class CommandBase(object):
 
         env["CARGO_HOME"] = self.config["tools"]["cargo-home-dir"]
 
-        if "CARGO_TARGET_DIR" not in env:
-            env["CARGO_TARGET_DIR"] = path.join(self.context.topdir, "target")
+        env["CARGO_TARGET_DIR"] = path.join(self.context.topdir, "target")
 
         if extra_lib:
             if sys.platform == "darwin":
@@ -361,6 +444,22 @@ class CommandBase(object):
 
         env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -W unused-extern-crates"
 
+        git_info = []
+        if os.path.isdir('.git') and is_build:
+            git_sha = subprocess.check_output([
+                'git', 'rev-parse', '--short', 'HEAD'
+            ]).strip()
+            git_is_dirty = bool(subprocess.check_output([
+                'git', 'status', '--porcelain'
+            ]).strip())
+
+            git_info.append('')
+            git_info.append(git_sha)
+            if git_is_dirty:
+                git_info.append('dirty')
+
+        env['GIT_INFO'] = '-'.join(git_info)
+
         return env
 
     def servo_crate(self):
@@ -390,14 +489,14 @@ class CommandBase(object):
         rustc_binary_exists = path.exists(rustc_path)
 
         base_target_path = path.join(rust_root, "rustc", "lib", "rustlib")
-        target_exists = True
-        if target is not None:
-            target_path = path.join(base_target_path, target)
-            target_exists = path.exists(target_path)
+
+        target_path = path.join(base_target_path, target or host_triple())
+        target_exists = path.exists(target_path)
 
         if not (self.config['tools']['system-rust'] or (rustc_binary_exists and target_exists)):
             print("looking for rustc at %s" % (rustc_path))
-            Registrar.dispatch("bootstrap-rust", context=self.context, target=filter(None, [target]))
+            Registrar.dispatch("bootstrap-rust", context=self.context, target=filter(None, [target]),
+                               stable=self._use_stable_rust)
 
         cargo_path = path.join(self.config["tools"]["cargo-root"], "cargo", "bin",
                                "cargo" + BIN_SUFFIX)

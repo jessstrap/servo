@@ -32,8 +32,11 @@ use dom::nodelist::NodeList;
 use dom::validation::Validatable;
 use dom::virtualmethods::VirtualMethods;
 use ipc_channel::ipc::{self, IpcSender};
-use net_traits::IpcSend;
-use net_traits::filemanager_thread::FileManagerThreadMsg;
+use mime_guess;
+use msg::constellation_msg::Key;
+use net_traits::blob_url_store::get_blob_origin;
+use net_traits::filemanager_thread::{FileManagerThreadMsg, FilterPattern};
+use net_traits::{IpcSend, CoreResourceMsg};
 use script_traits::ScriptMsg as ConstellationMsg;
 use std::borrow::ToOwned;
 use std::cell::Cell;
@@ -41,6 +44,7 @@ use std::ops::Range;
 use string_cache::Atom;
 use style::attr::AttrValue;
 use style::element_state::*;
+use style::str::split_commas;
 use textinput::KeyReaction::{DispatchInput, Nothing, RedrawSelection, TriggerDefaultAction};
 use textinput::Lines::Single;
 use textinput::{TextInput, SelectionDirection};
@@ -144,8 +148,9 @@ impl HTMLInputElement {
     pub fn new(localName: Atom,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLInputElement> {
-        let element = HTMLInputElement::new_inherited(localName, prefix, document);
-        Node::reflect_node(box element, document, HTMLInputElementBinding::Wrap)
+        Node::reflect_node(box HTMLInputElement::new_inherited(localName, prefix, document),
+                           document,
+                           HTMLInputElementBinding::Wrap)
     }
 
     pub fn type_(&self) -> Atom {
@@ -298,6 +303,14 @@ impl HTMLInputElementMethods for HTMLInputElement {
     // https://html.spec.whatwg.org/multipage/#dom-fae-form
     fn GetForm(&self) -> Option<Root<HTMLFormElement>> {
         self.form_owner()
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-input-files
+    fn GetFiles(&self) -> Option<Root<FileList>> {
+        match self.filelist.get() {
+            Some(ref fl) => Some(fl.clone()),
+            None => None,
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-input-defaultchecked
@@ -566,8 +579,19 @@ impl HTMLInputElementMethods for HTMLInputElement {
             &self.upcast(),
             atom!("select"),
             EventBubbles::Bubbles,
-            EventCancelable::NotCancelable);
+            EventCancelable::NotCancelable,
+            window.r());
         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
+    }
+
+    // Select the files based on filepaths passed in,
+    // enabled by dom.htmlinputelement.select_files.enabled,
+    // used for test purpose.
+    // check-tidy: no specs after this line
+    fn SelectFiles(&self, paths: Vec<DOMString>) {
+        if self.input_type.get() == InputType::InputFile {
+            self.select_files(Some(paths));
+        }
     }
 }
 
@@ -624,7 +648,7 @@ impl HTMLInputElement {
 
     /// https://html.spec.whatwg.org/multipage/#constructing-the-form-data-set
     /// Steps range from 3.1 to 3.7 (specific to HTMLInputElement)
-    pub fn form_datum(&self, submitter: Option<FormSubmitter>) -> Option<FormDatum> {
+    pub fn form_datums(&self, submitter: Option<FormSubmitter>) -> Vec<FormDatum> {
         // 3.1: disabled state check is in get_unclean_dataset
 
         // Step 3.2
@@ -640,26 +664,55 @@ impl HTMLInputElement {
 
         match ty {
             // Step 3.1: it's a button but it is not submitter.
-            atom!("submit") | atom!("button") | atom!("reset") if !is_submitter => return None,
+            atom!("submit") | atom!("button") | atom!("reset") if !is_submitter => return vec![],
             // Step 3.1: it's the "Checkbox" or "Radio Button" and whose checkedness is false.
             atom!("radio") | atom!("checkbox") => if !self.Checked() || name.is_empty() {
-                return None;
+                return vec![];
             },
+            atom!("file") => {
+                let mut datums = vec![];
 
-            atom!("image") | atom!("file") => return None, // Unimplemented
+                // Step 3.2-3.7
+                let name = self.Name();
+                let type_ = self.Type();
+
+                match self.GetFiles() {
+                    Some(fl) => {
+                        for f in fl.iter_files() {
+                            datums.push(FormDatum {
+                                ty: type_.clone(),
+                                name: name.clone(),
+                                value: FormDatumValue::File(Root::from_ref(&f)),
+                            });
+                        }
+                    }
+                    None => {
+                        datums.push(FormDatum {
+                            // XXX(izgzhen): Spec says 'application/octet-stream' as the type,
+                            // but this is _type_ of element rather than content right?
+                            ty: type_.clone(),
+                            name: name.clone(),
+                            value: FormDatumValue::String(DOMString::from("")),
+                        })
+                    }
+                }
+
+                return datums;
+            }
+            atom!("image") => return vec![], // Unimplemented
             // Step 3.1: it's not the "Image Button" and doesn't have a name attribute.
             _ => if name.is_empty() {
-                return None;
+                return vec![];
             }
 
         }
 
         // Step 3.9
-        Some(FormDatum {
+        vec![FormDatum {
             ty: DOMString::from(&*ty), // FIXME(ajeffrey): Convert directly from Atoms to DOMStrings
             name: name,
             value: FormDatumValue::String(self.Value())
-        })
+        }]
     }
 
     // https://html.spec.whatwg.org/multipage/#radio-button-group
@@ -720,6 +773,73 @@ impl HTMLInputElement {
         let has_value = !self.textinput.borrow().is_empty();
         let el = self.upcast::<Element>();
         el.set_placeholder_shown_state(has_placeholder && !has_value);
+    }
+
+    // https://html.spec.whatwg.org/multipage/#file-upload-state-(type=file)
+    // Select files by invoking UI or by passed in argument
+    fn select_files(&self, opt_test_paths: Option<Vec<DOMString>>) {
+        let window = window_from_node(self);
+        let origin = get_blob_origin(&window.get_url());
+        let resource_threads = window.resource_threads();
+
+        let mut files: Vec<Root<File>> = vec![];
+        let mut error = None;
+
+        let filter = filter_from_accept(&self.Accept());
+        let target = self.upcast::<EventTarget>();
+
+        if self.Multiple() {
+            let opt_test_paths = opt_test_paths.map(|paths| paths.iter().map(|p| p.to_string()).collect());
+
+            let (chan, recv) = ipc::channel().expect("Error initializing channel");
+            let msg = FileManagerThreadMsg::SelectFiles(filter, chan, origin, opt_test_paths);
+            let _ = resource_threads.send(CoreResourceMsg::ToFileManager(msg)).unwrap();
+
+            match recv.recv().expect("IpcSender side error") {
+                Ok(selected_files) => {
+                    for selected in selected_files {
+                        files.push(File::new_from_selected(window.r(), selected));
+                    }
+                },
+                Err(err) => error = Some(err),
+            };
+        } else {
+            let opt_test_path = match opt_test_paths {
+                Some(paths) => {
+                    if paths.len() == 0 {
+                        return;
+                    } else {
+                        Some(paths[0].to_string()) // neglect other paths
+                    }
+                }
+                None => None,
+            };
+
+            let (chan, recv) = ipc::channel().expect("Error initializing channel");
+            let msg = FileManagerThreadMsg::SelectFile(filter, chan, origin, opt_test_path);
+            let _ = resource_threads.send(CoreResourceMsg::ToFileManager(msg)).unwrap();
+
+            match recv.recv().expect("IpcSender side error") {
+                Ok(selected) => {
+                    files.push(File::new_from_selected(window.r(), selected));
+                },
+                Err(err) => error = Some(err),
+            };
+        }
+
+        if let Some(err) = error {
+            debug!("Input file select error: {:?}", err);
+        } else {
+            let filelist = FileList::new(window.r(), files);
+            self.filelist.set(Some(&filelist));
+
+            target.fire_event("input",
+                              EventBubbles::Bubbles,
+                              EventCancelable::NotCancelable);
+            target.fire_event("change",
+                              EventBubbles::Bubbles,
+                              EventCancelable::NotCancelable);
+        }
     }
 }
 
@@ -792,6 +912,12 @@ impl VirtualMethods for HTMLInputElement {
                             el.set_read_write_state(read_write);
                         } else {
                             el.set_read_write_state(false);
+                        }
+
+                        if new_type == InputType::InputFile {
+                            let window = window_from_node(self);
+                            let filelist = FileList::new(window.r(), vec![]);
+                            self.filelist.set(Some(&filelist));
                         }
 
                         let new_value_mode = self.value_mode();
@@ -946,10 +1072,18 @@ impl VirtualMethods for HTMLInputElement {
                     let action = self.textinput.borrow_mut().handle_keydown(keyevent);
                     match action {
                         TriggerDefaultAction => {
-                            self.implicit_submission(keyevent.CtrlKey(),
-                                                     keyevent.ShiftKey(),
-                                                     keyevent.AltKey(),
-                                                     keyevent.MetaKey());
+                            if let Some(key) = keyevent.get_key() {
+                                match key {
+                                    Key::Enter | Key::KpEnter =>
+                                        self.implicit_submission(keyevent.CtrlKey(),
+                                                                 keyevent.ShiftKey(),
+                                                                 keyevent.AltKey(),
+                                                                 keyevent.MetaKey()),
+                                    // Issue #12071: Tab should not submit forms
+                                    // TODO(3982): Implement form keyboard navigation
+                                    _ => (),
+                                }
+                            };
                         },
                         DispatchInput => {
                             self.value_changed.set(true);
@@ -961,7 +1095,8 @@ impl VirtualMethods for HTMLInputElement {
                                     &self.upcast(),
                                     atom!("input"),
                                     EventBubbles::Bubbles,
-                                    EventCancelable::NotCancelable);
+                                    EventCancelable::NotCancelable,
+                                    window.r());
                             }
 
                             self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
@@ -993,7 +1128,7 @@ impl Activatable for HTMLInputElement {
             // https://html.spec.whatwg.org/multipage/#reset-button-state-%28type=reset%29:activation-behaviour-2
             // https://html.spec.whatwg.org/multipage/#checkbox-state-%28type=checkbox%29:activation-behaviour-2
             // https://html.spec.whatwg.org/multipage/#radio-button-state-%28type=radio%29:activation-behaviour-2
-            InputType::InputSubmit | InputType::InputReset
+            InputType::InputSubmit | InputType::InputReset | InputType::InputFile
             | InputType::InputCheckbox | InputType::InputRadio => self.is_mutable(),
             _ => false
         }
@@ -1133,44 +1268,7 @@ impl Activatable for HTMLInputElement {
                                   EventBubbles::Bubbles,
                                   EventCancelable::NotCancelable);
             },
-            InputType::InputFile => {
-                let window = window_from_node(self);
-                let filemanager = window.resource_threads().sender();
-
-                let mut files: Vec<Root<File>> = vec![];
-                let mut error = None;
-
-                if self.Multiple() {
-                    let (chan, recv) = ipc::channel().expect("Error initializing channel");
-                    let msg = FileManagerThreadMsg::SelectFiles(chan);
-                    let _ = filemanager.send(msg).unwrap();
-
-                    match recv.recv().expect("IpcSender side error") {
-                        Ok(selected_files) => {
-                            for selected in selected_files {
-                                files.push(File::new_from_selected(window.r(), selected));
-                            }
-                        },
-                        Err(err) => error = Some(err),
-                    };
-                } else {
-                    let (chan, recv) = ipc::channel().expect("Error initializing channel");
-                    let msg = FileManagerThreadMsg::SelectFile(chan);
-                    let _ = filemanager.send(msg).unwrap();
-
-                    match recv.recv().expect("IpcSender side error") {
-                        Ok(selected) => files.push(File::new_from_selected(window.r(), selected)),
-                        Err(err) => error = Some(err),
-                    };
-                }
-
-                if let Some(err) = error {
-                    debug!("Input file select error: {:?}", err);
-                } else {
-                    let filelist = FileList::new(window.r(), files);
-                    self.filelist.set(Some(&filelist));
-                }
-            }
+            InputType::InputFile => self.select_files(None),
             _ => ()
         }
     }
@@ -1227,4 +1325,22 @@ impl Activatable for HTMLInputElement {
             }
         }
     }
+}
+
+// https://html.spec.whatwg.org/multipage/#attr-input-accept
+fn filter_from_accept(s: &DOMString) -> Vec<FilterPattern> {
+    let mut filter = vec![];
+    for p in split_commas(s) {
+        if let Some('.') = p.chars().nth(0) {
+            filter.push(FilterPattern(p[1..].to_string()));
+        } else {
+            if let Some(exts) = mime_guess::get_mime_extensions_str(p) {
+                for ext in exts {
+                    filter.push(FilterPattern(ext.to_string()));
+                }
+            }
+        }
+    }
+
+    filter
 }

@@ -12,8 +12,10 @@ use js::glue::GetProxyExtra;
 use js::glue::InvokeGetOwnPropertyDescriptor;
 use js::glue::{GetProxyHandler, SetProxyExtra};
 use js::jsapi::GetObjectProto;
+use js::jsapi::GetStaticPrototype;
 use js::jsapi::JS_GetPropertyDescriptorById;
-use js::jsapi::{Handle, HandleId, HandleObject, MutableHandle, ObjectOpResult, RootedObject};
+use js::jsapi::MutableHandleObject;
+use js::jsapi::{Handle, HandleId, HandleObject, MutableHandle, ObjectOpResult};
 use js::jsapi::{JSContext, JSObject, JSPROP_GETTER, PropertyDescriptor};
 use js::jsapi::{JSErrNum, JS_StrictPropertyStub};
 use js::jsapi::{JS_DefinePropertyById, JS_NewObjectWithGivenProto};
@@ -36,12 +38,13 @@ pub unsafe extern "C" fn get_property_descriptor(cx: *mut JSContext,
     if !InvokeGetOwnPropertyDescriptor(handler, cx, proxy, id, desc) {
         return false;
     }
-    if !desc.get().obj.is_null() {
+    if !desc.obj.is_null() {
         return true;
     }
 
-    let mut proto = RootedObject::new(cx, ptr::null_mut());
+    rooted!(in(cx) let mut proto = ptr::null_mut());
     if !GetObjectProto(cx, proxy, proto.handle_mut()) {
+        // FIXME(#11868) Should assign to desc.obj, desc.get() is a copy.
         desc.get().obj = ptr::null_mut();
         return true;
     }
@@ -65,7 +68,7 @@ pub unsafe extern "C" fn define_property(cx: *mut JSContext,
         return true;
     }
 
-    let expando = RootedObject::new(cx, ensure_expando_object(cx, proxy));
+    rooted!(in(cx) let expando = ensure_expando_object(cx, proxy));
     JS_DefinePropertyById(cx, expando.handle(), id, desc, result)
 }
 
@@ -75,8 +78,8 @@ pub unsafe extern "C" fn delete(cx: *mut JSContext,
                                 id: HandleId,
                                 bp: *mut ObjectOpResult)
                                 -> bool {
-    let expando = RootedObject::new(cx, get_expando_object(proxy));
-    if expando.ptr.is_null() {
+    rooted!(in(cx) let expando = get_expando_object(proxy));
+    if expando.is_null() {
         (*bp).code_ = 0 /* OkCode */;
         return true;
     }
@@ -99,6 +102,25 @@ pub unsafe extern "C" fn is_extensible(_cx: *mut JSContext,
                                        succeeded: *mut bool)
                                        -> bool {
     *succeeded = true;
+    true
+}
+
+/// If `proxy` (underneath any functionally-transparent wrapper proxies) has as
+/// its `[[GetPrototypeOf]]` trap the ordinary `[[GetPrototypeOf]]` behavior
+/// defined for ordinary objects, set `*is_ordinary` to true and store `obj`'s
+/// prototype in `proto`.  Otherwise set `*isOrdinary` to false. In case of
+/// error, both outparams have unspecified value.
+///
+/// This implementation always handles the case of the ordinary
+/// `[[GetPrototypeOf]]` behavior. An alternative implementation will be
+/// necessary for the Location object.
+pub unsafe extern "C" fn get_prototype_if_ordinary(_: *mut JSContext,
+                                                   proxy: HandleObject,
+                                                   is_ordinary: *mut bool,
+                                                   proto: MutableHandleObject)
+                                                   -> bool {
+    *is_ordinary = true;
+    proto.set(GetStaticPrototype(proxy.get()));
     true
 }
 

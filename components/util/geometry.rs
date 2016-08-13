@@ -23,51 +23,19 @@ use std::i32;
 ///
 /// The ratio between ScreenPx and DevicePixel for a given display be found by calling
 /// `servo::windowing::WindowMethods::hidpi_factor`.
-#[derive(Clone, Copy, Debug, HeapSizeOf)]
+#[derive(Clone, Copy, Debug)]
 pub enum ScreenPx {}
 
-/// One CSS "px" in the coordinate system of the "initial viewport":
-/// http://www.w3.org/TR/css-device-adapt/#initial-viewport
-///
-/// ViewportPx is equal to ScreenPx times a "page zoom" factor controlled by the user.  This is
-/// the desktop-style "full page" zoom that enlarges content but then reflows the layout viewport
-/// so it still exactly fits the visible area.
-///
-/// At the default zoom level of 100%, one PagePx is equal to one ScreenPx.  However, if the
-/// document is zoomed in or out then this scale may be larger or smaller.
-#[derive(Clone, Copy, Debug, HeapSizeOf)]
-pub enum ViewportPx {}
-
-/// One CSS "px" in the root coordinate system for the content document.
-///
-/// PagePx is equal to ViewportPx multiplied by a "viewport zoom" factor controlled by the user.
-/// This is the mobile-style "pinch zoom" that enlarges content without reflowing it.  When the
-/// viewport zoom is not equal to 1.0, then the layout viewport is no longer the same physical size
-/// as the viewable area.
-#[derive(Clone, Copy, Debug, HeapSizeOf)]
-pub enum PagePx {}
-
-// In summary, the hierarchy of pixel units and the factors to convert from one to the next:
-//
-// DevicePixel
-//   / hidpi_ratio => ScreenPx
-//     / desktop_zoom => ViewportPx
-//       / pinch_zoom => PagePx
+known_heap_size!(0, ScreenPx);
 
 // An Au is an "App Unit" and represents 1/60th of a CSS pixel.  It was
 // originally proposed in 2002 as a standard unit of measure in Gecko.
 // See https://bugzilla.mozilla.org/show_bug.cgi?id=177805 for more info.
 
-pub static MAX_RECT: Rect<Au> = Rect {
-    origin: Point2D {
-        x: Au(i32::MIN / 2),
-        y: Au(i32::MIN / 2),
-    },
-    size: Size2D {
-        width: MAX_AU,
-        height: MAX_AU,
-    }
-};
+#[inline(always)]
+pub fn max_rect() -> Rect<Au> {
+    Rect::new(Point2D::new(Au(i32::MIN / 2), Au(i32::MIN / 2)), Size2D::new(MAX_AU, MAX_AU))
+}
 
 /// A helper function to convert a rect of `f32` pixels to a rect of app units.
 pub fn f32_rect_to_au_rect(rect: Rect<f32>) -> Rect<Au> {

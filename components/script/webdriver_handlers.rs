@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use cookie_rs::Cookie;
 use dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::CSSStyleDeclarationMethods;
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
@@ -26,20 +27,27 @@ use dom::window::ScriptHelpers;
 use euclid::point::Point2D;
 use euclid::rect::Rect;
 use euclid::size::Size2D;
-use ipc_channel::ipc::IpcSender;
-use js::jsapi::JSContext;
-use js::jsapi::{HandleValue, RootedValue};
+use hyper_serde::Serde;
+use ipc_channel::ipc::{self, IpcSender};
+use js::jsapi::{JSContext, HandleValue};
 use js::jsval::UndefinedValue;
 use msg::constellation_msg::PipelineId;
-use msg::webdriver_msg::{WebDriverFrameId, WebDriverJSError, WebDriverJSResult, WebDriverJSValue};
-use script_thread::get_browsing_context;
+use net_traits::CookieSource::{HTTP, NonHTTP};
+use net_traits::CoreResourceMsg::{GetCookiesDataForUrl, SetCookiesForUrlWithData};
+use net_traits::IpcSend;
+use script_traits::webdriver_msg::WebDriverCookieError;
+use script_traits::webdriver_msg::{WebDriverFrameId, WebDriverJSError, WebDriverJSResult, WebDriverJSValue};
 use url::Url;
 
 fn find_node_by_unique_id(context: &BrowsingContext,
                           pipeline: PipelineId,
                           node_id: String)
                           -> Option<Root<Node>> {
-    let context = get_browsing_context(&context, pipeline);
+    let context = match context.find(pipeline) {
+        Some(context) => context,
+        None => return None
+    };
+
     let document = context.active_document();
     document.upcast::<Node>().traverse_preorder().find(|candidate| candidate.unique_id() == node_id)
 }
@@ -68,11 +76,15 @@ pub fn handle_execute_script(context: &BrowsingContext,
                              pipeline: PipelineId,
                              eval: String,
                              reply: IpcSender<WebDriverJSResult>) {
-    let context = get_browsing_context(&context, pipeline);
+    let context = match context.find(pipeline) {
+        Some(context) => context,
+        None => return reply.send(Err(WebDriverJSError::BrowsingContextNotFound)).unwrap()
+    };
+
     let window = context.active_window();
     let result = unsafe {
         let cx = window.get_cx();
-        let mut rval = RootedValue::new(cx, UndefinedValue());
+        rooted!(in(cx) let mut rval = UndefinedValue());
         window.evaluate_js_on_global_with_result(&eval, rval.handle_mut());
         jsval_to_webdriver(cx, rval.handle())
     };
@@ -83,11 +95,15 @@ pub fn handle_execute_async_script(context: &BrowsingContext,
                                    pipeline: PipelineId,
                                    eval: String,
                                    reply: IpcSender<WebDriverJSResult>) {
-    let context = get_browsing_context(&context, pipeline);
+    let context = match context.find(pipeline) {
+       Some(context) => context,
+       None => return reply.send(Err(WebDriverJSError::BrowsingContextNotFound)).unwrap()
+   };
+
     let window = context.active_window();
     let cx = window.get_cx();
     window.set_webdriver_script_chan(Some(reply));
-    let mut rval = RootedValue::new(cx, UndefinedValue());
+    rooted!(in(cx) let mut rval = UndefinedValue());
     window.evaluate_js_on_global_with_result(&eval, rval.handle_mut());
 }
 
@@ -175,6 +191,66 @@ pub fn handle_get_active_element(context: &BrowsingContext,
                                  reply: IpcSender<Option<String>>) {
     reply.send(context.active_document().GetActiveElement().map(
         |elem| elem.upcast::<Node>().unique_id())).unwrap();
+}
+
+pub fn handle_get_cookies(context: &BrowsingContext,
+                         _pipeline: PipelineId,
+                         reply: IpcSender<Vec<Serde<Cookie>>>) {
+    let document = context.active_document();
+    let url = document.url();
+    let (sender, receiver) = ipc::channel().unwrap();
+    let _ = document.window().resource_threads().send(
+        GetCookiesDataForUrl(url.clone(), sender, NonHTTP)
+        );
+    let cookies = receiver.recv().unwrap();
+    reply.send(cookies).unwrap();
+}
+
+// https://w3c.github.io/webdriver/webdriver-spec.html#get-cookie
+pub fn handle_get_cookie(context: &BrowsingContext,
+                         _pipeline: PipelineId,
+                         name: String,
+                         reply: IpcSender<Vec<Serde<Cookie>>>) {
+    let document = context.active_document();
+    let url = document.url();
+    let (sender, receiver) = ipc::channel().unwrap();
+    let _ = document.window().resource_threads().send(
+        GetCookiesDataForUrl(url.clone(), sender, NonHTTP)
+        );
+    let cookies = receiver.recv().unwrap();
+    reply.send(cookies.into_iter().filter(|c| c.name == &*name).collect()).unwrap();
+}
+
+// https://w3c.github.io/webdriver/webdriver-spec.html#add-cookie
+pub fn handle_add_cookie(context: &BrowsingContext,
+                         _pipeline: PipelineId,
+                         cookie: Cookie,
+                         reply: IpcSender<Result<(), WebDriverCookieError>>) {
+    let document = context.active_document();
+    let url = document.url();
+    let method = if cookie.httponly {
+        HTTP
+    } else {
+        NonHTTP
+    };
+    reply.send(match (document.is_cookie_averse(), cookie.domain.clone()) {
+        (true, _) => Err(WebDriverCookieError::InvalidDomain),
+        (false, Some(ref domain)) if url.host_str().map(|x| { x == &**domain }).unwrap_or(false) => {
+            let _ = document.window().resource_threads().send(
+                SetCookiesForUrlWithData(url.clone(), cookie, method)
+                );
+            Ok(())
+        },
+        (false, None) => {
+            let _ = document.window().resource_threads().send(
+                SetCookiesForUrlWithData(url.clone(), cookie, method)
+                );
+            Ok(())
+        },
+        (_, _) => {
+            Err(WebDriverCookieError::UnableToSetCookie)
+        },
+    }).unwrap();
 }
 
 pub fn handle_get_title(context: &BrowsingContext, _pipeline: PipelineId, reply: IpcSender<String>) {
@@ -310,8 +386,7 @@ pub fn handle_is_selected(context: &BrowsingContext,
             }
             else if let Some(_) = node.downcast::<HTMLElement>() {
                 Ok(false) // regular elements are not selectable
-            }
-            else {
+            } else {
                 Err(())
             }
         },

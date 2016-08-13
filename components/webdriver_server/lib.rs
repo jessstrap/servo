@@ -10,6 +10,7 @@
 
 #![deny(unsafe_code)]
 
+extern crate cookie as cookie_rs;
 extern crate euclid;
 extern crate hyper;
 extern crate image;
@@ -31,12 +32,13 @@ use image::{DynamicImage, ImageFormat, RgbImage};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use keys::keycodes_to_keys;
 use msg::constellation_msg::{FrameId, LoadData, PipelineId};
-use msg::constellation_msg::{NavigationDirection, PixelFormat, WebDriverCommandMsg};
-use msg::webdriver_msg::{LoadStatus, WebDriverFrameId, WebDriverJSError, WebDriverJSResult, WebDriverScriptCommand};
+use msg::constellation_msg::{TraversalDirection, PixelFormat};
 use regex::Captures;
 use rustc_serialize::base64::{CharacterSet, Config, Newline, ToBase64};
 use rustc_serialize::json::{Json, ToJson};
-use script_traits::ConstellationMsg;
+use script_traits::webdriver_msg::{LoadStatus, WebDriverCookieError, WebDriverFrameId};
+use script_traits::webdriver_msg::{WebDriverJSError, WebDriverJSResult, WebDriverScriptCommand};
+use script_traits::{ConstellationMsg, WebDriverCommandMsg};
 use std::borrow::ToOwned;
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, SocketAddrV4};
@@ -44,16 +46,18 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 use url::Url;
-use util::prefs::{get_pref, reset_all_prefs, reset_pref, set_pref, PrefValue};
+use util::prefs::{PREFS, PrefValue};
 use util::thread::spawn_named;
 use uuid::Uuid;
-use webdriver::command::{GetParameters, JavascriptCommandParameters, LocatorParameters};
-use webdriver::command::{Parameters, SendKeysParameters, SwitchToFrameParameters};
-use webdriver::command::{TimeoutsParameters, WindowSizeParameters};
+use webdriver::command::WindowSizeParameters;
+use webdriver::command::{AddCookieParameters, GetParameters, JavascriptCommandParameters};
+use webdriver::command::{LocatorParameters, Parameters};
+use webdriver::command::{SendKeysParameters, SwitchToFrameParameters, TimeoutsParameters};
 use webdriver::command::{WebDriverCommand, WebDriverExtensionCommand, WebDriverMessage};
-use webdriver::common::{LocatorStrategy, WebElement};
+use webdriver::common::{Date, LocatorStrategy, Nullable, WebElement};
 use webdriver::error::{ErrorStatus, WebDriverError, WebDriverResult};
 use webdriver::httpapi::WebDriverExtensionRoute;
+use webdriver::response::{Cookie, CookieResponse};
 use webdriver::response::{ElementRectResponse, NewSessionResponse, ValueResponse};
 use webdriver::response::{WebDriverResponse, WindowSizeResponse};
 use webdriver::server::{self, Session, WebDriverHandler};
@@ -62,6 +66,25 @@ fn extension_routes() -> Vec<(Method, &'static str, ServoExtensionRoute)> {
     return vec![(Post, "/session/{sessionId}/servo/prefs/get", ServoExtensionRoute::GetPrefs),
                 (Post, "/session/{sessionId}/servo/prefs/set", ServoExtensionRoute::SetPrefs),
                 (Post, "/session/{sessionId}/servo/prefs/reset", ServoExtensionRoute::ResetPrefs)]
+}
+
+fn cookie_msg_to_cookie(cookie: cookie_rs::Cookie) -> Cookie {
+    Cookie {
+        name: cookie.name,
+        value: cookie.value,
+        path: cookie.path.map(Nullable::Value).unwrap_or(Nullable::Null),
+        domain: cookie.domain.map(Nullable::Value).unwrap_or(Nullable::Null),
+        expiry: match cookie.expires {
+            Some(time) => Nullable::Value(Date::new(time.to_timespec().sec as u64)),
+            None => Nullable::Null
+        },
+        maxAge: match cookie.max_age {
+            Some(time) => Nullable::Value(Date::new(time)),
+            None => Nullable::Null
+        },
+        secure: cookie.secure,
+        httpOnly: cookie.httponly,
+    }
 }
 
 pub fn start_server(port: u16, constellation_chan: Sender<ConstellationMsg>) {
@@ -366,7 +389,7 @@ impl Handler {
 
         let window_size = receiver.recv().unwrap();
         let vp = window_size.visible_viewport;
-        let window_size_response = WindowSizeResponse::new(vp.width.get() as u64, vp.height.get() as u64);
+        let window_size_response = WindowSizeResponse::new(vp.width as u64, vp.height as u64);
         Ok(WebDriverResponse::WindowSize(window_size_response))
     }
 
@@ -390,7 +413,7 @@ impl Handler {
 
         let window_size = receiver.recv().unwrap();
         let vp = window_size.visible_viewport;
-        let window_size_response = WindowSizeResponse::new(vp.width.get() as u64, vp.height.get() as u64);
+        let window_size_response = WindowSizeResponse::new(vp.width as u64, vp.height as u64);
         Ok(WebDriverResponse::WindowSize(window_size_response))
     }
 
@@ -417,12 +440,12 @@ impl Handler {
     }
 
     fn handle_go_back(&self) -> WebDriverResult<WebDriverResponse> {
-        self.constellation_chan.send(ConstellationMsg::Navigate(None, NavigationDirection::Back(1))).unwrap();
+        self.constellation_chan.send(ConstellationMsg::TraverseHistory(None, TraversalDirection::Back(1))).unwrap();
         Ok(WebDriverResponse::Void)
     }
 
     fn handle_go_forward(&self) -> WebDriverResult<WebDriverResponse> {
-        self.constellation_chan.send(ConstellationMsg::Navigate(None, NavigationDirection::Forward(1))).unwrap();
+        self.constellation_chan.send(ConstellationMsg::TraverseHistory(None, TraversalDirection::Forward(1))).unwrap();
         Ok(WebDriverResponse::Void)
     }
 
@@ -538,8 +561,8 @@ impl Handler {
         }
 
         let (sender, receiver) = ipc::channel().unwrap();
-        try!(self.frame_script_command(WebDriverScriptCommand::FindElementCSS(parameters.value.clone(),
-                                                                              sender)));
+        try!(self.frame_script_command(WebDriverScriptCommand::FindElementsCSS(parameters.value.clone(),
+                                                                               sender)));
         match receiver.recv().unwrap() {
             Ok(value) => {
                 let resp_value: Vec<Json> = value.into_iter().map(
@@ -615,6 +638,51 @@ impl Handler {
         }
     }
 
+    fn handle_get_cookies(&self) -> WebDriverResult<WebDriverResponse> {
+        let (sender, receiver) = ipc::channel().unwrap();
+        try!(self.frame_script_command(WebDriverScriptCommand::GetCookies(sender)));
+        let cookies = receiver.recv().unwrap();
+        let response = cookies.into_iter().map(|cookie| {
+            cookie_msg_to_cookie(cookie.into_inner())
+        }).collect::<Vec<Cookie>>();
+        Ok(WebDriverResponse::Cookie(CookieResponse::new(response)))
+    }
+
+    fn handle_get_cookie(&self, name: &str) -> WebDriverResult<WebDriverResponse> {
+        let (sender, receiver) = ipc::channel().unwrap();
+        try!(self.frame_script_command(WebDriverScriptCommand::GetCookie(name.to_owned(), sender)));
+        let cookies = receiver.recv().unwrap();
+        let response = cookies.into_iter().map(|cookie| {
+            cookie_msg_to_cookie(cookie.into_inner())
+        }).collect::<Vec<Cookie>>();
+        Ok(WebDriverResponse::Cookie(CookieResponse::new(response)))
+    }
+
+    fn handle_add_cookie(&self, params: &AddCookieParameters) -> WebDriverResult<WebDriverResponse> {
+        let (sender, receiver) = ipc::channel().unwrap();
+        let cookie = cookie_rs::Cookie {
+            name: params.name.to_owned(),
+            value: params.value.to_owned(),
+            path: params.path.to_owned().into(),
+            domain: params.domain.to_owned().into(),
+            expires: None,
+            max_age: None,
+            secure: params.secure,
+            httponly: params.httpOnly,
+            custom: BTreeMap::new()
+        };
+        try!(self.frame_script_command(WebDriverScriptCommand::AddCookie(cookie, sender)));
+        match receiver.recv().unwrap() {
+            Ok(_) => Ok(WebDriverResponse::Void),
+            Err(response) => match response {
+                WebDriverCookieError::InvalidDomain => Err(WebDriverError::new(ErrorStatus::InvalidCookieDomain,
+                                                                               "Invalid cookie domain")),
+                WebDriverCookieError::UnableToSetCookie => Err(WebDriverError::new(ErrorStatus::UnableToSetCookie,
+                                                                                   "Unable to set cookie"))
+            }
+        }
+    }
+
     fn handle_set_timeouts(&mut self, parameters: &TimeoutsParameters) -> WebDriverResult<WebDriverResponse> {
         //TODO: this conversion is crazy, spec should limit these to u32 and check upstream
         let value = parameters.ms as u32;
@@ -670,7 +738,9 @@ impl Handler {
             Ok(value) => Ok(WebDriverResponse::Generic(ValueResponse::new(value.to_json()))),
             Err(WebDriverJSError::Timeout) => Err(WebDriverError::new(ErrorStatus::Timeout, "")),
             Err(WebDriverJSError::UnknownType) => Err(WebDriverError::new(
-                ErrorStatus::UnsupportedOperation, "Unsupported return type"))
+                ErrorStatus::UnsupportedOperation, "Unsupported return type")),
+            Err(WebDriverJSError::BrowsingContextNotFound) => Err(WebDriverError::new(
+                ErrorStatus::JavascriptError, "Pipeline id not found in browsing context"))
         }
     }
 
@@ -745,7 +815,7 @@ impl Handler {
                         parameters: &GetPrefsParameters) -> WebDriverResult<WebDriverResponse> {
         let prefs = parameters.prefs
             .iter()
-            .map(|item| (item.clone(), get_pref(item).to_json()))
+            .map(|item| (item.clone(), PREFS.get(item).to_json()))
             .collect::<BTreeMap<_, _>>();
 
         Ok(WebDriverResponse::Generic(ValueResponse::new(prefs.to_json())))
@@ -754,7 +824,7 @@ impl Handler {
     fn handle_set_prefs(&self,
                         parameters: &SetPrefsParameters) -> WebDriverResult<WebDriverResponse> {
         for &(ref key, ref value) in parameters.prefs.iter() {
-            set_pref(key, value.clone());
+            PREFS.set(key, value.clone());
         }
         Ok(WebDriverResponse::Void)
     }
@@ -762,12 +832,12 @@ impl Handler {
     fn handle_reset_prefs(&self,
                           parameters: &GetPrefsParameters) -> WebDriverResult<WebDriverResponse> {
         let prefs = if parameters.prefs.len() == 0 {
-            reset_all_prefs();
+            PREFS.reset_all();
             BTreeMap::new()
         } else {
             parameters.prefs
                 .iter()
-                .map(|item| (item.clone(), reset_pref(item).to_json()))
+                .map(|item| (item.clone(), PREFS.reset(item).to_json()))
                 .collect::<BTreeMap<_, _>>()
         };
         Ok(WebDriverResponse::Generic(ValueResponse::new(prefs.to_json())))
@@ -790,6 +860,7 @@ impl WebDriverHandler<ServoExtensionRoute> for Handler {
         match msg.command {
             WebDriverCommand::NewSession => self.handle_new_session(),
             WebDriverCommand::DeleteSession => self.handle_delete_session(),
+            WebDriverCommand::AddCookie(ref parameters) => self.handle_add_cookie(parameters),
             WebDriverCommand::Get(ref parameters) => self.handle_get(parameters),
             WebDriverCommand::GetCurrentUrl => self.handle_current_url(),
             WebDriverCommand::GetWindowSize => self.handle_window_size(),
@@ -806,6 +877,8 @@ impl WebDriverHandler<ServoExtensionRoute> for Handler {
             WebDriverCommand::SwitchToParentFrame => self.handle_switch_to_parent_frame(),
             WebDriverCommand::FindElement(ref parameters) => self.handle_find_element(parameters),
             WebDriverCommand::FindElements(ref parameters) => self.handle_find_elements(parameters),
+            WebDriverCommand::GetCookie(ref name) => self.handle_get_cookie(name),
+            WebDriverCommand::GetCookies => self.handle_get_cookies(),
             WebDriverCommand::GetActiveElement => self.handle_active_element(),
             WebDriverCommand::GetElementRect(ref element) => self.handle_element_rect(element),
             WebDriverCommand::GetElementText(ref element) => self.handle_element_text(element),

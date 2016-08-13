@@ -7,7 +7,8 @@ interface HTMLIFrameElement : HTMLElement {
            attribute DOMString src;
   //         attribute DOMString srcdoc;
   //         attribute DOMString name;
-           attribute DOMString sandbox;
+           [SameObject, PutForwards=value]
+           readonly attribute DOMTokenList sandbox;
   //         attribute boolean seamless;
   //         attribute boolean allowFullscreen;
            attribute DOMString width;
@@ -32,6 +33,9 @@ partial interface HTMLIFrameElement {
 partial interface HTMLIFrameElement {
     [Func="::dom::window::Window::global_is_mozbrowser"]
     attribute boolean mozbrowser;
+
+    [Func="::dom::window::Window::global_is_mozbrowser"]
+    attribute boolean mozprivatebrowsing;
 };
 
 HTMLIFrameElement implements BrowserElement;

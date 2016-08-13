@@ -6,13 +6,20 @@
 
 <% data.new_style_struct("InheritedTable", inherited=True, gecko_name="TableBorder") %>
 
-${helpers.single_keyword("border-collapse", "separate collapse", gecko_constant_prefix="NS_STYLE_BORDER")}
-${helpers.single_keyword("empty-cells", "show hide", gecko_constant_prefix="NS_STYLE_TABLE_EMPTY_CELLS")}
-${helpers.single_keyword("caption-side", "top bottom", extra_gecko_values="right left top-outside bottom-outside")}
+${helpers.single_keyword("border-collapse", "separate collapse",
+                         gecko_constant_prefix="NS_STYLE_BORDER",
+                         animatable=False)}
+${helpers.single_keyword("empty-cells", "show hide",
+                         gecko_constant_prefix="NS_STYLE_TABLE_EMPTY_CELLS",
+                         animatable=False)}
+${helpers.single_keyword("caption-side", "top bottom",
+                         extra_gecko_values="right left top-outside bottom-outside",
+                         animatable=False)}
 
-<%helpers:longhand name="border-spacing">
+<%helpers:longhand name="border-spacing" animatable="False">
     use app_units::Au;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
     use cssparser::ToCss;
     use std::fmt;
@@ -20,14 +27,22 @@ ${helpers.single_keyword("caption-side", "top bottom", extra_gecko_values="right
     pub mod computed_value {
         use app_units::Au;
 
-        #[derive(Clone, Copy, Debug, PartialEq, RustcEncodable, HeapSizeOf)]
+        #[derive(Clone, Copy, Debug, PartialEq, RustcEncodable)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T {
             pub horizontal: Au,
             pub vertical: Au,
         }
     }
 
-    #[derive(Clone, Debug, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            return self.horizontal.has_viewport_percentage() || self.vertical.has_viewport_percentage()
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue {
         pub horizontal: specified::Length,
         pub vertical: specified::Length,
@@ -61,7 +76,7 @@ ${helpers.single_keyword("caption-side", "top bottom", extra_gecko_values="right
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             computed_value::T {
                 horizontal: self.horizontal.to_computed_value(context),
                 vertical: self.vertical.to_computed_value(context),

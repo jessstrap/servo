@@ -4,7 +4,6 @@
 
 #![cfg_attr(not(target_os = "windows"), feature(alloc_jemalloc))]
 #![feature(box_syntax)]
-#![feature(iter_arith)]
 #![feature(plugin)]
 #![plugin(plugins)]
 #![feature(custom_derive)]
@@ -15,7 +14,7 @@
 #[allow(unused_extern_crates)]
 #[cfg(not(target_os = "windows"))]
 extern crate alloc_jemalloc;
-extern crate hbs_pow;
+extern crate heartbeats_simple;
 extern crate ipc_channel;
 #[cfg(not(target_os = "windows"))]
 extern crate libc;

@@ -17,21 +17,23 @@ import site
 import StringIO
 import subprocess
 import sys
-from licenseck import licenses
+from licenseck import licenses, licenses_toml, licenses_dep_toml
+
+# License and header checks
+EMACS_HEADER = "/* -*- Mode:"
+VIM_HEADER = "/* vim:"
+MAX_LICENSE_LINESPAN = max(len(license.splitlines()) for license in licenses)
 
 # File patterns to include in the non-WPT tidy check.
-file_patterns_to_check = ["*.rs", "*.rc", "*.cpp", "*.c",
-                          "*.h", "Cargo.lock", "*.py",
-                          "*.toml", "*.webidl", "*.json"]
+FILE_PATTERNS_TO_CHECK = ["*.rs", "*.rc", "*.cpp", "*.c",
+                          "*.h", "Cargo.lock", "*.py", "*.sh",
+                          "*.toml", "*.webidl", "*.json", "*.html"]
 
 # File patterns that are ignored for all tidy and lint checks.
-file_patterns_to_ignore = [
-    "*.#*",
-    "*.pyc",
-]
+FILE_PATTERNS_TO_IGNORE = ["*.#*", "*.pyc"]
 
 # Files that are ignored for all tidy and lint checks.
-ignored_files = [
+IGNORED_FILES = [
     # Generated and upstream code combined with our own. Could use cleanup
     os.path.join(".", "ports", "geckolib", "gecko_bindings", "bindings.rs"),
     os.path.join(".", "ports", "geckolib", "gecko_bindings", "structs_debug.rs"),
@@ -41,6 +43,12 @@ ignored_files = [
     os.path.join(".", "tests", "wpt", "metadata", "MANIFEST.json"),
     os.path.join(".", "tests", "wpt", "metadata-css", "MANIFEST.json"),
     os.path.join(".", "components", "script", "dom", "webidls", "ForceTouchEvent.webidl"),
+    os.path.join(".", "support", "android", "openssl.sh"),
+    # Ignore those files since the issues reported are on purpose
+    os.path.join(".", "tests", "html", "bad-line-ends.html"),
+    os.path.join(".", "tests", "unit", "net", "parsable_mime", "text"),
+    os.path.join(".", "tests", "wpt", "mozilla", "tests", "css", "fonts"),
+    os.path.join(".", "tests", "wpt", "mozilla", "tests", "css", "pre_with_tab.html"),
     # FIXME(pcwalton, #11679): This is a workaround for a tidy error on the quoted string
     # `"__TEXT,_info_plist"` inside an attribute.
     os.path.join(".", "components", "servo", "platform", "macos", "mod.rs"),
@@ -49,7 +57,7 @@ ignored_files = [
 ]
 
 # Directories that are ignored for the non-WPT tidy check.
-ignored_dirs = [
+IGNORED_DIRS = [
     # Upstream
     os.path.join(".", "support", "android", "apk"),
     os.path.join(".", "support", "rust-task_info"),
@@ -68,13 +76,36 @@ ignored_dirs = [
     # Generated and upstream code combined with our own. Could use cleanup
     os.path.join(".", "target"),
     os.path.join(".", "ports", "cef"),
-    # Tooling, generated locally from external repos.
-    os.path.join(".", "ports", "geckolib", "gecko_bindings", "tools"),
     # Hidden directories
     os.path.join(".", "."),
 ]
 
-spec_base_path = "components/script/dom/"
+SPEC_BASE_PATH = "components/script/dom/"
+
+WEBIDL_STANDARDS = [
+    "//www.khronos.org/registry/webgl/specs",
+    "//developer.mozilla.org/en-US/docs/Web/API",
+    "//dev.w3.org/2006/webapi",
+    "//dev.w3.org/csswg",
+    "//dev.w3.org/fxtf",
+    "//dvcs.w3.org/hg",
+    "//dom.spec.whatwg.org",
+    "//domparsing.spec.whatwg.org",
+    "//drafts.csswg.org/cssom",
+    "//drafts.fxtf.org",
+    "//encoding.spec.whatwg.org",
+    "//fetch.spec.whatwg.org",
+    "//html.spec.whatwg.org",
+    "//url.spec.whatwg.org",
+    "//xhr.spec.whatwg.org",
+    "//w3c.github.io",
+    "//heycam.github.io/webidl",
+    "//webbluetoothcg.github.io/web-bluetooth/",
+    "//slightlyoff.github.io/ServiceWorker/spec/service_worker/",
+    # Not a URL
+    "// This interface is entirely internal to Servo, and should not be" +
+    " accessible to\n// web pages."
+]
 
 
 def is_iter_empty(iterator):
@@ -97,16 +128,16 @@ def progress_wrapper(iterator):
 
 
 def filter_file(file_name):
-    if any(file_name.startswith(ignored_file) for ignored_file in ignored_files):
+    if any(file_name.startswith(ignored_file) for ignored_file in IGNORED_FILES):
         return False
     base_name = os.path.basename(file_name)
-    if any(fnmatch.fnmatch(base_name, pattern) for pattern in file_patterns_to_ignore):
+    if any(fnmatch.fnmatch(base_name, pattern) for pattern in FILE_PATTERNS_TO_IGNORE):
         return False
     return True
 
 
 def filter_files(start_dir, only_changed_files, progress):
-    file_iter = get_file_list(start_dir, only_changed_files, ignored_dirs)
+    file_iter = get_file_list(start_dir, only_changed_files, IGNORED_DIRS)
     (has_element, file_iter) = is_iter_empty(file_iter)
     if not has_element:
         raise StopIteration
@@ -114,20 +145,15 @@ def filter_files(start_dir, only_changed_files, progress):
         file_iter = progress_wrapper(file_iter)
     for file_name in file_iter:
         base_name = os.path.basename(file_name)
-        if not any(fnmatch.fnmatch(base_name, pattern) for pattern in file_patterns_to_check):
+        if not any(fnmatch.fnmatch(base_name, pattern) for pattern in FILE_PATTERNS_TO_CHECK):
             continue
         if not filter_file(file_name):
             continue
         yield file_name
 
 
-EMACS_HEADER = "/* -*- Mode:"
-VIM_HEADER = "/* vim:"
-MAX_LICENSE_LINESPAN = max(len(license.splitlines()) for license in licenses)
-
-
 def check_license(file_name, lines):
-    if any(file_name.endswith(ext) for ext in (".toml", ".lock", ".json")):
+    if any(file_name.endswith(ext) for ext in (".toml", ".lock", ".json", ".html")):
         raise StopIteration
     while lines and (lines[0].startswith(EMACS_HEADER) or lines[0].startswith(VIM_HEADER)):
         lines = lines[1:]
@@ -147,9 +173,13 @@ def check_modeline(file_name, lines):
 
 
 def check_length(file_name, idx, line):
-    if file_name.endswith(".lock") or file_name.endswith(".json"):
+    if file_name.endswith(".lock") or file_name.endswith(".json") or file_name.endswith(".html"):
         raise StopIteration
-    max_length = 120
+    # Prefer shorter lines when shell scripting.
+    if file_name.endswith(".sh"):
+        max_length = 80
+    else:
+        max_length = 120
     if len(line.rstrip('\n')) > max_length:
         yield (idx + 1, "Line is longer than %d characters" % max_length)
 
@@ -273,19 +303,64 @@ duplicate versions for package "{package}"
                 yield (1, message)
 
 
-def maybe_int(value):
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
 def check_toml(file_name, lines):
     if not file_name.endswith(".toml"):
         raise StopIteration
+    ok_licensed = False
     for idx, line in enumerate(lines):
         if line.find("*") != -1:
             yield (idx + 1, "found asterisk instead of minimum version number")
+        for license in licenses_toml:
+            ok_licensed |= (license in line)
+    if not ok_licensed:
+        yield (0, ".toml file should contain a valid license.")
+
+
+def check_shell(file_name, lines):
+    if not file_name.endswith(".sh"):
+        raise StopIteration
+
+    shebang = "#!/usr/bin/env bash"
+    required_options = {"set -o errexit", "set -o nounset", "set -o pipefail"}
+
+    did_shebang_check = False
+
+    if len(lines) == 0:
+        yield (0, 'script is an empty file')
+        return
+
+    if lines[0].rstrip() != shebang:
+        yield (1, 'script does not have shebang "{}"'.format(shebang))
+
+    for idx in range(1, len(lines)):
+        stripped = lines[idx].rstrip()
+        # Comments or blank lines are ignored. (Trailing whitespace is caught with a separate linter.)
+        if lines[idx].startswith("#") or stripped == "":
+            continue
+
+        if not did_shebang_check:
+            if stripped in required_options:
+                required_options.remove(stripped)
+            else:
+                # The first non-comment, non-whitespace, non-option line is the first "real" line of the script.
+                # The shebang, options, etc. must come before this.
+                if len(required_options) != 0:
+                    formatted = ['"{}"'.format(opt) for opt in required_options]
+                    yield (idx + 1, "script is missing options {}".format(", ".join(formatted)))
+                did_shebang_check = True
+
+        if "`" in stripped:
+            yield (idx + 1, "script should not use backticks for command substitution")
+
+        if " [ " in stripped or stripped.startswith("[ "):
+            yield (idx + 1, "script should use `[[` instead of `[` for conditional testing")
+
+        for dollar in re.finditer('\$', stripped):
+            next_idx = dollar.end()
+            if next_idx < len(stripped):
+                next_char = stripped[next_idx]
+                if not (next_char == '{' or next_char == '('):
+                    yield(idx + 1, "variable substitutions should use the full \"${VAR}\" form")
 
 
 def check_rust(file_name, lines):
@@ -295,9 +370,9 @@ def check_rust(file_name, lines):
        file_name.endswith(os.path.join("geckolib", "build.rs")) or \
        file_name.endswith(os.path.join("unit", "style", "stylesheets.rs")):
         raise StopIteration
+
     comment_depth = 0
     merged_lines = ''
-
     import_block = False
     whitespace = False
 
@@ -314,6 +389,8 @@ def check_rust(file_name, lines):
     for idx, original_line in enumerate(lines):
         # simplify the analysis
         line = original_line.strip()
+        is_attribute = re.search(r"#\[.*\]", line)
+        is_comment = re.search(r"^//|^/\*|^\*", line)
 
         # Simple heuristic to avoid common case of no comments.
         if '/' in line:
@@ -331,17 +408,17 @@ def check_rust(file_name, lines):
             merged_lines = ''
 
         # Keep track of whitespace to enable checking for a merged import block
-        #
+
         # Ignore attributes, comments, and imports
         if import_block:
-            if not (line_is_comment(line) or line_is_attribute(line) or line.startswith("use ")):
+            if not (is_comment or is_attribute or line.startswith("use ")):
                 whitespace = line == ""
 
                 if not whitespace:
                     import_block = False
 
         # get rid of strings and chars because cases like regex expression, keep attributes
-        if not line_is_attribute(line):
+        if not is_attribute:
             line = re.sub(r'"(\\.|[^\\"])*?"', '""', line)
             line = re.sub(r"'(\\.|[^\\'])*?'", "''", line)
 
@@ -355,21 +432,22 @@ def check_rust(file_name, lines):
         # tuple format: (pattern, format_message, filter_function(match, line))
         no_filter = lambda match, line: True
         regex_rules = [
-            (r",[^\s]", "missing space after ,", lambda match, line: '$' not in line),
+            (r",[^\s]", "missing space after ,",
+                lambda match, line: '$' not in line and not is_attribute),
             (r"[A-Za-z0-9\"]=", "missing space before =",
-                lambda match, line: line_is_attribute(line)),
+                lambda match, line: is_attribute),
             (r"=[A-Za-z0-9\"]", "missing space after =",
-                lambda match, line: line_is_attribute(line)),
+                lambda match, line: is_attribute),
             # ignore scientific notation patterns like 1e-6
             (r"[A-DF-Za-df-z0-9]-", "missing space before -",
-                lambda match, line: not line_is_attribute(line)),
+                lambda match, line: not is_attribute),
             (r"[A-Za-z0-9]([\+/\*%=])", "missing space before {0}",
-                lambda match, line: (not line_is_attribute(line) and
+                lambda match, line: (not is_attribute and
                                      not is_associated_type(match, line))),
             # * not included because of dereferencing and casting
             # - not included because of unary negation
             (r'([\+/\%=])[A-Za-z0-9"]', "missing space after {0}",
-                lambda match, line: (not line_is_attribute(line) and
+                lambda match, line: (not is_attribute and
                                      not is_associated_type(match, line))),
             (r"\)->", "missing space before ->", no_filter),
             (r"->[A-Za-z]", "missing space after ->", no_filter),
@@ -398,14 +476,13 @@ def check_rust(file_name, lines):
             (r"^&&", "operators should go at the end of the first line", no_filter),
             (r"\{[A-Za-z0-9_]+\};", "use statement contains braces for single import",
                 lambda match, line: line.startswith('use ')),
+            (r"^\s*else {", "else braces should be on the same line", no_filter),
         ]
 
         for pattern, message, filter_func in regex_rules:
             for match in re.finditer(pattern, line):
-                if not filter_func(match, line):
-                    continue
-
-                yield (idx + 1, message.format(*match.groups(), **match.groupdict()))
+                if filter_func(match, line):
+                    yield (idx + 1, message.format(*match.groups(), **match.groupdict()))
 
         if prev_open_brace and not line:
             yield (idx + 1, "found an empty line following a {")
@@ -481,14 +558,6 @@ def is_associated_type(match, line):
     return generic_open and generic_close
 
 
-def line_is_attribute(line):
-    return re.search(r"#\[.*\]", line)
-
-
-def line_is_comment(line):
-    return re.search(r"^//|^/\*|^\*", line)
-
-
 def check_webidl_spec(file_name, contents):
     # Sorted by this function (in pseudo-Rust). The idea is to group the same
     # organization together.
@@ -508,35 +577,24 @@ def check_webidl_spec(file_name, contents):
     #     }
     #     a_domain.path().cmp(b_domain.path())
     # }
+
     if not file_name.endswith(".webidl"):
         raise StopIteration
-    standards = [
-        "//www.khronos.org/registry/webgl/specs",
-        "//developer.mozilla.org/en-US/docs/Web/API",
-        "//dev.w3.org/2006/webapi",
-        "//dev.w3.org/csswg",
-        "//dev.w3.org/fxtf",
-        "//dvcs.w3.org/hg",
-        "//dom.spec.whatwg.org",
-        "//domparsing.spec.whatwg.org",
-        "//drafts.csswg.org/cssom",
-        "//drafts.fxtf.org",
-        "//encoding.spec.whatwg.org",
-        "//html.spec.whatwg.org",
-        "//url.spec.whatwg.org",
-        "//xhr.spec.whatwg.org",
-        "//w3c.github.io",
-        "//heycam.github.io/webidl",
-        "//webbluetoothcg.github.io/web-bluetooth/",
-        "//slightlyoff.github.io/ServiceWorker/spec/service_worker/",
-        # Not a URL
-        "// This interface is entirely internal to Servo, and should not be" +
-        " accessible to\n// web pages."
-    ]
-    for i in standards:
+
+    for i in WEBIDL_STANDARDS:
         if contents.find(i) != -1:
             raise StopIteration
-    yield 0, "No specification link found."
+    yield (0, "No specification link found.")
+
+
+def check_for_possible_duplicate_json_keys(key_value_pairs):
+    keys = [x[0] for x in key_value_pairs]
+    seen_keys = set()
+    for key in keys:
+        if key in seen_keys:
+            raise KeyError(key)
+
+        seen_keys.add(key)
 
 
 def check_json(filename, contents):
@@ -544,17 +602,19 @@ def check_json(filename, contents):
         raise StopIteration
 
     try:
-        json.loads(contents)
+        json.loads(contents, object_pairs_hook=check_for_possible_duplicate_json_keys)
     except ValueError as e:
         match = re.search(r"line (\d+) ", e.message)
         line_no = match and match.group(1)
         yield (line_no, e.message)
+    except KeyError as e:
+        yield (None, "Duplicated Key (%s)" % e.message)
 
 
 def check_spec(file_name, lines):
-    if spec_base_path not in file_name:
+    if SPEC_BASE_PATH not in file_name:
         raise StopIteration
-    file_name = os.path.relpath(os.path.splitext(file_name)[0], spec_base_path)
+    file_name = os.path.relpath(os.path.splitext(file_name)[0], SPEC_BASE_PATH)
     patt = re.compile("^\s*\/\/.+")
 
     # Pattern representing a line with a macro
@@ -566,9 +626,10 @@ def check_spec(file_name, lines):
     # Pattern representing a line with comment
     comment_patt = re.compile("^\s*///?.+$")
 
-    pattern = "impl {}Methods for {} {{".format(file_name, file_name)
     brace_count = 0
     in_impl = False
+    pattern = "impl {}Methods for {} {{".format(file_name, file_name)
+
     for idx, line in enumerate(lines):
         if "// check-tidy: no specs after this line" in line:
             break
@@ -599,10 +660,10 @@ def collect_errors_for_files(files_to_check, checking_functions, line_checking_f
         raise StopIteration
     if print_text:
         print '\rChecking files for tidiness...'
+
     for filename in files_to_check:
         if not os.path.exists(filename):
             continue
-
         with open(filename, "r") as f:
             contents = f.read()
             for check in checking_functions:
@@ -616,7 +677,7 @@ def collect_errors_for_files(files_to_check, checking_functions, line_checking_f
 
 
 def get_wpt_files(only_changed_files, progress):
-    wpt_dir = os.path.join(".", "tests", "wpt", "web-platform-tests" + os.sep)
+    wpt_dir = os.path.join(".", "tests", "wpt" + os.sep)
     file_iter = get_file_list(os.path.join(wpt_dir), only_changed_files)
     (has_element, file_iter) = is_iter_empty(file_iter)
     if not has_element:
@@ -634,9 +695,31 @@ def check_wpt_lint_errors(files):
     if os.path.isdir(wpt_working_dir):
         site.addsitedir(wpt_working_dir)
         from tools.lint import lint
-        returncode = lint.lint(files)
+        returncode = lint.lint(wpt_working_dir, files, output_json=False)
         if returncode:
             yield ("WPT Lint Tool", "", "lint error(s) in Web Platform Tests: exit status {0}".format(returncode))
+
+
+def get_dep_toml_files(only_changed_files=False):
+    if not only_changed_files:
+        print '\nRunning the dependency licensing lint...'
+        for root, directories, filenames in os.walk(".cargo"):
+            for filename in filenames:
+                if filename == "Cargo.toml":
+                    yield os.path.join(root, filename)
+
+
+def check_dep_license_errors(filenames, progress=True):
+    filenames = progress_wrapper(filenames) if progress else filenames
+    for filename in filenames:
+        with open(filename, "r") as f:
+            ok_licensed = False
+            lines = f.readlines()
+            for idx, line in enumerate(lines):
+                for license_line in licenses_dep_toml:
+                    ok_licensed |= (license_line in line)
+            if not ok_licensed:
+                yield (filename, 0, "dependency should contain a valid license.")
 
 
 def get_file_list(directory, only_changed_files=False, exclude_dirs=[]):
@@ -650,11 +733,12 @@ def get_file_list(directory, only_changed_files=False, exclude_dirs=[]):
         args = ["git", "ls-files", "--others", "--exclude-standard", directory]
         file_list += subprocess.check_output(args)
         for f in file_list.splitlines():
-            yield os.path.join('.', f)
+            if not any(os.path.join('.', os.path.dirname(f)).startswith(path) for path in exclude_dirs):
+                yield os.path.join('.', f)
     elif exclude_dirs:
         for root, dirs, files in os.walk(directory, topdown=True):
             # modify 'dirs' in-place so that we don't do unwanted traversals in excluded directories
-            dirs[:] = [d for d in dirs if not any(os.path.join(root, d).startswith(name) for name in ignored_dirs)]
+            dirs[:] = [d for d in dirs if not any(os.path.join(root, d).startswith(name) for name in exclude_dirs)]
             for rel_path in files:
                 yield os.path.join(root, rel_path)
     else:
@@ -667,12 +751,15 @@ def scan(only_changed_files=False, progress=True):
     # standard checks
     files_to_check = filter_files('.', only_changed_files, progress)
     checking_functions = (check_flake8, check_lock, check_webidl_spec, check_json)
-    line_checking_functions = (check_license, check_by_line, check_toml, check_rust, check_spec, check_modeline)
+    line_checking_functions = (check_license, check_by_line, check_toml, check_shell,
+                               check_rust, check_spec, check_modeline)
     errors = collect_errors_for_files(files_to_check, checking_functions, line_checking_functions)
+    # check dependecy licenses
+    dep_license_errors = check_dep_license_errors(get_dep_toml_files(only_changed_files), progress)
     # wpt lint checks
     wpt_lint_errors = check_wpt_lint_errors(get_wpt_files(only_changed_files, progress))
     # collect errors
-    errors = itertools.chain(errors, wpt_lint_errors)
+    errors = itertools.chain(errors, dep_license_errors, wpt_lint_errors)
     error = None
     for error in errors:
         print "\r\033[94m{}\033[0m:\033[93m{}\033[0m: \033[91m{}\033[0m".format(*error)

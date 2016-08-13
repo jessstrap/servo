@@ -2,6 +2,7 @@
 name = "script_tests"
 version = "0.0.1"
 authors = ["The Servo Project Developers"]
+license = "MPL-2.0"
 
 [lib]
 name = "script_tests"
@@ -12,4 +13,4 @@ doctest = false
 msg = {path = "../../../components/msg"}
 plugins = {path = "../../../components/plugins"}
 script = {path = "../../../components/script"}
-url = {version = "1.0.0", features = ["heap_size"]}
+url = {version = "1.2", features = ["heap_size"]}

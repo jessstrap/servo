@@ -5,7 +5,8 @@
 //! Geometry in flow-relative space.
 
 use euclid::num::Zero;
-use euclid::{Point2D, Rect, SideOffsets2D, Size2D};
+use euclid::side_offsets::SideOffsets2D;
+use euclid::{Point2D, Rect, Size2D};
 use std::cmp::{max, min};
 use std::fmt::{self, Debug, Error, Formatter};
 use std::ops::{Add, Sub};
@@ -22,7 +23,8 @@ pub enum InlineBaseDirection {
 }
 
 bitflags!(
-    #[derive(HeapSizeOf, RustcEncodable)]
+    #[derive(RustcEncodable)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub flags WritingMode: u8 {
         const FLAG_RTL = 1 << 0,
         const FLAG_VERTICAL = 1 << 1,
@@ -299,9 +301,9 @@ impl<T: Copy> LogicalSize<T> {
     pub fn to_physical(&self, mode: WritingMode) -> Size2D<T> {
         self.debug_writing_mode.check(mode);
         if mode.is_vertical() {
-            Size2D { width: self.block, height: self.inline }
+            Size2D::new(self.block, self.inline)
         } else {
-            Size2D { width: self.inline, height: self.block }
+            Size2D::new(self.inline, self.block)
         }
     }
 
@@ -448,15 +450,13 @@ impl<T: Copy + Sub<T, Output=T>> LogicalPoint<T> {
     pub fn to_physical(&self, mode: WritingMode, container_size: Size2D<T>) -> Point2D<T> {
         self.debug_writing_mode.check(mode);
         if mode.is_vertical() {
-            Point2D {
-                x: if mode.is_vertical_lr() { self.b } else { container_size.width - self.b },
-                y: if mode.is_inline_tb() { self.i } else { container_size.height - self.i }
-            }
+            Point2D::new(
+                if mode.is_vertical_lr() { self.b } else { container_size.width - self.b },
+                if mode.is_inline_tb() { self.i } else { container_size.height - self.i })
         } else {
-            Point2D {
-                x: if mode.is_bidi_ltr() { self.i } else { container_size.width - self.i },
-                y: self.b
-            }
+            Point2D::new(
+                if mode.is_bidi_ltr() { self.i } else { container_size.width - self.i },
+                self.b)
         }
     }
 
@@ -951,8 +951,8 @@ impl<T: Copy + Add<T, Output=T> + Sub<T, Output=T>> LogicalRect<T> {
             }
         }
         Rect {
-            origin: Point2D { x: x, y: y },
-            size: Size2D { width: width, height: height },
+            origin: Point2D::new(x, y),
+            size: Size2D::new(width, height),
         }
     }
 

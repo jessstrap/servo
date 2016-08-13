@@ -5,19 +5,22 @@
 <%namespace name="helpers" file="/helpers.mako.rs" />
 
 <% data.new_style_struct("Background", inherited=False) %>
-${helpers.predefined_type(
-    "background-color", "CSSColor",
-    "::cssparser::Color::RGBA(::cssparser::RGBA { red: 0., green: 0., blue: 0., alpha: 0. }) /* transparent */")}
 
-<%helpers:longhand name="background-image">
+${helpers.predefined_type("background-color", "CSSColor",
+    "::cssparser::Color::RGBA(::cssparser::RGBA { red: 0., green: 0., blue: 0., alpha: 0. }) /* transparent */",
+    animatable=True)}
+
+<%helpers:vector_longhand gecko_only="True" name="background-image" animatable="False">
     use cssparser::ToCss;
     use std::fmt;
     use values::specified::Image;
     use values::LocalToCss;
+    use values::NoViewportPercentage;
 
     pub mod computed_value {
         use values::computed;
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<computed::Image>);
     }
 
@@ -25,14 +28,17 @@ ${helpers.predefined_type(
         fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match self.0 {
                 None => dest.write_str("none"),
-                Some(computed::Image::Url(ref url)) => url.to_css(dest),
+                Some(computed::Image::Url(ref url, ref _extra_data)) => url.to_css(dest),
                 Some(computed::Image::LinearGradient(ref gradient)) =>
                     gradient.to_css(dest)
             }
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+    impl NoViewportPercentage for SpecifiedValue {}
+
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue(pub Option<Image>);
 
     impl ToCss for SpecifiedValue {
@@ -59,7 +65,7 @@ ${helpers.predefined_type(
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue(None) => computed_value::T(None),
                 SpecifiedValue(Some(ref image)) =>
@@ -67,89 +73,42 @@ ${helpers.predefined_type(
             }
         }
     }
-</%helpers:longhand>
+</%helpers:vector_longhand>
 
-<%helpers:longhand name="background-position">
+<%helpers:longhand name="background-position" animatable="True">
         use cssparser::ToCss;
         use std::fmt;
-        use values::AuExtensionMethods;
+        use values::LocalToCss;
+        use values::HasViewportPercentage;
+        use values::specified::position::Position;
 
         pub mod computed_value {
-            use values::computed::LengthOrPercentage;
+            use values::computed::position::Position;
 
-            #[derive(PartialEq, Copy, Clone, Debug, HeapSizeOf)]
-            pub struct T {
-                pub horizontal: LengthOrPercentage,
-                pub vertical: LengthOrPercentage,
+            #[derive(PartialEq, Copy, Clone, Debug)]
+            #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+            pub struct T(pub Position);
+        }
+
+        impl HasViewportPercentage for SpecifiedValue {
+            fn has_viewport_percentage(&self) -> bool {
+                self.0.has_viewport_percentage()
             }
         }
 
-        #[derive(Debug, Clone, PartialEq, Copy, HeapSizeOf)]
-        pub struct SpecifiedValue {
-            pub horizontal: specified::LengthOrPercentage,
-            pub vertical: specified::LengthOrPercentage,
-        }
+        #[derive(Debug, Clone, PartialEq, Copy)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+        pub struct SpecifiedValue(pub Position);
 
         impl ToCss for SpecifiedValue {
             fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-                try!(self.horizontal.to_css(dest));
-                try!(dest.write_str(" "));
-                try!(self.vertical.to_css(dest));
-                Ok(())
+                self.0.to_css(dest)
             }
         }
 
         impl ToCss for computed_value::T {
             fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-                try!(self.horizontal.to_css(dest));
-                try!(dest.write_str(" "));
-                try!(self.vertical.to_css(dest));
-                Ok(())
-            }
-        }
-
-        impl SpecifiedValue {
-            fn new(first: specified::PositionComponent, second: specified::PositionComponent)
-                    -> Result<SpecifiedValue, ()> {
-                let (horiz, vert) = match (category(first), category(second)) {
-                    // Don't allow two vertical keywords or two horizontal keywords.
-                    (PositionCategory::HorizontalKeyword, PositionCategory::HorizontalKeyword) |
-                    (PositionCategory::VerticalKeyword, PositionCategory::VerticalKeyword) => return Err(()),
-
-                    // Swap if both are keywords and vertical precedes horizontal.
-                    (PositionCategory::VerticalKeyword, PositionCategory::HorizontalKeyword) |
-                    (PositionCategory::VerticalKeyword, PositionCategory::OtherKeyword) |
-                    (PositionCategory::OtherKeyword, PositionCategory::HorizontalKeyword) => (second, first),
-
-                    // By default, horizontal is first.
-                    _ => (first, second),
-                };
-                Ok(SpecifiedValue {
-                    horizontal: horiz.to_length_or_percentage(),
-                    vertical: vert.to_length_or_percentage(),
-                })
-            }
-        }
-
-        // Collapse `Position` into a few categories to simplify the above `match` expression.
-        enum PositionCategory {
-            HorizontalKeyword,
-            VerticalKeyword,
-            OtherKeyword,
-            LengthOrPercentage,
-        }
-        fn category(p: specified::PositionComponent) -> PositionCategory {
-            match p {
-                specified::PositionComponent::Left |
-                specified::PositionComponent::Right =>
-                    PositionCategory::HorizontalKeyword,
-                specified::PositionComponent::Top |
-                specified::PositionComponent::Bottom =>
-                    PositionCategory::VerticalKeyword,
-                specified::PositionComponent::Center =>
-                    PositionCategory::OtherKeyword,
-                specified::PositionComponent::LengthOrPercentage(_) =>
-                    PositionCategory::LengthOrPercentage,
+                self.0.to_css(dest)
             }
         }
 
@@ -157,54 +116,60 @@ ${helpers.predefined_type(
             type ComputedValue = computed_value::T;
 
             #[inline]
-            fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
-                computed_value::T {
-                    horizontal: self.horizontal.to_computed_value(context),
-                    vertical: self.vertical.to_computed_value(context),
-                }
+            fn to_computed_value(&self, context: &Context) -> computed_value::T {
+                computed_value::T(self.0.to_computed_value(context))
             }
         }
 
         #[inline]
         pub fn get_initial_value() -> computed_value::T {
-            computed_value::T {
+            use values::computed::position::Position;
+            computed_value::T(Position {
                 horizontal: computed::LengthOrPercentage::Percentage(0.0),
                 vertical: computed::LengthOrPercentage::Percentage(0.0),
-            }
+            })
         }
 
         pub fn parse(_context: &ParserContext, input: &mut Parser)
                      -> Result<SpecifiedValue, ()> {
-            let first = try!(specified::PositionComponent::parse(input));
-            let second = input.try(specified::PositionComponent::parse)
-                .unwrap_or(specified::PositionComponent::Center);
-            SpecifiedValue::new(first, second)
+            Ok(SpecifiedValue(try!(Position::parse(input))))
         }
 </%helpers:longhand>
 
-${helpers.single_keyword("background-repeat", "repeat repeat-x repeat-y no-repeat")}
+${helpers.single_keyword("background-repeat",
+                         "repeat repeat-x repeat-y no-repeat",
+                         animatable=False)}
 
-${helpers.single_keyword("background-attachment", "scroll fixed")}
+${helpers.single_keyword("background-attachment",
+                         "scroll fixed" + (" local" if product == "gecko" else ""),
+                         animatable=False)}
 
-${helpers.single_keyword("background-clip", "border-box padding-box content-box")}
+${helpers.single_keyword("background-clip",
+                         "border-box padding-box content-box",
+                         animatable=False)}
 
-${helpers.single_keyword("background-origin", "padding-box border-box content-box")}
+${helpers.single_keyword("background-origin",
+                         "padding-box border-box content-box",
+                         animatable=False)}
 
-<%helpers:longhand name="background-size">
+<%helpers:longhand name="background-size" animatable="True">
     use cssparser::{ToCss, Token};
     use std::ascii::AsciiExt;
     use std::fmt;
+    use values::HasViewportPercentage;
 
     pub mod computed_value {
         use values::computed::LengthOrPercentageOrAuto;
 
-        #[derive(PartialEq, Clone, Debug, HeapSizeOf)]
+        #[derive(PartialEq, Clone, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct ExplicitSize {
             pub width: LengthOrPercentageOrAuto,
             pub height: LengthOrPercentageOrAuto,
         }
 
-        #[derive(PartialEq, Clone, Debug, HeapSizeOf)]
+        #[derive(PartialEq, Clone, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub enum T {
             Explicit(ExplicitSize),
             Cover,
@@ -222,7 +187,14 @@ ${helpers.single_keyword("background-origin", "padding-box border-box content-bo
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedExplicitSize {
+        fn has_viewport_percentage(&self) -> bool {
+            return self.width.has_viewport_percentage() || self.height.has_viewport_percentage();
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedExplicitSize {
         pub width: specified::LengthOrPercentageOrAuto,
         pub height: specified::LengthOrPercentageOrAuto,
@@ -244,8 +216,17 @@ ${helpers.single_keyword("background-origin", "padding-box border-box content-bo
         }
     }
 
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedValue::Explicit(ref explicit_size) => explicit_size.has_viewport_percentage(),
+                _ => false
+            }
+        }
+    }
 
-    #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Explicit(SpecifiedExplicitSize),
         Cover,
@@ -266,7 +247,7 @@ ${helpers.single_keyword("background-origin", "padding-box border-box content-bo
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::Explicit(ref size) => {
                     computed_value::T::Explicit(computed_value::ExplicitSize {

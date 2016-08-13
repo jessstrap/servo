@@ -13,7 +13,7 @@ use dom::xmlhttprequest::XHRTimeoutCallback;
 use euclid::length::Length;
 use heapsize::HeapSizeOf;
 use ipc_channel::ipc::IpcSender;
-use js::jsapi::{HandleValue, Heap, RootedValue};
+use js::jsapi::{HandleValue, Heap};
 use js::jsval::{JSVal, UndefinedValue};
 use script_traits::{MsDuration, precise_time_ms};
 use script_traits::{TimerEvent, TimerEventId, TimerEventRequest, TimerSource};
@@ -22,6 +22,7 @@ use std::cmp::{self, Ord, Ordering};
 use std::collections::HashMap;
 use std::default::Default;
 use std::rc::Rc;
+use util::prefs::PREFS;
 
 #[derive(JSTraceable, PartialEq, Eq, Copy, Clone, HeapSizeOf, Hash, PartialOrd, Ord, Debug)]
 pub struct OneshotTimerHandle(i32);
@@ -176,7 +177,10 @@ impl OneshotTimers {
         let base_time = self.base_time();
 
         // Since the event id was the expected one, at least one timer should be due.
-        assert!(base_time >= self.timers.borrow().last().unwrap().scheduled_for);
+        if base_time < self.timers.borrow().last().unwrap().scheduled_for {
+            warn!("Unexpected timing!");
+            return;
+        }
 
         // select timers to run to prevent firing timers
         // that were installed during fire of another timer
@@ -207,6 +211,15 @@ impl OneshotTimers {
             Some(time) => time - offset,
             None => precise_time_ms() - offset,
         }
+    }
+
+    pub fn slow_down(&self) {
+        let duration = PREFS.get("js.timers.minimum_duration").as_u64().unwrap_or(1000);
+        self.js_timers.set_min_duration(MsDuration::new(duration));
+    }
+
+    pub fn speed_up(&self) {
+        self.js_timers.remove_min_duration();
     }
 
     pub fn suspend(&self) {
@@ -287,6 +300,8 @@ pub struct JsTimers {
     active_timers: DOMRefCell<HashMap<JsTimerHandle, JsTimerEntry>>,
     /// The nesting level of the currently executing timer task or 0.
     nesting_level: Cell<u32>,
+    /// Used to introduce a minimum delay in event intervals
+    min_duration: Cell<Option<MsDuration>>,
 }
 
 #[derive(JSTraceable, HeapSizeOf)]
@@ -341,6 +356,7 @@ impl JsTimers {
             next_timer_handle: Cell::new(JsTimerHandle(1)),
             active_timers: DOMRefCell::new(HashMap::new()),
             nesting_level: Cell::new(0),
+            min_duration: Cell::new(None),
         }
     }
 
@@ -404,6 +420,24 @@ impl JsTimers {
         }
     }
 
+    pub fn set_min_duration(&self, duration: MsDuration) {
+        self.min_duration.set(Some(duration));
+    }
+
+    pub fn remove_min_duration(&self) {
+        self.min_duration.set(None);
+    }
+
+    // see step 13 of https://html.spec.whatwg.org/multipage/#timer-initialisation-steps
+    fn user_agent_pad(&self, current_duration: MsDuration) -> MsDuration {
+        match self.min_duration.get() {
+            Some(min_duration) => {
+                cmp::max(min_duration, current_duration)
+            },
+            None => current_duration
+        }
+    }
+
     // see https://html.spec.whatwg.org/multipage/#timer-initialisation-steps
     fn initialize_and_schedule(&self, global: GlobalRef, mut task: JsTimerTask) {
         let handle = task.handle;
@@ -412,13 +446,12 @@ impl JsTimers {
         // step 6
         let nesting_level = self.nesting_level.get();
 
-        // step 7
-        let duration = clamp_duration(nesting_level, task.duration);
-
+        // step 7, 13
+        let duration = self.user_agent_pad(clamp_duration(nesting_level, task.duration));
         // step 8, 9
         task.nesting_level = nesting_level + 1;
 
-        // essentially step 11-14
+        // essentially step 11, 12, and 14
         let callback = OneshotTimerCallback::JsTimer(task);
         let oneshot_handle = global.schedule_callback(callback, duration);
 
@@ -455,7 +488,7 @@ impl JsTimerTask {
         match *&self.callback {
             InternalTimerCallback::StringTimerCallback(ref code_str) => {
                 let cx = this.global().r().get_cx();
-                let mut rval = RootedValue::new(cx, UndefinedValue());
+                rooted!(in(cx) let mut rval = UndefinedValue());
 
                 this.evaluate_js_on_global_with_result(code_str, rval.handle_mut());
             },

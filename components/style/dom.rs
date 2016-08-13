@@ -2,18 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! Types and traits used to access the DOM from style calculation.
+
 #![allow(unsafe_code)]
 
 use context::SharedStyleContext;
 use data::PrivateStyleData;
 use element_state::ElementState;
 use properties::{ComputedValues, PropertyDeclaration, PropertyDeclarationBlock};
-use restyle_hints::{ElementSnapshot, RESTYLE_DESCENDANTS, RESTYLE_LATER_SIBLINGS, RESTYLE_SELF, RestyleHint};
-use selector_impl::{ElementExt, SelectorImplExt};
-use selectors::Element;
+use refcell::{Ref, RefMut};
+use restyle_hints::{RESTYLE_DESCENDANTS, RESTYLE_LATER_SIBLINGS, RESTYLE_SELF, RestyleHint};
+use selector_impl::{ElementExt, PseudoElement};
 use selectors::matching::DeclarationBlock;
-use smallvec::VecLike;
-use std::cell::{Ref, RefMut};
+use sink::Push;
+use std::fmt::Debug;
 use std::ops::BitOr;
 use std::sync::Arc;
 use string_cache::{Atom, Namespace};
@@ -31,7 +33,8 @@ pub type UnsafeNode = (usize, usize);
 /// Because the script task's GC does not trace layout, node data cannot be safely stored in layout
 /// data structures. Also, layout code tends to be faster when the DOM is not being accessed, for
 /// locality reasons. Using `OpaqueNode` enforces this invariant.
-#[derive(Clone, PartialEq, Copy, Debug, HeapSizeOf, Hash, Eq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Copy, Debug, Hash, Eq)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
 pub struct OpaqueNode(pub usize);
 
 impl OpaqueNode {
@@ -42,17 +45,29 @@ impl OpaqueNode {
     }
 }
 
-pub trait TRestyleDamage : BitOr<Output=Self> + Copy {
-    type ConcreteComputedValues: ComputedValues;
-    fn compute(old: Option<&Arc<Self::ConcreteComputedValues>>, new: &Self::ConcreteComputedValues) -> Self;
+pub trait TRestyleDamage : Debug + PartialEq + BitOr<Output=Self> + Copy {
+    /// The source for our current computed values in the cascade. This is a
+    /// ComputedValues in Servo and a StyleContext in Gecko.
+    ///
+    /// This is needed because Gecko has a few optimisations for the calculation
+    /// of the difference depending on which values have been used during
+    /// layout.
+    ///
+    /// This should be obtained via TNode::existing_style_for_restyle_damage
+    type PreExistingComputedValues;
+
+    fn compute(old: &Self::PreExistingComputedValues,
+               new: &Arc<ComputedValues>) -> Self;
+
+    fn empty() -> Self;
+
     fn rebuild_and_reflow() -> Self;
 }
 
 pub trait TNode : Sized + Copy + Clone {
     type ConcreteElement: TElement<ConcreteNode = Self, ConcreteDocument = Self::ConcreteDocument>;
     type ConcreteDocument: TDocument<ConcreteNode = Self, ConcreteElement = Self::ConcreteElement>;
-    type ConcreteRestyleDamage: TRestyleDamage<ConcreteComputedValues = Self::ConcreteComputedValues>;
-    type ConcreteComputedValues: ComputedValues;
+    type ConcreteRestyleDamage: TRestyleDamage;
 
     fn to_unsafe(&self) -> UnsafeNode;
     unsafe fn from_unsafe(n: &UnsafeNode) -> Self;
@@ -65,6 +80,8 @@ pub trait TNode : Sized + Copy + Clone {
     fn is_element(&self) -> bool;
 
     fn dump(self);
+
+    fn dump_style(self);
 
     fn traverse_preorder(self) -> TreeIterator<Self> {
         TreeIterator::new(self)
@@ -85,12 +102,6 @@ pub trait TNode : Sized + Copy + Clone {
 
     /// Converts self into an `OpaqueNode`.
     fn opaque(&self) -> OpaqueNode;
-
-    /// Initializes style and layout data for the node. No-op if the data is already
-    /// initialized.
-    ///
-    /// FIXME(pcwalton): Do this as part of fragment building instead of in a traversal.
-    fn initialize_data(self);
 
     /// While doing a reflow, the node at the root has no parent, as far as we're
     /// concerned. This method returns `None` at the reflow root.
@@ -116,19 +127,9 @@ pub trait TNode : Sized + Copy + Clone {
 
     unsafe fn set_dirty_descendants(&self, value: bool);
 
-    fn dirty_self(&self) {
-        unsafe {
-            self.set_dirty(true);
-            self.set_dirty_descendants(true);
-        }
-    }
+    fn needs_dirty_on_viewport_size_changed(&self) -> bool;
 
-    fn dirty_descendants(&self) {
-        for ref child in self.children() {
-            child.dirty_self();
-            child.dirty_descendants();
-        }
-    }
+    unsafe fn set_dirty_on_viewport_size_changed(&self);
 
     fn can_be_fragmented(&self) -> bool;
 
@@ -136,21 +137,15 @@ pub trait TNode : Sized + Copy + Clone {
 
     /// Borrows the PrivateStyleData without checks.
     #[inline(always)]
-    unsafe fn borrow_data_unchecked(&self)
-        -> Option<*const PrivateStyleData<<Self::ConcreteElement as Element>::Impl,
-                                           Self::ConcreteComputedValues>>;
+    unsafe fn borrow_data_unchecked(&self) -> Option<*const PrivateStyleData>;
 
     /// Borrows the PrivateStyleData immutably. Fails on a conflicting borrow.
     #[inline(always)]
-    fn borrow_data(&self)
-        -> Option<Ref<PrivateStyleData<<Self::ConcreteElement as Element>::Impl,
-                                           Self::ConcreteComputedValues>>>;
+    fn borrow_data(&self) -> Option<Ref<PrivateStyleData>>;
 
     /// Borrows the PrivateStyleData mutably. Fails on a conflicting borrow.
     #[inline(always)]
-    fn mutate_data(&self)
-        -> Option<RefMut<PrivateStyleData<<Self::ConcreteElement as Element>::Impl,
-                                           Self::ConcreteComputedValues>>>;
+    fn mutate_data(&self) -> Option<RefMut<PrivateStyleData>>;
 
     /// Get the description of how to account for recent style changes.
     fn restyle_damage(self) -> Self::ConcreteRestyleDamage;
@@ -171,10 +166,7 @@ pub trait TNode : Sized + Copy + Clone {
 
     /// Returns the style results for the given node. If CSS selector matching
     /// has not yet been performed, fails.
-    fn style(&self,
-             _context: &SharedStyleContext<<Self::ConcreteElement as Element>::Impl>)
-        -> Ref<Arc<Self::ConcreteComputedValues>>
-        where <Self::ConcreteElement as Element>::Impl: SelectorImplExt<ComputedValues=Self::ConcreteComputedValues> {
+    fn style(&self, _context: &SharedStyleContext) -> Ref<Arc<ComputedValues>> {
         Ref::map(self.borrow_data().unwrap(), |data| data.style.as_ref().unwrap())
     }
 
@@ -182,6 +174,14 @@ pub trait TNode : Sized + Copy + Clone {
     fn unstyle(self) {
         self.mutate_data().unwrap().style = None;
     }
+
+    /// XXX: It's a bit unfortunate we need to pass the current computed values
+    /// as an argument here, but otherwise Servo would crash due to double
+    /// borrows to return it.
+    fn existing_style_for_restyle_damage<'a>(&'a self,
+                                             current_computed_values: Option<&'a Arc<ComputedValues>>,
+                                             pseudo: Option<&PseudoElement>)
+        -> Option<&'a <Self::ConcreteRestyleDamage as TRestyleDamage>::PreExistingComputedValues>;
 }
 
 pub trait TDocument : Sized + Copy + Clone {
@@ -192,12 +192,13 @@ pub trait TDocument : Sized + Copy + Clone {
 
     fn root_node(&self) -> Option<Self::ConcreteNode>;
 
-    fn drain_modified_elements(&self) -> Vec<(Self::ConcreteElement, ElementSnapshot)>;
+    fn drain_modified_elements(&self) -> Vec<(Self::ConcreteElement,
+                                              <Self::ConcreteElement as ElementExt>::Snapshot)>;
 }
 
 pub trait PresentationalHintsSynthetizer {
     fn synthesize_presentational_hints_for_legacy_attributes<V>(&self, hints: &mut V)
-        where V: VecLike<DeclarationBlock<Vec<PropertyDeclaration>>>;
+        where V: Push<DeclarationBlock<Vec<PropertyDeclaration>>>;
 }
 
 pub trait TElement : Sized + Copy + Clone + ElementExt + PresentationalHintsSynthetizer {
@@ -210,11 +211,11 @@ pub trait TElement : Sized + Copy + Clone + ElementExt + PresentationalHintsSynt
 
     fn get_state(&self) -> ElementState;
 
-    fn get_attr<'a>(&'a self, namespace: &Namespace, attr: &Atom) -> Option<&'a str>;
-    fn get_attrs<'a>(&'a self, attr: &Atom) -> Vec<&'a str>;
+    fn has_attr(&self, namespace: &Namespace, attr: &Atom) -> bool;
+    fn attr_equals(&self, namespace: &Namespace, attr: &Atom, value: &Atom) -> bool;
 
     /// Properly marks nodes as dirty in response to restyle hints.
-    fn note_restyle_hint(&self, mut hint: RestyleHint) {
+    fn note_restyle_hint(&self, hint: RestyleHint) {
         // Bail early if there's no restyling to do.
         if hint.is_empty() {
             return;
@@ -232,23 +233,21 @@ pub trait TElement : Sized + Copy + Clone + ElementExt + PresentationalHintsSynt
 
         // Process hints.
         if hint.contains(RESTYLE_SELF) {
-            node.dirty_self();
+            unsafe { node.set_dirty(true); }
+        // XXX(emilio): For now, dirty implies dirty descendants if found.
+        } else if hint.contains(RESTYLE_DESCENDANTS) {
+            let mut current = node.first_child();
+            while let Some(node) = current {
+                unsafe { node.set_dirty(true); }
+                current = node.next_sibling();
+            }
+        }
 
-            // FIXME(bholley, #8438): We currently need to RESTYLE_DESCENDANTS in the
-            // RESTYLE_SELF case in order to make sure "inherit" style structs propagate
-            // properly. See the explanation in the github issue.
-            hint.insert(RESTYLE_DESCENDANTS);
-        }
-        if hint.contains(RESTYLE_DESCENDANTS) {
-            unsafe { node.set_dirty_descendants(true); }
-            node.dirty_descendants();
-        }
         if hint.contains(RESTYLE_LATER_SIBLINGS) {
             let mut next = ::selectors::Element::next_sibling_element(self);
             while let Some(sib) = next {
                 let sib_node = sib.as_node();
-                sib_node.dirty_self();
-                sib_node.dirty_descendants();
+                unsafe { sib_node.set_dirty(true) };
                 next = ::selectors::Element::next_sibling_element(&sib);
             }
         }
@@ -261,11 +260,15 @@ pub struct TreeIterator<ConcreteNode> where ConcreteNode: TNode {
 
 impl<ConcreteNode> TreeIterator<ConcreteNode> where ConcreteNode: TNode {
     fn new(root: ConcreteNode) -> TreeIterator<ConcreteNode> {
-        let mut stack = vec!();
+        let mut stack = vec![];
         stack.push(root);
         TreeIterator {
             stack: stack,
         }
+    }
+
+    pub fn next_skipping_children(&mut self) -> Option<ConcreteNode> {
+        self.stack.pop()
     }
 }
 

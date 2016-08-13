@@ -11,20 +11,21 @@ use block::BlockFlow;
 use context::LayoutContext;
 use display_list_builder::DisplayListBuildState;
 use euclid::Point2D;
+use euclid::Size2D;
 use floats::FloatKind;
 use flow::{Flow, FlowClass, OpaqueFlow, mut_base, FragmentationContext};
 use flow_ref::{self, FlowRef};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use gfx::display_list::StackingContext;
 use gfx_traits::StackingContextId;
+use gfx_traits::print_tree::PrintTree;
 use std::cmp::{min, max};
 use std::fmt;
 use std::sync::Arc;
-use style::context::StyleContext;
+use style::context::{StyleContext, SharedStyleContext};
 use style::logical_geometry::LogicalSize;
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
 use style::values::computed::{LengthOrPercentageOrAuto, LengthOrPercentageOrNone};
-use util::print_tree::PrintTree;
 
 pub struct MulticolFlow {
     pub block_flow: BlockFlow,
@@ -77,9 +78,9 @@ impl Flow for MulticolFlow {
         self.block_flow.bubble_inline_sizes();
     }
 
-    fn assign_inline_sizes(&mut self, layout_context: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, shared_context: &SharedStyleContext) {
         debug!("assign_inline_sizes({}): assigning inline_size for flow", "multicol");
-        self.block_flow.compute_inline_sizes(layout_context);
+        self.block_flow.compute_inline_sizes(shared_context);
 
         // Move in from the inline-start border edge.
         let inline_start_content_edge = self.block_flow.fragment.border_box.start.i +
@@ -90,7 +91,7 @@ impl Flow for MulticolFlow {
             self.block_flow.fragment.margin.inline_end +
             self.block_flow.fragment.border_padding.inline_end;
 
-        self.block_flow.assign_inline_sizes(layout_context);
+        self.block_flow.assign_inline_sizes(shared_context);
         let padding_and_borders = self.block_flow.fragment.border_padding.inline_start_end();
         let content_inline_size =
             self.block_flow.fragment.border_box.size.inline - padding_and_borders;
@@ -119,7 +120,7 @@ impl Flow for MulticolFlow {
         self.block_flow.fragment.border_box.size.inline = content_inline_size + padding_and_borders;
 
         self.block_flow.propagate_assigned_inline_size_to_children(
-            layout_context, inline_start_content_edge, inline_end_content_edge, column_width,
+            shared_context, inline_start_content_edge, inline_end_content_edge, column_width,
             |_, _, _, _, _, _| {});
     }
 
@@ -168,7 +169,7 @@ impl Flow for MulticolFlow {
         let pitch = pitch.to_physical(self.block_flow.base.writing_mode);
         for (i, child) in self.block_flow.base.children.iter_mut().enumerate() {
             let point = &mut mut_base(child).stacking_relative_position;
-            *point = *point + pitch * i as i32;
+            *point = *point + Size2D::new(pitch.width * i as i32, pitch.height * i as i32);
         }
     }
 
@@ -237,9 +238,9 @@ impl Flow for MulticolColumnFlow {
         self.block_flow.bubble_inline_sizes();
     }
 
-    fn assign_inline_sizes(&mut self, layout_context: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, shared_context: &SharedStyleContext) {
         debug!("assign_inline_sizes({}): assigning inline_size for flow", "multicol column");
-        self.block_flow.assign_inline_sizes(layout_context);
+        self.block_flow.assign_inline_sizes(shared_context);
     }
 
     fn assign_block_size<'a>(&mut self, ctx: &'a LayoutContext<'a>) {

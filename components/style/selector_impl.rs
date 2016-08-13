@@ -1,12 +1,27 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-use element_state::ElementState;
-use properties::{self, ServoComputedValues};
-use selector_matching::{USER_OR_USER_AGENT_STYLESHEETS, QUIRKS_MODE_STYLESHEET};
+
+//! The pseudo-classes and pseudo-elements supported by the style system.
+
+use matching::{common_style_affecting_attributes, CommonStyleAffectingAttributeMode};
+use restyle_hints;
 use selectors::Element;
-use selectors::parser::{ParserContext, SelectorImpl};
-use stylesheets::Stylesheet;
+use selectors::parser::{AttrSelector, SelectorImpl};
+
+pub type AttrValue = <TheSelectorImpl as SelectorImpl>::AttrValue;
+
+#[cfg(feature = "servo")]
+pub use servo_selector_impl::*;
+
+#[cfg(feature = "servo")]
+pub use servo_selector_impl::{ServoSelectorImpl as TheSelectorImpl, ServoElementSnapshot as ElementSnapshot};
+
+#[cfg(feature = "gecko")]
+pub use gecko_selector_impl::*;
+
+#[cfg(feature = "gecko")]
+pub use gecko_selector_impl::{GeckoSelectorImpl as TheSelectorImpl};
 
 /// This function determines if a pseudo-element is eagerly cascaded or not.
 ///
@@ -55,21 +70,17 @@ impl PseudoElementCascadeType {
     }
 }
 
-pub trait ElementExt: Element {
+pub trait ElementExt: Element<Impl=TheSelectorImpl> {
+    type Snapshot: restyle_hints::ElementSnapshot + 'static;
+
     fn is_link(&self) -> bool;
 }
 
-pub trait SelectorImplExt : SelectorImpl + Sized {
-    type ComputedValues: properties::ComputedValues;
-
-    fn pseudo_element_cascade_type(pseudo: &Self::PseudoElement) -> PseudoElementCascadeType;
-
-    fn each_pseudo_element<F>(mut fun: F)
-        where F: FnMut(Self::PseudoElement);
-
+impl TheSelectorImpl {
     #[inline]
-    fn each_eagerly_cascaded_pseudo_element<F>(mut fun: F)
-        where F: FnMut(<Self as SelectorImpl>::PseudoElement) {
+    pub fn each_eagerly_cascaded_pseudo_element<F>(mut fun: F)
+        where F: FnMut(PseudoElement)
+    {
         Self::each_pseudo_element(|pseudo| {
             if Self::pseudo_element_cascade_type(&pseudo).is_eager() {
                 fun(pseudo)
@@ -78,184 +89,39 @@ pub trait SelectorImplExt : SelectorImpl + Sized {
     }
 
     #[inline]
-    fn each_precomputed_pseudo_element<F>(mut fun: F)
-        where F: FnMut(<Self as SelectorImpl>::PseudoElement) {
+    pub fn each_precomputed_pseudo_element<F>(mut fun: F)
+        where F: FnMut(PseudoElement)
+    {
         Self::each_pseudo_element(|pseudo| {
             if Self::pseudo_element_cascade_type(&pseudo).is_precomputed() {
                 fun(pseudo)
             }
         })
     }
-
-
-    fn pseudo_class_state_flag(pc: &Self::NonTSPseudoClass) -> ElementState;
-
-    fn get_user_or_user_agent_stylesheets() -> &'static [Stylesheet<Self>];
-
-    fn get_quirks_mode_stylesheet() -> Option<&'static Stylesheet<Self>>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, HeapSizeOf, Hash)]
-pub enum PseudoElement {
-    Before,
-    After,
-    Selection,
-    DetailsSummary,
-    DetailsContent,
-}
-
-impl PseudoElement {
-    #[inline]
-    pub fn cascade_type(&self) -> PseudoElementCascadeType {
-        match *self {
-            PseudoElement::Before |
-            PseudoElement::After |
-            PseudoElement::Selection => PseudoElementCascadeType::Eager,
-            PseudoElement::DetailsSummary => PseudoElementCascadeType::Lazy,
-            PseudoElement::DetailsContent => PseudoElementCascadeType::Precomputed,
+pub fn attr_exists_selector_is_shareable(attr_selector: &AttrSelector<TheSelectorImpl>) -> bool {
+    // NB(pcwalton): If you update this, remember to update the corresponding list in
+    // `can_share_style_with()` as well.
+    common_style_affecting_attributes().iter().any(|common_attr_info| {
+        common_attr_info.atom == attr_selector.name && match common_attr_info.mode {
+            CommonStyleAffectingAttributeMode::IsPresent(_) => true,
+            CommonStyleAffectingAttributeMode::IsEqual(..) => false,
         }
-    }
+    })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, HeapSizeOf, Hash)]
-pub enum NonTSPseudoClass {
-    AnyLink,
-    Link,
-    Visited,
-    Active,
-    Focus,
-    Hover,
-    Enabled,
-    Disabled,
-    Checked,
-    Indeterminate,
-    ServoNonZeroBorder,
-    ReadWrite,
-    ReadOnly,
-    PlaceholderShown,
-}
-
-impl NonTSPseudoClass {
-    pub fn state_flag(&self) -> ElementState {
-        use element_state::*;
-        use self::NonTSPseudoClass::*;
-        match *self {
-            Active => IN_ACTIVE_STATE,
-            Focus => IN_FOCUS_STATE,
-            Hover => IN_HOVER_STATE,
-            Enabled => IN_ENABLED_STATE,
-            Disabled => IN_DISABLED_STATE,
-            Checked => IN_CHECKED_STATE,
-            Indeterminate => IN_INDETERMINATE_STATE,
-            ReadOnly | ReadWrite => IN_READ_WRITE_STATE,
-            PlaceholderShown => IN_PLACEHOLDER_SHOWN_STATE,
-
-            AnyLink |
-            Link |
-            Visited |
-            ServoNonZeroBorder => ElementState::empty(),
+pub fn attr_equals_selector_is_shareable(attr_selector: &AttrSelector<TheSelectorImpl>,
+                                         value: &AttrValue) -> bool {
+    // FIXME(pcwalton): Remove once we start actually supporting RTL text. This is in
+    // here because the UA style otherwise disables all style sharing completely.
+    atom!("dir") == *value ||
+    common_style_affecting_attributes().iter().any(|common_attr_info| {
+        common_attr_info.atom == attr_selector.name && match common_attr_info.mode {
+            CommonStyleAffectingAttributeMode::IsEqual(ref target_value, _) => {
+                *target_value == *value
+            }
+            CommonStyleAffectingAttributeMode::IsPresent(_) => false,
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, HeapSizeOf)]
-pub struct ServoSelectorImpl;
-
-impl SelectorImpl for ServoSelectorImpl {
-    type PseudoElement = PseudoElement;
-    type NonTSPseudoClass = NonTSPseudoClass;
-
-    fn parse_non_ts_pseudo_class(context: &ParserContext,
-                                 name: &str) -> Result<NonTSPseudoClass, ()> {
-        use self::NonTSPseudoClass::*;
-        let pseudo_class = match_ignore_ascii_case! { name,
-            "any-link" => AnyLink,
-            "link" => Link,
-            "visited" => Visited,
-            "active" => Active,
-            "focus" => Focus,
-            "hover" => Hover,
-            "enabled" => Enabled,
-            "disabled" => Disabled,
-            "checked" => Checked,
-            "indeterminate" => Indeterminate,
-            "read-write" => ReadWrite,
-            "read-only" => ReadOnly,
-            "placeholder-shown" => PlaceholderShown,
-            "-servo-nonzero-border" => {
-                if !context.in_user_agent_stylesheet {
-                    return Err(());
-                }
-                ServoNonZeroBorder
-            },
-            _ => return Err(())
-        };
-
-        Ok(pseudo_class)
-    }
-
-    fn parse_pseudo_element(context: &ParserContext,
-                            name: &str) -> Result<PseudoElement, ()> {
-        use self::PseudoElement::*;
-        let pseudo_element = match_ignore_ascii_case! { name,
-            "before" => Before,
-            "after" => After,
-            "selection" => Selection,
-            "-servo-details-summary" => {
-                if !context.in_user_agent_stylesheet {
-                    return Err(())
-                }
-                DetailsSummary
-            },
-            "-servo-details-content" => {
-                if !context.in_user_agent_stylesheet {
-                    return Err(())
-                }
-                DetailsContent
-            },
-            _ => return Err(())
-        };
-
-        Ok(pseudo_element)
-    }
-}
-
-impl SelectorImplExt for ServoSelectorImpl {
-    type ComputedValues = ServoComputedValues;
-
-    #[inline]
-    fn pseudo_element_cascade_type(pseudo: &PseudoElement) -> PseudoElementCascadeType {
-        pseudo.cascade_type()
-    }
-
-    #[inline]
-    fn each_pseudo_element<F>(mut fun: F)
-        where F: FnMut(PseudoElement) {
-        fun(PseudoElement::Before);
-        fun(PseudoElement::After);
-        fun(PseudoElement::DetailsContent);
-        fun(PseudoElement::DetailsSummary);
-        fun(PseudoElement::Selection);
-    }
-
-    #[inline]
-    fn pseudo_class_state_flag(pc: &NonTSPseudoClass) -> ElementState {
-        pc.state_flag()
-    }
-
-    #[inline]
-    fn get_user_or_user_agent_stylesheets() -> &'static [Stylesheet<Self>] {
-        &*USER_OR_USER_AGENT_STYLESHEETS
-    }
-
-    #[inline]
-    fn get_quirks_mode_stylesheet() -> Option<&'static Stylesheet<Self>> {
-        Some(&*QUIRKS_MODE_STYLESHEET)
-    }
-}
-
-impl<E: Element<Impl=ServoSelectorImpl>> ElementExt for E {
-    fn is_link(&self) -> bool {
-        self.match_non_ts_pseudo_class(NonTSPseudoClass::AnyLink)
-    }
+    })
 }

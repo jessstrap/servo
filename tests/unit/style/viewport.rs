@@ -4,13 +4,12 @@
 
 use cssparser::Parser;
 use euclid::scale_factor::ScaleFactor;
-use euclid::size::Size2D;
+use euclid::size::TypedSize2D;
 use media_queries::CSSErrorReporterTest;
 use style::error_reporting::ParseErrorReporter;
 use style::media_queries::{Device, MediaType};
 use style::parser::{ParserContext, ParserContextExtraData};
-use style::servo::Stylesheet;
-use style::stylesheets::{Origin, CSSRuleIteratorExt};
+use style::stylesheets::{Stylesheet, Origin, CSSRuleIteratorExt};
 use style::values::specified::Length::{self, ViewportPercentage};
 use style::values::specified::LengthOrPercentageOrAuto::{self, Auto};
 use style::values::specified::ViewportPercentageLength::Vw;
@@ -30,8 +29,8 @@ fn test_viewport_rule<F>(css: &str,
                          callback: F)
     where F: Fn(&Vec<ViewportDescriptorDeclaration>, &str)
 {
-    ::util::prefs::set_pref("layout.viewport.enabled",
-                            ::util::prefs::PrefValue::Boolean(true));
+    ::util::prefs::PREFS.set("layout.viewport.enabled",
+                             ::util::prefs::PrefValue::Boolean(true));
     let stylesheet = stylesheet!(css, Author, Box::new(CSSErrorReporterTest));
     let mut rule_count = 0;
     for rule in stylesheet.effective_rules(&device).viewport() {
@@ -85,7 +84,7 @@ macro_rules! viewport_length {
 
 #[test]
 fn empty_viewport_rule() {
-    let device = Device::new(MediaType::Screen, Size2D::typed(800., 600.));
+    let device = Device::new(MediaType::Screen, TypedSize2D::new(800., 600.));
 
     test_viewport_rule("@viewport {}", &device, |declarations, css| {
         println!("{}", css);
@@ -108,7 +107,7 @@ macro_rules! assert_decl_eq {
 
 #[test]
 fn simple_viewport_rules() {
-    let device = Device::new(MediaType::Screen, Size2D::typed(800., 600.));
+    let device = Device::new(MediaType::Screen, TypedSize2D::new(800., 600.));
 
     test_viewport_rule("@viewport { width: auto; height: auto;\
                                     zoom: auto; min-zoom: 0; max-zoom: 200%;\
@@ -180,7 +179,7 @@ fn simple_meta_viewport_contents() {
 
 #[test]
 fn cascading_within_viewport_rule() {
-    let device = Device::new(MediaType::Screen, Size2D::typed(800., 600.));
+    let device = Device::new(MediaType::Screen, TypedSize2D::new(800., 600.));
 
     // normal order of appearance
     test_viewport_rule("@viewport { min-width: 200px; min-width: auto; }",
@@ -245,9 +244,9 @@ fn cascading_within_viewport_rule() {
 
 #[test]
 fn multiple_stylesheets_cascading() {
-    ::util::prefs::set_pref("layout.viewport.enabled",
-                            ::util::prefs::PrefValue::Boolean(true));
-    let device = Device::new(MediaType::Screen, Size2D::typed(800., 600.));
+    ::util::prefs::PREFS.set("layout.viewport.enabled",
+                             ::util::prefs::PrefValue::Boolean(true));
+    let device = Device::new(MediaType::Screen, TypedSize2D::new(800., 600.));
     let error_reporter = CSSErrorReporterTest;
     let stylesheets = vec![
         stylesheet!("@viewport { min-width: 100px; min-height: 100px; zoom: 1; }", UserAgent, error_reporter.clone()),
@@ -290,11 +289,11 @@ fn constrain_viewport() {
         }
     }
 
-    let initial_viewport = Size2D::typed(800., 600.);
+    let initial_viewport = TypedSize2D::new(800., 600.);
     assert_eq!(ViewportConstraints::maybe_new(initial_viewport, from_css!("")),
                None);
 
-    let initial_viewport = Size2D::typed(800., 600.);
+    let initial_viewport = TypedSize2D::new(800., 600.);
     assert_eq!(ViewportConstraints::maybe_new(initial_viewport, from_css!("width: 320px auto")),
                Some(ViewportConstraints {
                    size: initial_viewport,
@@ -307,10 +306,10 @@ fn constrain_viewport() {
                    orientation: Orientation::Auto
                }));
 
-    let initial_viewport = Size2D::typed(200., 150.);
+    let initial_viewport = TypedSize2D::new(200., 150.);
     assert_eq!(ViewportConstraints::maybe_new(initial_viewport, from_css!("width: 320px auto")),
                Some(ViewportConstraints {
-                   size: Size2D::typed(320., 240.),
+                   size: TypedSize2D::new(320., 240.),
 
                    initial_zoom: ScaleFactor::new(1.),
                    min_zoom: None,
@@ -320,7 +319,7 @@ fn constrain_viewport() {
                    orientation: Orientation::Auto
                }));
 
-    let initial_viewport = Size2D::typed(800., 600.);
+    let initial_viewport = TypedSize2D::new(800., 600.);
     assert_eq!(ViewportConstraints::maybe_new(initial_viewport, from_css!("width: 320px auto")),
                Some(ViewportConstraints {
                    size: initial_viewport,
@@ -333,7 +332,7 @@ fn constrain_viewport() {
                    orientation: Orientation::Auto
                }));
 
-    let initial_viewport = Size2D::typed(800., 600.);
+    let initial_viewport = TypedSize2D::new(800., 600.);
     assert_eq!(ViewportConstraints::maybe_new(initial_viewport, from_css!("width: 800px; height: 600px;\
                                                                      zoom: 1;\
                                                                      user-zoom: zoom;\

@@ -6,20 +6,22 @@
 
 <% data.new_style_struct("InheritedBox", inherited=True, gecko_name="Visibility") %>
 
-${helpers.single_keyword("direction", "ltr rtl", need_clone=True)}
+${helpers.single_keyword("direction", "ltr rtl", need_clone=True, animatable=False)}
 
 // TODO: collapse. Well, do tables first.
 ${helpers.single_keyword("visibility",
                          "visible hidden",
                          extra_gecko_values="collapse",
-                         gecko_ffi_name="mVisible")}
+                         gecko_ffi_name="mVisible",
+                         animatable=True)}
 
 // CSS Writing Modes Level 3
 // http://dev.w3.org/csswg/css-writing-modes/
 ${helpers.single_keyword("writing-mode",
                          "horizontal-tb vertical-rl vertical-lr",
                          experimental=True,
-                         need_clone=True)}
+                         need_clone=True,
+                         animatable=False)}
 
 // FIXME(SimonSapin): Add 'mixed' and 'upright' (needs vertical text support)
 // FIXME(SimonSapin): initial (first) value should be 'mixed', when that's implemented
@@ -29,18 +31,22 @@ ${helpers.single_keyword("text-orientation",
                          experimental=True,
                          need_clone=True,
                          extra_gecko_values="mixed upright",
-                         extra_servo_values="sideways-right sideways-left")}
+                         extra_servo_values="sideways-right sideways-left",
+                         animatable=False)}
 
 // CSS Color Module Level 4
 // https://drafts.csswg.org/css-color/
-${helpers.single_keyword("color-adjust", "economy exact", products="gecko")}
+${helpers.single_keyword("color-adjust",
+                         "economy exact", products="gecko",
+                         animatable=False)}
 
-<%helpers:longhand name="image-rendering">
+<%helpers:longhand name="image-rendering" animatable="False">
     pub mod computed_value {
         use cssparser::ToCss;
         use std::fmt;
 
-        #[derive(Copy, Clone, Debug, PartialEq, HeapSizeOf, Deserialize, Serialize)]
+        #[derive(Copy, Clone, Debug, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
         pub enum T {
             Auto,
             CrispEdges,
@@ -57,6 +63,9 @@ ${helpers.single_keyword("color-adjust", "economy exact", products="gecko")}
             }
         }
     }
+
+    use values::NoViewportPercentage;
+    impl NoViewportPercentage for SpecifiedValue {}
 
     pub type SpecifiedValue = computed_value::T;
 
@@ -83,7 +92,7 @@ ${helpers.single_keyword("color-adjust", "economy exact", products="gecko")}
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, _: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, _: &Context) -> computed_value::T {
             *self
         }
     }
@@ -91,12 +100,19 @@ ${helpers.single_keyword("color-adjust", "economy exact", products="gecko")}
 
 // Used in the bottom-up flow construction traversal to avoid constructing flows for
 // descendants of nodes with `display: none`.
-<%helpers:longhand name="-servo-under-display-none" derived_from="display" products="servo">
+<%helpers:longhand name="-servo-under-display-none"
+                   derived_from="display"
+                   products="servo"
+                   animatable="False">
     use cssparser::ToCss;
     use std::fmt;
     use values::computed::ComputedValueAsSpecified;
+    use values::NoViewportPercentage;
 
-    #[derive(Copy, Clone, Debug, Eq, PartialEq, HeapSizeOf, Serialize, Deserialize)]
+    impl NoViewportPercentage for SpecifiedValue {}
+
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
     pub struct SpecifiedValue(pub bool);
 
     pub mod computed_value {
@@ -115,8 +131,7 @@ ${helpers.single_keyword("color-adjust", "economy exact", products="gecko")}
     }
 
     #[inline]
-    pub fn derive_from_display<Cx: TContext>(context: &mut Cx) {
-        use properties::style_struct_traits::Box;
+    pub fn derive_from_display(context: &mut Context) {
         use super::display::computed_value::T as Display;
 
         if context.style().get_box().clone_display() == Display::none {
