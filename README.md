@@ -1,6 +1,8 @@
 # The Servo Tool Kit.
 This project is an experimental attempt to re purpose the Servo browsing engine into a pure rust GUI toolkit on par with Qt, GTK, or WinForms. I conjecture that the combination of HTML, CSS, the DOM API, and Rust (no JavaScript) will make for a very nice and performance GUI library. 
 
+(just seeing if I have the hang of git yet.)
+
 # Tentative design.
 - A heavily modified version of Servo (mostly chopping out SpiderMonkey and the Networking subsystem).
 - An API for 'controls': groups of HTML, CSS, and Rust that the modified Servo uses to construct, style and layout a DOM and respond to user events or engine events. 
