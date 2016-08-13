@@ -2,9 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! States elements can be in.
+
 bitflags! {
     #[doc = "Event-based element states."]
-    #[derive(HeapSizeOf)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub flags ElementState: u16 {
         #[doc = "The mouse is down on this element. \
                  https://html.spec.whatwg.org/multipage/#selector-active \
@@ -31,5 +33,7 @@ bitflags! {
         const IN_READ_WRITE_STATE = 0x80,
         #[doc = "https://html.spec.whatwg.org/multipage/#selector-placeholder-shown"]
         const IN_PLACEHOLDER_SHOWN_STATE = 0x0100,
+        #[doc = "https://html.spec.whatwg.org/multipage/#selector-target"]
+        const IN_TARGET_STATE = 0x0200,
     }
 }

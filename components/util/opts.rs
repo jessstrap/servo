@@ -5,11 +5,11 @@
 //! Configuration options for a single run of the servo application. Created
 //! from command line arguments.
 
-use euclid::size::{Size2D, TypedSize2D};
+use euclid::size::TypedSize2D;
 use geometry::ScreenPx;
 use getopts::Options;
 use num_cpus;
-use prefs::{self, PrefValue};
+use prefs::{self, PrefValue, PREFS};
 use resource_files::set_resources_path;
 use std::cmp;
 use std::default::Default;
@@ -23,7 +23,8 @@ use url::{self, Url};
 
 
 /// Global flags for Servo, currently set on the command line.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 pub struct Opts {
     pub is_running_problem_test: bool,
 
@@ -135,7 +136,7 @@ pub struct Opts {
     pub webdriver_port: Option<u16>,
 
     /// The initial requested size of the window.
-    pub initial_window_size: TypedSize2D<ScreenPx, u32>,
+    pub initial_window_size: TypedSize2D<u32, ScreenPx>,
 
     /// An optional string allowing the user agent to be set for testing.
     pub user_agent: String,
@@ -153,6 +154,9 @@ pub struct Opts {
     /// The seed for the RNG used to randomly close pipelines,
     /// used for testing the hardening of the constellation.
     pub random_pipeline_closure_seed: Option<usize>,
+
+    /// Dumps the DOM after restyle.
+    pub dump_style_tree: bool,
 
     /// Dumps the flow tree after a layout.
     pub dump_flow_tree: bool,
@@ -190,6 +194,9 @@ pub struct Opts {
     /// True to show webrender profiling stats on screen.
     pub webrender_stats: bool,
 
+    /// True to show webrender debug on screen.
+    pub webrender_debug: bool,
+
     /// True if WebRender should use multisample antialiasing.
     pub use_msaa: bool,
 
@@ -201,6 +208,9 @@ pub struct Opts {
 
     // don't skip any backtraces on panic
     pub full_backtraces: bool,
+
+    /// Print the version and exit.
+    pub is_printing_version: bool,
 }
 
 fn print_usage(app: &str, opts: &Options) {
@@ -223,6 +233,9 @@ pub struct DebugOptions {
 
     /// Disable antialiasing of rendered text on the HTML canvas element.
     pub disable_canvas_aa: bool,
+
+    /// Print the DOM after each restyle.
+    pub dump_style_tree: bool,
 
     /// Print the flow tree after each layout.
     pub dump_flow_tree: bool,
@@ -285,6 +298,9 @@ pub struct DebugOptions {
     /// Show webrender profiling stats on screen.
     pub webrender_stats: bool,
 
+    /// Show webrender debug on screen.
+    pub webrender_debug: bool,
+
     /// Use multisample antialiasing in WebRender.
     pub use_msaa: bool,
 
@@ -304,6 +320,7 @@ impl DebugOptions {
                 "bubble-widths" => debug_options.bubble_widths = true,
                 "disable-text-aa" => debug_options.disable_text_aa = true,
                 "disable-canvas-aa" => debug_options.disable_text_aa = true,
+                "dump-style-tree" => debug_options.dump_style_tree = true,
                 "dump-flow-tree" => debug_options.dump_flow_tree = true,
                 "dump-display-list" => debug_options.dump_display_list = true,
                 "dump-display-list-json" => debug_options.dump_display_list_json = true,
@@ -324,6 +341,7 @@ impl DebugOptions {
                 "load-webfonts-synchronously" => debug_options.load_webfonts_synchronously = true,
                 "disable-vsync" => debug_options.disable_vsync = true,
                 "wr-stats" => debug_options.webrender_stats = true,
+                "wr-debug" => debug_options.webrender_debug = true,
                 "msaa" => debug_options.use_msaa = true,
                 "full-backtraces" => debug_options.full_backtraces = true,
                 "" => {},
@@ -346,6 +364,7 @@ pub fn print_debug_usage(app: &str) -> ! {
     print_option("bubble-widths", "Bubble intrinsic widths separately like other engines.");
     print_option("disable-text-aa", "Disable antialiasing of rendered text.");
     print_option("disable-canvas-aa", "Disable antialiasing on the HTML canvas element.");
+    print_option("dump-style-tree", "Print the DOM with computed styles after each restyle.");
     print_option("dump-flow-tree", "Print the flow tree after each layout.");
     print_option("dump-display-list", "Print the display list after each layout.");
     print_option("dump-display-list-json", "Print the display list in JSON form.");
@@ -373,13 +392,15 @@ pub fn print_debug_usage(app: &str) -> ! {
     print_option("wr-stats", "Show WebRender profiler on screen.");
     print_option("msaa", "Use multisample antialiasing in WebRender.");
     print_option("full-backtraces", "Print full backtraces for all errors");
+    print_option("wr-debug", "Display webrender tile borders. Must be used with -w option.");
 
     println!("");
 
     process::exit(0)
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 pub enum OutputOptions {
     FileName(String),
     Stdout(f64)
@@ -404,7 +425,8 @@ enum UserAgent {
     Android,
 }
 
-#[derive(Clone, Debug, Eq, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 pub enum RenderApi {
     GL,
     ES2,
@@ -480,12 +502,13 @@ pub fn default_opts() -> Opts {
         trace_layout: false,
         devtools_port: None,
         webdriver_port: None,
-        initial_window_size: Size2D::typed(800, 600),
+        initial_window_size: TypedSize2D::new(1024, 740),
         user_agent: default_user_agent_string(DEFAULT_USER_AGENT),
         multiprocess: false,
         random_pipeline_closure_probability: None,
         random_pipeline_closure_seed: None,
         sandbox: false,
+        dump_style_tree: false,
         dump_flow_tree: false,
         dump_display_list: false,
         dump_display_list_json: false,
@@ -504,6 +527,8 @@ pub fn default_opts() -> Opts {
         render_api: DEFAULT_RENDER_API,
         config_dir: None,
         full_backtraces: false,
+        is_printing_version: false,
+        webrender_debug: false,
     }
 }
 
@@ -536,7 +561,7 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
     opts.optflag("F", "soft-fail", "Display about:failure on thread failure instead of exiting");
     opts.optflagopt("", "devtools", "Start remote devtools server on port", "6000");
     opts.optflagopt("", "webdriver", "Start remote WebDriver server on port", "7000");
-    opts.optopt("", "resolution", "Set window resolution.", "800x600");
+    opts.optopt("", "resolution", "Set window resolution.", "1024x740");
     opts.optopt("u",
                 "user-agent",
                 "Set custom user agent string (or android / desktop for platform default)",
@@ -561,7 +586,7 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
     opts.optopt("G", "graphics", "Select graphics backend (gl or es2)", "gl");
     opts.optopt("", "config-dir",
                     "config directory following xdg spec on linux platform", "");
-
+    opts.optflag("v", "version", "Display servo version information");
 
     let opt_match = match opts.parse(args) {
         Ok(m) => m,
@@ -597,7 +622,7 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
     }
 
     let cwd = env::current_dir().unwrap();
-    let homepage_pref = prefs::get_pref("shell.homepage");
+    let homepage_pref = PREFS.get("shell.homepage");
     let url_opt = if !opt_match.free.is_empty() {
         Some(&opt_match.free[0][..])
     } else {
@@ -706,10 +731,10 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
             let res: Vec<u32> = res_string.split('x').map(|r| {
                 r.parse().unwrap_or_else(|err| args_fail(&format!("Error parsing option: --resolution ({})", err)))
             }).collect();
-            Size2D::typed(res[0], res[1])
+            TypedSize2D::new(res[0], res[1])
         }
         None => {
-            Size2D::typed(800, 600)
+            TypedSize2D::new(1024, 740)
         }
     };
 
@@ -737,10 +762,10 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
 
     let do_not_use_native_titlebar =
         opt_match.opt_present("b") ||
-        !prefs::get_pref("shell.native-titlebar.enabled").as_boolean().unwrap();
+        !PREFS.get("shell.native-titlebar.enabled").as_boolean().unwrap();
 
     let use_webrender =
-        (prefs::get_pref("gfx.webrender.enabled").as_boolean().unwrap() || opt_match.opt_present("w")) &&
+        (PREFS.get("gfx.webrender.enabled").as_boolean().unwrap() || opt_match.opt_present("w")) &&
         !opt_match.opt_present("z");
 
     let render_api = match opt_match.opt_str("G") {
@@ -749,6 +774,8 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         None => DEFAULT_RENDER_API,
         _ => args_fail(&format!("error: graphics option must be gl or es2:")),
     };
+
+    let is_printing_version = opt_match.opt_present("v") || opt_match.opt_present("version");
 
     let opts = Opts {
         is_running_problem_test: is_running_problem_test,
@@ -789,6 +816,7 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         paint_flashing: debug_options.paint_flashing,
         enable_text_antialiasing: !debug_options.disable_text_aa,
         enable_canvas_antialiasing: !debug_options.disable_canvas_aa,
+        dump_style_tree: debug_options.dump_style_tree,
         dump_flow_tree: debug_options.dump_flow_tree,
         dump_display_list: debug_options.dump_display_list,
         dump_display_list_json: debug_options.dump_display_list_json,
@@ -804,6 +832,8 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         use_msaa: debug_options.use_msaa,
         config_dir: opt_match.opt_str("config-dir"),
         full_backtraces: debug_options.full_backtraces,
+        is_printing_version: is_printing_version,
+        webrender_debug: debug_options.webrender_debug,
     };
 
     set_defaults(opts);
@@ -819,9 +849,9 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         let pref_name = split[0];
         let value = split.get(1);
         match value {
-            Some(&"false") => prefs::set_pref(pref_name, PrefValue::Boolean(false)),
-            Some(&"true") | None => prefs::set_pref(pref_name, PrefValue::Boolean(true)),
-            _ => prefs::set_pref(pref_name, PrefValue::String(value.unwrap().to_string()))
+            Some(&"false") => PREFS.set(pref_name, PrefValue::Boolean(false)),
+            Some(&"true") | None => PREFS.set(pref_name, PrefValue::Boolean(true)),
+            _ => PREFS.set(pref_name, PrefValue::String(value.unwrap().to_string()))
         };
     }
 
@@ -858,7 +888,7 @@ pub fn set_defaults(opts: Opts) {
     unsafe {
         assert!(DEFAULT_OPTIONS.is_null());
         assert!(DEFAULT_OPTIONS != INVALID_OPTIONS);
-        let box_opts = box opts;
+        let box_opts = Box::new(opts);
         DEFAULT_OPTIONS = Box::into_raw(box_opts);
     }
 }

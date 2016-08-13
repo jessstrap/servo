@@ -8,18 +8,22 @@
 <% data.new_style_struct("Font",
                          inherited=True,
                          additional_methods=[Method("compute_font_hash", is_mut=True)]) %>
-<%helpers:longhand name="font-family">
+<%helpers:longhand name="font-family" animatable="False">
     use self::computed_value::FontFamily;
+    use values::NoViewportPercentage;
     use values::computed::ComputedValueAsSpecified;
     pub use self::computed_value::T as SpecifiedValue;
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
+
     pub mod computed_value {
         use cssparser::ToCss;
         use std::fmt;
         use string_cache::Atom;
 
-        #[derive(Debug, PartialEq, Eq, Clone, Hash, HeapSizeOf, Deserialize, Serialize)]
+        #[derive(Debug, PartialEq, Eq, Clone, Hash)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
         pub enum FontFamily {
             FamilyName(Atom),
             Generic(Atom),
@@ -73,7 +77,8 @@
                 Ok(())
             }
         }
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Vec<FontFamily>);
     }
 
@@ -115,14 +120,23 @@
 </%helpers:longhand>
 
 
-${helpers.single_keyword("font-style", "normal italic oblique", gecko_constant_prefix="NS_FONT_STYLE")}
-${helpers.single_keyword("font-variant", "normal small-caps")}
+${helpers.single_keyword("font-style",
+                         "normal italic oblique",
+                         gecko_constant_prefix="NS_FONT_STYLE",
+                         animatable=False)}
+${helpers.single_keyword("font-variant",
+                         "normal small-caps",
+                         animatable=False)}
 
-<%helpers:longhand name="font-weight" need_clone="True">
+<%helpers:longhand name="font-weight" need_clone="True" animatable="True">
     use cssparser::ToCss;
     use std::fmt;
+    use values::NoViewportPercentage;
 
-    #[derive(Debug, Clone, PartialEq, Eq, Copy, HeapSizeOf)]
+    impl NoViewportPercentage for SpecifiedValue {}
+
+    #[derive(Debug, Clone, PartialEq, Eq, Copy)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         Bolder,
         Lighter,
@@ -169,7 +183,8 @@ ${helpers.single_keyword("font-variant", "normal small-caps")}
     }
     pub mod computed_value {
         use std::fmt;
-        #[derive(PartialEq, Eq, Copy, Clone, Hash, Deserialize, Serialize, HeapSizeOf, Debug)]
+        #[derive(PartialEq, Eq, Copy, Clone, Hash, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
         #[repr(u16)]
         pub enum T {
             % for weight in range(100, 901, 100):
@@ -205,7 +220,7 @@ ${helpers.single_keyword("font-variant", "normal small-caps")}
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match *self {
                 % for weight in range(100, 901, 100):
                     SpecifiedValue::Weight${weight} => computed_value::T::Weight${weight},
@@ -237,11 +252,12 @@ ${helpers.single_keyword("font-variant", "normal small-caps")}
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="font-size" need_clone="True">
+<%helpers:longhand name="font-size" need_clone="True" animatable="True">
     use app_units::Au;
     use cssparser::ToCss;
     use std::fmt;
     use values::FONT_MEDIUM_PX;
+    use values::HasViewportPercentage;
     use values::specified::{LengthOrPercentage, Length, Percentage};
 
     impl ToCss for SpecifiedValue {
@@ -250,7 +266,15 @@ ${helpers.single_keyword("font-variant", "normal small-caps")}
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            let &SpecifiedValue(length) = self;
+            return length.has_viewport_percentage()
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue(pub specified::LengthOrPercentage);
     pub mod computed_value {
         use app_units::Au;
@@ -264,7 +288,7 @@ ${helpers.single_keyword("font-variant", "normal small-caps")}
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             match self.0 {
                 LengthOrPercentage::Length(Length::FontRelative(value)) => {
                     value.to_computed_value(context.inherited_style().get_font().clone_font_size(),
@@ -302,8 +326,14 @@ ${helpers.single_keyword("font-variant", "normal small-caps")}
     }
 </%helpers:longhand>
 
+// FIXME: This prop should be animatable
 ${helpers.single_keyword("font-stretch",
-                 "normal ultra-condensed extra-condensed condensed semi-condensed semi-expanded \
-                 expanded extra-expanded ultra-expanded")}
+                         "normal ultra-condensed extra-condensed condensed \
+                          semi-condensed semi-expanded expanded extra-expanded \
+                          ultra-expanded",
+                         animatable=False)}
 
-${helpers.single_keyword("font-kerning", "auto none normal", products="gecko")}
+${helpers.single_keyword("font-kerning",
+                         "auto none normal",
+                         products="gecko",
+                         animatable=False)}

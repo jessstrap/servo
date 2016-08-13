@@ -35,22 +35,25 @@ use flow_list::{FlowList, FlowListIterator, MutFlowListIterator};
 use flow_ref::{self, FlowRef, WeakFlowRef};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow, SpecificFragmentInfo};
 use gfx::display_list::{ClippingRegion, StackingContext};
+use gfx_traits::print_tree::PrintTree;
 use gfx_traits::{LayerId, LayerType, StackingContextId};
-use incremental::{RECONSTRUCT_FLOW, REFLOW, REFLOW_OUT_OF_FLOW, REPAINT, RestyleDamage};
 use inline::InlineFlow;
 use model::{CollapsibleMargins, IntrinsicISizes, MarginCollapseInfo};
 use multicol::MulticolFlow;
 use parallel::FlowParallelInfo;
 use rustc_serialize::{Encodable, Encoder};
+use script_layout_interface::restyle_damage::{RECONSTRUCT_FLOW, REFLOW, REFLOW_OUT_OF_FLOW, REPAINT, RestyleDamage};
+use script_layout_interface::wrapper_traits::{PseudoElementType, ThreadSafeLayoutNode};
 use std::iter::Zip;
 use std::slice::IterMut;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::{fmt, mem, raw};
 use style::computed_values::{clear, display, empty_cells, float, position, overflow_x, text_align};
+use style::context::SharedStyleContext;
 use style::dom::TRestyleDamage;
 use style::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
-use style::properties::{self, ComputedValues, ServoComputedValues};
+use style::properties::{self, ServoComputedValues};
 use style::values::computed::LengthOrPercentageOrAuto;
 use table::{ColumnComputedInlineSize, ColumnIntrinsicInlineSize, TableFlow};
 use table_caption::TableCaptionFlow;
@@ -59,8 +62,6 @@ use table_colgroup::TableColGroupFlow;
 use table_row::TableRowFlow;
 use table_rowgroup::TableRowGroupFlow;
 use table_wrapper::TableWrapperFlow;
-use util::print_tree::PrintTree;
-use wrapper::{PseudoElementType, ThreadSafeLayoutNode};
 
 /// Virtual methods that make up a float context.
 ///
@@ -193,7 +194,7 @@ pub trait Flow: fmt::Debug + Sync + Send + 'static {
     }
 
     /// Pass 2 of reflow: computes inline-size.
-    fn assign_inline_sizes(&mut self, _ctx: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, _shared_context: &SharedStyleContext) {
         panic!("assign_inline_sizes not yet implemented")
     }
 
@@ -228,7 +229,7 @@ pub trait Flow: fmt::Debug + Sync + Send + 'static {
                                  -> StackingContextId;
 
     /// If this is a float, places it. The default implementation does nothing.
-    fn place_float_if_applicable<'a>(&mut self, _: &'a LayoutContext<'a>) {}
+    fn place_float_if_applicable<'a>(&mut self) {}
 
     /// Assigns block-sizes in-order; or, if this is a float, places the float. The default
     /// implementation simply assigns block-sizes if this flow might have floats in. Returns true
@@ -587,7 +588,7 @@ impl FlowClass {
         match self {
             FlowClass::Block | FlowClass::ListItem | FlowClass::Table | FlowClass::TableRowGroup |
             FlowClass::TableRow | FlowClass::TableCaption | FlowClass::TableCell |
-            FlowClass::TableWrapper => true,
+            FlowClass::TableWrapper | FlowClass::Flex => true,
             _ => false,
         }
     }
@@ -1303,6 +1304,9 @@ impl<'a> ImmutableFlowUtils for &'a Flow {
                 Arc::new(TableCellFlow::from_node_fragment_and_visibility_flag(node, fragment, !hide))
             },
             FlowClass::Flex => {
+                properties::modify_style_for_anonymous_flow(
+                    &mut style,
+                    display::T::block);
                 let fragment =
                     Fragment::from_opaque_node_and_style(node.opaque(),
                                                          PseudoElementType::Normal,
@@ -1560,7 +1564,7 @@ impl ContainingBlockLink {
     }
 
     #[inline]
-    pub fn explicit_block_containing_size(&self, layout_context: &LayoutContext) -> Option<Au> {
+    pub fn explicit_block_containing_size(&self, shared_context: &SharedStyleContext) -> Option<Au> {
         match self.link {
             None => {
                 panic!("Link to containing block not established; perhaps you forgot to call \
@@ -1569,7 +1573,7 @@ impl ContainingBlockLink {
             Some(ref link) => {
                 let flow = link.upgrade().unwrap();
                 if flow.is_block_like() {
-                    flow.as_block().explicit_block_containing_size(layout_context)
+                    flow.as_block().explicit_block_containing_size(shared_context)
                 } else if flow.is_inline_flow() {
                     Some(flow.as_inline().minimum_block_size_above_baseline)
                 } else {

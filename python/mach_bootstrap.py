@@ -9,7 +9,6 @@ import platform
 import subprocess
 import sys
 from distutils.spawn import find_executable
-from pipes import quote
 
 SEARCH_PATHS = [
     os.path.join("python", "tidy"),
@@ -121,7 +120,11 @@ def _activate_virtualenv(topdir):
             sys.exit("Python virtualenv failed to execute properly: {}"
                      .format(process.communicate()[1]))
 
-    execfile(activate_path, dict(__file__=quote(activate_path)))
+    execfile(activate_path, dict(__file__=activate_path))
+
+    python = find_executable("python")
+    if python is None or not python.startswith(virtualenv_path):
+        sys.exit("Python virtualenv failed to activate.")
 
     # TODO: Right now, we iteratively install all the requirements by invoking
     # `pip install` each time. If it were the case that there were conflicting
@@ -132,6 +135,7 @@ def _activate_virtualenv(topdir):
     requirements_paths = [
         os.path.join("python", "requirements.txt"),
         os.path.join("tests", "wpt", "harness", "requirements.txt"),
+        os.path.join("tests", "wpt", "harness", "requirements_firefox.txt"),
         os.path.join("tests", "wpt", "harness", "requirements_servo.txt"),
     ]
     for req_rel_path in requirements_paths:
@@ -160,7 +164,22 @@ def _activate_virtualenv(topdir):
         open(marker_path, 'w').close()
 
 
+def _ensure_case_insensitive_if_windows():
+    # The folder is called 'python'. By deliberately checking for it with the wrong case, we determine if the file
+    # system is case sensitive or not.
+    if _is_windows() and not os.path.exists('Python'):
+        print('Cannot run mach in a path on a case-sensitive file system on Windows.')
+        print('For more details, see https://github.com/pypa/virtualenv/issues/935')
+        sys.exit(1)
+
+
+def _is_windows():
+    return sys.platform == 'win32' or sys.platform == 'msys'
+
+
 def bootstrap(topdir):
+    _ensure_case_insensitive_if_windows()
+
     topdir = os.path.abspath(topdir)
 
     # We don't support paths with Unicode characters for now

@@ -18,21 +18,22 @@ use flow_list::MutFlowListIterator;
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use gfx::display_list::StackingContext;
 use gfx_traits::StackingContextId;
-use incremental::{REFLOW, REFLOW_OUT_OF_FLOW};
+use gfx_traits::print_tree::PrintTree;
 use layout_debug;
 use model::{IntrinsicISizes, IntrinsicISizesContribution, MaybeAuto};
+use script_layout_interface::restyle_damage::{REFLOW, REFLOW_OUT_OF_FLOW};
 use std::cmp;
 use std::fmt;
 use std::sync::Arc;
 use style::computed_values::{border_collapse, border_spacing, table_layout};
+use style::context::SharedStyleContext;
 use style::logical_geometry::LogicalSize;
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
 use style::values::CSSFloat;
 use style::values::computed::LengthOrPercentageOrAuto;
 use table_row::TableRowFlow;
 use table_row::{self, CellIntrinsicInlineSize, CollapsedBorder, CollapsedBorderProvenance};
 use table_wrapper::TableLayout;
-use util::print_tree::PrintTree;
 
 /// A table flow corresponded to the table's internal table fragment under a table wrapper flow.
 /// The properties `position`, `float`, and `margin-*` are used on the table wrapper fragment,
@@ -135,7 +136,7 @@ impl TableFlow {
 
     /// Updates the minimum and preferred inline-size calculation for a single row. This is
     /// factored out into a separate function because we process children of rowgroups too.
-    fn update_column_inline_sizes_for_row(row: &mut TableRowFlow,
+    fn update_column_inline_sizes_for_row(row: &TableRowFlow,
                                           column_inline_sizes: &mut Vec<ColumnIntrinsicInlineSize>,
                                           computation: &mut IntrinsicISizesContribution,
                                           first_row: bool,
@@ -324,7 +325,7 @@ impl Flow for TableFlow {
 
     /// Recursively (top-down) determines the actual inline-size of child contexts and fragments.
     /// When called on this context, the context has had its inline-size set by the parent context.
-    fn assign_inline_sizes(&mut self, layout_context: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, shared_context: &SharedStyleContext) {
         let _scope = layout_debug_scope!("table::assign_inline_sizes {:x}",
                                             self.block_flow.base.debug_id());
         debug!("assign_inline_sizes({}): assigning inline_size for flow", "table");
@@ -347,7 +348,7 @@ impl Flow for TableFlow {
             border_collapse: self.block_flow.fragment.style.get_inheritedtable().border_collapse,
         };
         inline_size_computer.compute_used_inline_size(&mut self.block_flow,
-                                                      layout_context,
+                                                      shared_context,
                                                       containing_block_inline_size);
 
         let inline_start_content_edge = self.block_flow.fragment.border_padding.inline_start;
@@ -398,7 +399,7 @@ impl Flow for TableFlow {
             &self.collapsed_inline_direction_border_widths_for_table;
         let mut collapsed_block_direction_border_widths_for_table =
             self.collapsed_block_direction_border_widths_for_table.iter().peekable();
-        self.block_flow.propagate_assigned_inline_size_to_children(layout_context,
+        self.block_flow.propagate_assigned_inline_size_to_children(shared_context,
                                                                    inline_start_content_edge,
                                                                    inline_end_content_edge,
                                                                    content_inline_size,
@@ -517,11 +518,11 @@ impl ISizeAndMarginsComputer for InternalTable {
     /// CSS Section 10.4: Minimum and Maximum inline-sizes
     fn compute_used_inline_size(&self,
                                 block: &mut BlockFlow,
-                                layout_context: &LayoutContext,
+                                shared_context: &SharedStyleContext,
                                 parent_flow_inline_size: Au) {
         let mut input = self.compute_inline_size_constraint_inputs(block,
                                                                    parent_flow_inline_size,
-                                                                   layout_context);
+                                                                   shared_context);
 
         // Tables are always at least as wide as their minimum inline size.
         let minimum_inline_size =

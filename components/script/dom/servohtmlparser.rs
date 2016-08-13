@@ -7,13 +7,18 @@
 
 use document_loader::LoadType;
 use dom::bindings::cell::DOMRefCell;
+use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
+use dom::bindings::codegen::Bindings::HTMLImageElementBinding::HTMLImageElementMethods;
+use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::Bindings::ServoHTMLParserBinding;
 use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
+use dom::bindings::str::DOMString;
 use dom::bindings::trace::JSTraceable;
 use dom::document::Document;
+use dom::htmlimageelement::HTMLImageElement;
 use dom::node::Node;
 use dom::window::Window;
 use encoding::all::UTF_8;
@@ -23,6 +28,7 @@ use html5ever::tree_builder;
 use html5ever::tree_builder::{TreeBuilder, TreeBuilderOpts};
 use hyper::header::ContentType;
 use hyper::mime::{Mime, SubLevel, TopLevel};
+use hyper_serde::Serde;
 use js::jsapi::JSTracer;
 use msg::constellation_msg::{PipelineId, SubpageId};
 use net_traits::{AsyncResponseListener, Metadata, NetworkError};
@@ -81,11 +87,11 @@ impl ParserContext {
 
 impl AsyncResponseListener for ParserContext {
     fn headers_available(&mut self, meta_result: Result<Metadata, NetworkError>) {
-        let mut is_ssl_error = false;
+        let mut ssl_error = None;
         let metadata = match meta_result {
             Ok(meta) => Some(meta),
-            Err(NetworkError::SslValidation(url)) => {
-                is_ssl_error = true;
+            Err(NetworkError::SslValidation(url, reason)) => {
+                ssl_error = Some(reason);
                 let mut meta = Metadata::default(url);
                 let mime: Option<Mime> = "text/html".parse().ok();
                 meta.set_content_type(mime.as_ref());
@@ -93,7 +99,8 @@ impl AsyncResponseListener for ParserContext {
             },
             Err(_) => None,
         };
-        let content_type = metadata.clone().and_then(|meta| meta.content_type);
+        let content_type =
+            metadata.clone().and_then(|meta| meta.content_type).map(Serde::into_inner);
         let parser = match ScriptThread::page_headers_available(&self.id,
                                                                 self.subpage.as_ref(),
                                                                 metadata) {
@@ -112,22 +119,30 @@ impl AsyncResponseListener for ParserContext {
         match content_type {
             Some(ContentType(Mime(TopLevel::Image, _, _))) => {
                 self.is_synthesized_document = true;
-                let page = format!("<html><body><img src='{}' /></body></html>", self.url);
+                let page = "<html><body></body></html>".into();
                 parser.pending_input().borrow_mut().push(page);
                 parser.parse_sync();
+
+                let doc = parser.document();
+                let doc_body = Root::upcast::<Node>(doc.GetBody().unwrap());
+                let img = HTMLImageElement::new(atom!("img"), None, doc);
+                img.SetSrc(DOMString::from(self.url.to_string()));
+                doc_body.AppendChild(&Root::upcast::<Node>(img)).expect("Appending failed");
+
             },
             Some(ContentType(Mime(TopLevel::Text, SubLevel::Plain, _))) => {
                 // https://html.spec.whatwg.org/multipage/#read-text
-                let page = format!("<pre>\n");
+                let page = "<pre>\n".into();
                 parser.pending_input().borrow_mut().push(page);
                 parser.parse_sync();
                 parser.set_plaintext_state();
             },
             Some(ContentType(Mime(TopLevel::Text, SubLevel::Html, _))) => { // Handle text/html
-                if is_ssl_error {
+                if let Some(reason) = ssl_error {
                     self.is_synthesized_document = true;
                     let page_bytes = read_resource_file("badcert.html").unwrap();
                     let page = String::from_utf8(page_bytes).unwrap();
+                    let page = page.replace("${reason}", &reason);
                     parser.pending_input().borrow_mut().push(page);
                     parser.parse_sync();
                 }
@@ -170,12 +185,23 @@ impl AsyncResponseListener for ParserContext {
             Some(parser) => parser.root(),
             None => return,
         };
-        parser.r().document().finish_load(LoadType::PageSource(self.url.clone()));
 
-        if let Err(err) = status {
-            debug!("Failed to load page URL {}, error: {:?}", self.url, err);
+        if let Err(NetworkError::Internal(ref reason)) = status {
+            // Show an error page for network errors,
+            // certificate errors are handled earlier.
+            self.is_synthesized_document = true;
+            let parser = parser.r();
+            let page_bytes = read_resource_file("neterror.html").unwrap();
+            let page = String::from_utf8(page_bytes).unwrap();
+            let page = page.replace("${reason}", reason);
+            parser.pending_input().borrow_mut().push(page);
+            parser.parse_sync();
+        } else if let Err(err) = status {
             // TODO(Savago): we should send a notification to callers #5463.
+            debug!("Failed to load page URL {}, error: {:?}", self.url, err);
         }
+
+        parser.r().document().finish_load(LoadType::PageSource(self.url.clone()));
 
         parser.r().last_chunk_received().set(true);
         if !parser.r().is_suspended() {

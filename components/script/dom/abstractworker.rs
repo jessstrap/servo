@@ -8,40 +8,14 @@ use dom::bindings::str::DOMString;
 use dom::bindings::structuredclone::StructuredCloneData;
 use js::jsapi::{JSRuntime, JS_RequestInterruptCallback};
 use js::rust::Runtime;
-use msg::constellation_msg::{PipelineId, ReferrerPolicy};
-use net_traits::{LoadOrigin, RequestSource};
 use script_runtime::CommonScriptMsg;
-use url::Url;
 
 /// Messages used to control the worker event loops
 pub enum WorkerScriptMsg {
     /// Common variants associated with the script messages
     Common(CommonScriptMsg),
     /// Message sent through Worker.postMessage
-    DOMMessage(StructuredCloneData),
-}
-
-#[derive(Clone)]
-pub struct WorkerScriptLoadOrigin {
-    pub referrer_url: Option<Url>,
-    pub referrer_policy: Option<ReferrerPolicy>,
-    pub request_source: RequestSource,
-    pub pipeline_id: Option<PipelineId>
-}
-
-impl LoadOrigin for WorkerScriptLoadOrigin {
-    fn referrer_url(&self) -> Option<Url> {
-        self.referrer_url.clone()
-    }
-    fn referrer_policy(&self) -> Option<ReferrerPolicy> {
-        self.referrer_policy.clone()
-    }
-    fn request_source(&self) -> RequestSource {
-        self.request_source.clone()
-    }
-    fn pipeline_id(&self) -> Option<PipelineId> {
-        self.pipeline_id.clone()
-    }
+    DOMMessage(StructuredCloneData)
 }
 
 pub struct SimpleWorkerErrorHandler<T: Reflectable> {

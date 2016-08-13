@@ -49,7 +49,7 @@ pub static mut DISPLAY: *mut c_void = 0 as *mut c_void;
 #[derive(Clone)]
 pub struct Window {
     cef_browser: RefCell<Option<CefBrowser>>,
-    size: TypedSize2D<DevicePixel,u32>
+    size: TypedSize2D<u32, DevicePixel>
 }
 
 #[cfg(target_os="macos")]
@@ -89,7 +89,7 @@ impl Window {
 
         Rc::new(Window {
             cef_browser: RefCell::new(None),
-            size: Size2D::typed(width, height)
+            size: TypedSize2D::new(width, height)
         })
     }
 
@@ -105,27 +105,27 @@ impl Window {
 
     fn cursor_type_for_cursor(&self, cursor: Cursor) -> cef_cursor_type_t {
         match cursor {
-            Cursor::NoCursor => return cef_cursor_type_t::CT_NONE,
-            Cursor::ContextMenuCursor => return cef_cursor_type_t::CT_CONTEXTMENU,
-            Cursor::GrabbingCursor => return cef_cursor_type_t::CT_GRABBING,
-            Cursor::CrosshairCursor => return cef_cursor_type_t::CT_CROSS,
-            Cursor::CopyCursor => return cef_cursor_type_t::CT_COPY,
-            Cursor::AliasCursor => return cef_cursor_type_t::CT_ALIAS,
-            Cursor::TextCursor => return cef_cursor_type_t::CT_IBEAM,
-            Cursor::GrabCursor | Cursor::AllScrollCursor =>
+            Cursor::None => return cef_cursor_type_t::CT_NONE,
+            Cursor::ContextMenu => return cef_cursor_type_t::CT_CONTEXTMENU,
+            Cursor::Grabbing => return cef_cursor_type_t::CT_GRABBING,
+            Cursor::Crosshair => return cef_cursor_type_t::CT_CROSS,
+            Cursor::Copy => return cef_cursor_type_t::CT_COPY,
+            Cursor::Alias => return cef_cursor_type_t::CT_ALIAS,
+            Cursor::Text => return cef_cursor_type_t::CT_IBEAM,
+            Cursor::Grab | Cursor::AllScroll =>
                 return cef_cursor_type_t::CT_GRAB,
-            Cursor::NoDropCursor => return cef_cursor_type_t::CT_NODROP,
-            Cursor::NotAllowedCursor => return cef_cursor_type_t::CT_NOTALLOWED,
-            Cursor::PointerCursor => return cef_cursor_type_t::CT_POINTER,
-            Cursor::SResizeCursor => return cef_cursor_type_t::CT_SOUTHRESIZE,
-            Cursor::WResizeCursor => return cef_cursor_type_t::CT_WESTRESIZE,
-            Cursor::EwResizeCursor => return cef_cursor_type_t::CT_EASTWESTRESIZE,
-            Cursor::ColResizeCursor => return cef_cursor_type_t::CT_COLUMNRESIZE,
-            Cursor::EResizeCursor => return cef_cursor_type_t::CT_EASTRESIZE,
-            Cursor::NResizeCursor => return cef_cursor_type_t::CT_NORTHRESIZE,
-            Cursor::NsResizeCursor => return cef_cursor_type_t::CT_NORTHSOUTHRESIZE,
-            Cursor::RowResizeCursor => return cef_cursor_type_t::CT_ROWRESIZE,
-            Cursor::VerticalTextCursor => return cef_cursor_type_t::CT_VERTICALTEXT,
+            Cursor::NoDrop => return cef_cursor_type_t::CT_NODROP,
+            Cursor::NotAllowed => return cef_cursor_type_t::CT_NOTALLOWED,
+            Cursor::Pointer => return cef_cursor_type_t::CT_POINTER,
+            Cursor::SResize => return cef_cursor_type_t::CT_SOUTHRESIZE,
+            Cursor::WResize => return cef_cursor_type_t::CT_WESTRESIZE,
+            Cursor::EwResize => return cef_cursor_type_t::CT_EASTWESTRESIZE,
+            Cursor::ColResize => return cef_cursor_type_t::CT_COLUMNRESIZE,
+            Cursor::EResize => return cef_cursor_type_t::CT_EASTRESIZE,
+            Cursor::NResize => return cef_cursor_type_t::CT_NORTHRESIZE,
+            Cursor::NsResize => return cef_cursor_type_t::CT_NORTHSOUTHRESIZE,
+            Cursor::RowResize => return cef_cursor_type_t::CT_ROWRESIZE,
+            Cursor::VerticalText => return cef_cursor_type_t::CT_VERTICALTEXT,
             _ => return cef_cursor_type_t::CT_POINTER,
         }
     }
@@ -138,27 +138,27 @@ impl Window {
 
         unsafe {
             match cursor {
-                Cursor::NoCursor => return 0 as cef_cursor_handle_t,
-                Cursor::ContextMenuCursor => msg_send![class("NSCursor"), contextualMenuCursor],
-                Cursor::GrabbingCursor => msg_send![class("NSCursor"), closedHandCursor],
-                Cursor::CrosshairCursor => msg_send![class("NSCursor"), crosshairCursor],
-                Cursor::CopyCursor => msg_send![class("NSCursor"), dragCopyCursor],
-                Cursor::AliasCursor => msg_send![class("NSCursor"), dragLinkCursor],
-                Cursor::TextCursor => msg_send![class("NSCursor"), IBeamCursor],
-                Cursor::GrabCursor | Cursor::AllScrollCursor =>
+                Cursor::None => return 0 as cef_cursor_handle_t,
+                Cursor::ContextMenu => msg_send![class("NSCursor"), contextualMenuCursor],
+                Cursor::Grabbing => msg_send![class("NSCursor"), closedHandCursor],
+                Cursor::Crosshair => msg_send![class("NSCursor"), crosshairCursor],
+                Cursor::Copy => msg_send![class("NSCursor"), dragCopyCursor],
+                Cursor::Alias => msg_send![class("NSCursor"), dragLinkCursor],
+                Cursor::Text => msg_send![class("NSCursor"), IBeamCursor],
+                Cursor::Grab | Cursor::AllScroll =>
                     msg_send![class("NSCursor"), openHandCursor],
-                Cursor::NoDropCursor | Cursor::NotAllowedCursor =>
+                Cursor::NoDrop | Cursor::NotAllowed =>
                     msg_send![class("NSCursor"), operationNotAllowedCursor],
-                Cursor::PointerCursor => msg_send![class("NSCursor"), pointingHandCursor],
-                Cursor::SResizeCursor => msg_send![class("NSCursor"), resizeDownCursor],
-                Cursor::WResizeCursor => msg_send![class("NSCursor"), resizeLeftCursor],
-                Cursor::EwResizeCursor | Cursor::ColResizeCursor =>
+                Cursor::Pointer => msg_send![class("NSCursor"), pointingHandCursor],
+                Cursor::SResize => msg_send![class("NSCursor"), resizeDownCursor],
+                Cursor::WResize => msg_send![class("NSCursor"), resizeLeftCursor],
+                Cursor::EwResize | Cursor::ColResize =>
                     msg_send![class("NSCursor"), resizeLeftRightCursor],
-                Cursor::EResizeCursor => msg_send![class("NSCursor"), resizeRightCursor],
-                Cursor::NResizeCursor => msg_send![class("NSCursor"), resizeUpCursor],
-                Cursor::NsResizeCursor | Cursor::RowResizeCursor =>
+                Cursor::EResize => msg_send![class("NSCursor"), resizeRightCursor],
+                Cursor::NResize => msg_send![class("NSCursor"), resizeUpCursor],
+                Cursor::NsResize | Cursor::RowResize =>
                     msg_send![class("NSCursor"), resizeUpDownCursor],
-                Cursor::VerticalTextCursor => msg_send![class("NSCursor"), IBeamCursorForVerticalLayout],
+                Cursor::VerticalText => msg_send![class("NSCursor"), IBeamCursorForVerticalLayout],
                 _ => msg_send![class("NSCursor"), arrowCursor],
             }
         }
@@ -171,7 +171,7 @@ impl Window {
 }
 
 impl WindowMethods for Window {
-    fn framebuffer_size(&self) -> TypedSize2D<DevicePixel,u32> {
+    fn framebuffer_size(&self) -> TypedSize2D<u32, DevicePixel> {
         let browser = self.cef_browser.borrow();
         match *browser {
             None => self.size,
@@ -180,8 +180,8 @@ impl WindowMethods for Window {
                     self.size
                 } else {
                     let mut rect = cef_rect_t::zero();
-                    rect.width = self.size.width.get() as i32;
-                    rect.height = self.size.height.get() as i32;
+                    rect.width = self.size.width as i32;
+                    rect.height = self.size.height as i32;
                     if cfg!(target_os="macos") {
                         // osx relies on virtual pixel scaling to provide sizes different from actual
                         // pixel size on screen. other platforms are just 1.0 unless the desktop/toolkit says otherwise
@@ -202,23 +202,23 @@ impl WindowMethods for Window {
                         }
                     }
 
-                    Size2D::typed(rect.width as u32, rect.height as u32)
+                    TypedSize2D::new(rect.width as u32, rect.height as u32)
                 }
             }
         }
     }
 
-    fn size(&self) -> TypedSize2D<ScreenPx,f32> {
+    fn size(&self) -> TypedSize2D<f32, ScreenPx> {
         let browser = self.cef_browser.borrow();
         match *browser {
-            None => Size2D::typed(400.0, 300.0),
+            None => TypedSize2D::new(400.0, 300.0),
             Some(ref browser) => {
                 let mut rect = cef_rect_t::zero();
                 browser.get_host()
                        .get_client()
                        .get_render_handler()
                        .get_view_rect((*browser).clone(), &mut rect);
-                Size2D::typed(rect.width as f32, rect.height as f32)
+                TypedSize2D::new(rect.width as f32, rect.height as f32)
             }
         }
     }
@@ -252,7 +252,7 @@ impl WindowMethods for Window {
         }
     }
 
-    fn scale_factor(&self) -> ScaleFactor<ScreenPx,DevicePixel,f32> {
+    fn scale_factor(&self) -> ScaleFactor<f32, ScreenPx, DevicePixel> {
         if cfg!(target_os="macos") {
             let browser = self.cef_browser.borrow();
             match *browser {
@@ -479,7 +479,7 @@ impl WindowMethods for Window {
         }
     }
 
-    fn handle_key(&self, _: Key, _: KeyModifiers) {
+    fn handle_key(&self, _: Option<char>, _: Key, _: KeyModifiers) {
         // TODO(negge)
     }
 
@@ -504,7 +504,7 @@ impl WindowMethods for Window {
     }
 
     fn supports_clipboard(&self) -> bool {
-        true
+        false
     }
 }
 

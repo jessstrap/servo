@@ -24,6 +24,7 @@ use dom::htmlsourceelement::HTMLSourceElement;
 use dom::mediaerror::MediaError;
 use dom::node::{window_from_node, document_from_node, Node, UnbindContext};
 use dom::virtualmethods::VirtualMethods;
+use hyper_serde::Serde;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
 use net_traits::{AsyncResponseListener, AsyncResponseTarget, Metadata, NetworkError};
@@ -33,9 +34,10 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use string_cache::Atom;
 use task_source::TaskSource;
-use task_source::dom_manipulation::DOMManipulationTask;
 use time::{self, Timespec, Duration};
 use url::Url;
+#[cfg(not(any(target_os = "android", target_arch = "arm", target_arch = "aarch64")))]
+use video_metadata;
 
 struct HTMLMediaElementContext {
     /// The element that initiated the request.
@@ -66,7 +68,7 @@ impl AsyncResponseListener for HTMLMediaElementContext {
                              .as_ref()
                              .and_then(|m| m.status
                                             .as_ref()
-                                            .map(|s| s.0 < 200 || s.0 >= 300))
+                                            .map(|&Serde(ref s)| s.0 < 200 || s.0 >= 300))
                              .unwrap_or(false);
         if is_failure {
             // Ensure that the element doesn't receive any further notifications
@@ -76,12 +78,11 @@ impl AsyncResponseListener for HTMLMediaElementContext {
         }
     }
 
-    fn data_available(&mut self, payload: Vec<u8>) {
+    fn data_available(&mut self, mut payload: Vec<u8>) {
         if self.ignore_response {
             return;
         }
 
-        let mut payload = payload;
         self.data.append(&mut payload);
 
         let elem = self.elem.root();
@@ -89,11 +90,7 @@ impl AsyncResponseListener for HTMLMediaElementContext {
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
         // => "Once enough of the media data has been fetched to determine the duration..."
         if !self.have_metadata {
-            //TODO: actually check if the payload contains the full metadata
-
-            // Step 6
-            elem.change_ready_state(HAVE_METADATA);
-            self.have_metadata = true;
+            self.check_metadata(&elem);
         } else {
             elem.change_ready_state(HAVE_CURRENT_DATA);
         }
@@ -133,9 +130,8 @@ impl AsyncResponseListener for HTMLMediaElementContext {
 
             // Step 5
             elem.fire_simple_event("error");
-        }
-        // => "If the media data cannot be fetched at all..."
-        else {
+        } else {
+            // => "If the media data cannot be fetched at all..."
             elem.queue_dedicated_media_source_failure_steps();
         }
 
@@ -164,6 +160,46 @@ impl HTMLMediaElementContext {
             ignore_response: false,
         }
     }
+
+    #[cfg(not(any(target_os = "android", target_arch = "arm", target_arch = "aarch64")))]
+    fn check_metadata(&mut self, elem: &HTMLMediaElement) {
+        match video_metadata::get_format_from_slice(&self.data) {
+            Ok(meta) => {
+                let dur = meta.duration.unwrap_or(::std::time::Duration::new(0, 0));
+                *elem.video.borrow_mut() = Some(VideoMedia {
+                    format: format!("{:?}", meta.format),
+                    duration: Duration::seconds(dur.as_secs() as i64) +
+                              Duration::nanoseconds(dur.subsec_nanos() as i64),
+                    width: meta.size.width,
+                    height: meta.size.height,
+                    video: meta.video,
+                    audio: meta.audio,
+                });
+                // Step 6
+                elem.change_ready_state(HAVE_METADATA);
+                self.have_metadata = true;
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(any(target_os = "android", target_arch = "arm", target_arch = "aarch64"))]
+    fn check_metadata(&mut self, elem: &HTMLMediaElement) {
+        // Step 6.
+        elem.change_ready_state(HAVE_METADATA);
+        self.have_metadata = true;
+    }
+}
+
+#[derive(JSTraceable, HeapSizeOf)]
+pub struct VideoMedia {
+    format: String,
+    #[ignore_heap_size_of = "defined in time"]
+    duration: Duration,
+    width: u32,
+    height: u32,
+    video: String,
+    audio: Option<String>,
 }
 
 #[dom_struct]
@@ -177,6 +213,7 @@ pub struct HTMLMediaElement {
     error: MutNullableHeap<JS<MediaError>>,
     paused: Cell<bool>,
     autoplaying: Cell<bool>,
+    video: DOMRefCell<Option<VideoMedia>>,
 }
 
 impl HTMLMediaElement {
@@ -194,6 +231,7 @@ impl HTMLMediaElement {
             error: Default::default(),
             paused: Cell::new(true),
             autoplaying: Cell::new(true),
+            video: DOMRefCell::new(None),
         }
     }
 
@@ -239,11 +277,11 @@ impl HTMLMediaElement {
             }
         }
 
-        let task = Task {
+        let task = box Task {
             elem: Trusted::new(self),
         };
         let win = window_from_node(self);
-        let _ = win.dom_manipulation_task_source().queue(DOMManipulationTask::MediaTask(box task));
+        let _ = win.dom_manipulation_task_source().queue(task, GlobalRef::Window(&win));
     }
 
     // https://html.spec.whatwg.org/multipage/#internal-pause-steps step 2.2
@@ -263,17 +301,17 @@ impl HTMLMediaElement {
             }
         }
 
-        let task = Task {
+        let task = box Task {
             elem: Trusted::new(self),
         };
         let win = window_from_node(self);
-        let _ = win.dom_manipulation_task_source().queue(DOMManipulationTask::MediaTask(box task));
+        let _ = win.dom_manipulation_task_source().queue(task, GlobalRef::Window(&win));
     }
 
     fn queue_fire_simple_event(&self, type_: &'static str) {
         let win = window_from_node(self);
-        let task = FireSimpleEventTask::new(self, type_);
-        let _ = win.dom_manipulation_task_source().queue(DOMManipulationTask::MediaTask(box task));
+        let task = box FireSimpleEventTask::new(self, type_);
+        let _ = win.dom_manipulation_task_source().queue(task, GlobalRef::Window(&win));
     }
 
     fn fire_simple_event(&self, type_: &str) {
@@ -474,17 +512,19 @@ impl HTMLMediaElement {
             // 4.2
             let context = Arc::new(Mutex::new(HTMLMediaElementContext::new(self, url.clone())));
             let (action_sender, action_receiver) = ipc::channel().unwrap();
-            let script_chan = window_from_node(self).networking_task_source();
+            let window = window_from_node(self);
+            let script_chan = window.networking_task_source();
             let listener = box NetworkListener {
                 context: context,
                 script_chan: script_chan,
+                wrapper: Some(window.get_runnable_wrapper()),
             };
 
             let response_target = AsyncResponseTarget {
                 sender: action_sender,
             };
             ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
-                listener.notify(message.to().unwrap());
+                listener.notify_action(message.to().unwrap());
             });
 
             // FIXME: we're supposed to block the load event much earlier than now
@@ -497,8 +537,9 @@ impl HTMLMediaElement {
     }
 
     fn queue_dedicated_media_source_failure_steps(&self) {
-        let _ = window_from_node(self).dom_manipulation_task_source().queue(
-            DOMManipulationTask::MediaTask(box DedicatedMediaSourceFailureTask::new(self)));
+        let window = window_from_node(self);
+        let _ = window.dom_manipulation_task_source().queue(box DedicatedMediaSourceFailureTask::new(self),
+                                                            GlobalRef::Window(&window));
     }
 
     // https://html.spec.whatwg.org/multipage/#dedicated-media-source-failure-steps
@@ -737,6 +778,8 @@ impl FireSimpleEventTask {
 }
 
 impl Runnable for FireSimpleEventTask {
+    fn name(&self) -> &'static str { "FireSimpleEventTask" }
+
     fn handler(self: Box<FireSimpleEventTask>) {
         let elem = self.elem.root();
         elem.fire_simple_event(self.type_);
@@ -758,6 +801,8 @@ impl ResourceSelectionTask {
 }
 
 impl Runnable for ResourceSelectionTask {
+    fn name(&self) -> &'static str { "ResourceSelectionTask" }
+
     fn handler(self: Box<ResourceSelectionTask>) {
         self.elem.root().resource_selection_algorithm_sync(self.base_url);
     }
@@ -776,6 +821,8 @@ impl DedicatedMediaSourceFailureTask {
 }
 
 impl Runnable for DedicatedMediaSourceFailureTask {
+    fn name(&self) -> &'static str { "DedicatedMediaSourceFailureTask" }
+
     fn handler(self: Box<DedicatedMediaSourceFailureTask>) {
         self.elem.root().dedicated_media_source_failure();
     }
@@ -794,6 +841,8 @@ impl PauseIfNotInDocumentTask {
 }
 
 impl Runnable for PauseIfNotInDocumentTask {
+    fn name(&self) -> &'static str { "PauseIfNotInDocumentTask" }
+
     fn handler(self: Box<PauseIfNotInDocumentTask>) {
         let elem = self.elem.root();
         if !elem.upcast::<Node>().is_in_doc() {

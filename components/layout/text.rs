@@ -16,6 +16,8 @@ use gfx::text::glyph::ByteIndex;
 use gfx::text::text_run::TextRun;
 use gfx::text::util::{self, CompressionMode};
 use inline::{FIRST_FRAGMENT_OF_ELEMENT, InlineFragments, LAST_FRAGMENT_OF_ELEMENT};
+use linked_list::split_off_head;
+use ordered_float::NotNaN;
 use range::Range;
 use std::borrow::ToOwned;
 use std::collections::LinkedList;
@@ -24,11 +26,10 @@ use std::sync::Arc;
 use style::computed_values::white_space;
 use style::computed_values::{line_height, text_orientation, text_rendering, text_transform};
 use style::logical_geometry::{LogicalSize, WritingMode};
-use style::properties::style_structs::ServoFont;
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
+use style::properties::style_structs;
 use unicode_bidi::{is_rtl, process_text};
 use unicode_script::{get_script, Script};
-use util::linked_list::split_off_head;
 
 /// Returns the concatenated text of a list of unscanned text fragments.
 fn text(fragments: &LinkedList<Fragment>) -> String {
@@ -164,7 +165,9 @@ impl TextRunScanner {
                 };
                 text_transform = inherited_text_style.text_transform;
                 letter_spacing = inherited_text_style.letter_spacing.0;
-                word_spacing = inherited_text_style.word_spacing.0.unwrap_or(Au(0));
+                word_spacing = inherited_text_style.word_spacing.0
+                               .map(|lop| lop.to_hash_key())
+                               .unwrap_or((Au(0), NotNaN::new(0.0).unwrap()));
                 text_rendering = inherited_text_style.text_rendering;
             }
 
@@ -233,13 +236,13 @@ impl TextRunScanner {
 
                     if flush_mapping {
                         mapping.flush(&mut mappings,
-                                         &mut run_info,
-                                         &**text,
-                                         compression,
-                                         text_transform,
-                                         &mut last_whitespace,
-                                         &mut start_position,
-                                         end_position);
+                                      &mut run_info,
+                                      &**text,
+                                      compression,
+                                      text_transform,
+                                      &mut last_whitespace,
+                                      &mut start_position,
+                                      end_position);
                         if run_info.text.len() > 0 {
                             if flush_run {
                                 run_info.flush(&mut run_info_list, &mut insertion_point);
@@ -340,21 +343,20 @@ impl TextRunScanner {
                 let mut byte_range = Range::new(ByteIndex(mapping.byte_range.begin() as isize),
                                                 ByteIndex(mapping.byte_range.length() as isize));
 
+                let mut flags = ScannedTextFlags::empty();
+                let text_size = old_fragment.border_box.size;
+
                 let requires_line_break_afterward_if_wrapping_on_newlines =
                     scanned_run.run.text[mapping.byte_range.begin()..mapping.byte_range.end()]
                     .ends_with('\n');
+
                 if requires_line_break_afterward_if_wrapping_on_newlines {
                     byte_range.extend_by(ByteIndex(-1)); // Trim the '\n'
+                    flags.insert(REQUIRES_LINE_BREAK_AFTERWARD_IF_WRAPPING_ON_NEWLINES);
                 }
 
-                let text_size = old_fragment.border_box.size;
-
-                let mut flags = ScannedTextFlags::empty();
                 if mapping.selected {
                     flags.insert(SELECTED);
-                }
-                if requires_line_break_afterward_if_wrapping_on_newlines {
-                    flags.insert(REQUIRES_LINE_BREAK_AFTERWARD_IF_WRAPPING_ON_NEWLINES);
                 }
 
                 let insertion_point = if mapping.contains_insertion_point(scanned_run.insertion_point) {
@@ -432,11 +434,11 @@ fn bounding_box_for_run_metrics(metrics: &RunMetrics, writing_mode: WritingMode)
 
 }
 
-/// Returns the metrics of the font represented by the given `ServoFont`, respectively.
+/// Returns the metrics of the font represented by the given `style_structs::Font`, respectively.
 ///
 /// `#[inline]` because often the caller only needs a few fields from the font metrics.
 #[inline]
-pub fn font_metrics_for_style(font_context: &mut FontContext, font_style: Arc<ServoFont>)
+pub fn font_metrics_for_style(font_context: &mut FontContext, font_style: Arc<style_structs::Font>)
                               -> FontMetrics {
     let fontgroup = font_context.layout_font_group_for_style(font_style);
     // FIXME(https://github.com/rust-lang/rust/issues/23338)

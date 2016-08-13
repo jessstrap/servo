@@ -19,12 +19,11 @@ use std::io::{self, Write};
 use std::path;
 use std::path::Path;
 use std::time::Duration;
-use std::{thread, f64};
+use std::{f64, thread, u32, u64};
 use std_time::precise_time_ns;
 use trace_dump::TraceDump;
 use util::opts::OutputOptions;
 use util::thread::spawn_named;
-use util::time::duration_from_seconds;
 
 pub trait Formattable {
     fn format(&self, output: &Option<OutputOptions>) -> String;
@@ -328,6 +327,23 @@ impl Profiler {
         true
     }
 
+    /// Get tuple (mean, median, min, max) for profiler statistics.
+    pub fn get_statistics(data: &[f64]) -> (f64, f64, f64, f64) {
+        data.iter().fold(-f64::INFINITY, |a, &b| {
+            debug_assert!(a < b, "Data must be sorted");
+            b
+        });
+
+        let data_len = data.len();
+        debug_assert!(data_len > 0);
+        let (mean, median, min, max) =
+            (data.iter().sum::<f64>() / (data_len as f64),
+            data[data_len / 2],
+            data[0],
+            data[data_len - 1]);
+        (mean, median, min, max)
+    }
+
     fn print_buckets(&mut self) {
         match self.output {
             Some(OutputOptions::FileName(ref filename)) => {
@@ -350,11 +366,7 @@ impl Profiler {
                     });
                     let data_len = data.len();
                     if data_len > 0 {
-                        let (mean, median, min, max) =
-                            (data.iter().sum::<f64>() / (data_len as f64),
-                             data[data_len / 2],
-                             data.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-                             data.iter().fold(-f64::INFINITY, |a, &b| a.max(b)));
+                        let (mean, median, min, max) = Self::get_statistics(data);
                         write!(file, "{}\t{}\t{:15.4}\t{:15.4}\t{:15.4}\t{:15.4}\t{:15}\n",
                             category.format(&self.output), meta.format(&self.output),
                             mean, median, min, max, data_len).unwrap();
@@ -379,11 +391,7 @@ impl Profiler {
                     });
                     let data_len = data.len();
                     if data_len > 0 {
-                        let (mean, median, min, max) =
-                            (data.iter().sum::<f64>() / (data_len as f64),
-                             data[data_len / 2],
-                             data.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-                             data.iter().fold(-f64::INFINITY, |a, &b| a.max(b)));
+                        let (mean, median, min, max) = Self::get_statistics(data);
                         writeln!(&mut lock, "{:-35}{} {:15.4} {:15.4} {:15.4} {:15.4} {:15}",
                                  category.format(&self.output), meta.format(&self.output), mean, median, min, max,
                                  data_len).unwrap();
@@ -407,4 +415,18 @@ fn enforce_range<T>(min: T, max: T, value: T) -> T where T: Ord {
             }
         },
     }
+}
+
+pub fn duration_from_seconds(secs: f64) -> Duration {
+    pub const NANOS_PER_SEC: u32 = 1_000_000_000;
+
+    // Get number of seconds and check that it fits in a u64.
+    let whole_secs = secs.trunc();
+    assert!(whole_secs >= 0.0 && whole_secs <= u64::MAX as f64);
+
+    // Get number of nanoseconds. This should always fit in a u32, but check anyway.
+    let nanos = (secs.fract() * (NANOS_PER_SEC as f64)).trunc();
+    assert!(nanos >= 0.0 && nanos <= u32::MAX as f64);
+
+    Duration::new(whole_secs as u64, nanos as u32)
 }

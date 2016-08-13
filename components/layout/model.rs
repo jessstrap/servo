@@ -13,7 +13,7 @@ use std::cmp::{max, min};
 use std::fmt;
 use style::computed_values::transform::ComputedMatrix;
 use style::logical_geometry::LogicalMargin;
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
 use style::values::computed::{BorderRadiusSize, LengthOrPercentageOrAuto};
 use style::values::computed::{LengthOrPercentage, LengthOrPercentageOrNone};
 
@@ -493,13 +493,19 @@ pub trait ToGfxMatrix {
 
 impl ToGfxMatrix for ComputedMatrix {
     fn to_gfx_matrix(&self) -> Matrix4D<f32> {
-        Matrix4D {
-            m11: self.m11 as f32, m12: self.m12 as f32, m13: self.m13 as f32, m14: self.m14 as f32,
-            m21: self.m21 as f32, m22: self.m22 as f32, m23: self.m23 as f32, m24: self.m24 as f32,
-            m31: self.m31 as f32, m32: self.m32 as f32, m33: self.m33 as f32, m34: self.m34 as f32,
-            m41: self.m41 as f32, m42: self.m42 as f32, m43: self.m43 as f32, m44: self.m44 as f32
-        }
+        Matrix4D::new(
+            self.m11 as f32, self.m12 as f32, self.m13 as f32, self.m14 as f32,
+            self.m21 as f32, self.m22 as f32, self.m23 as f32, self.m24 as f32,
+            self.m31 as f32, self.m32 as f32, self.m33 as f32, self.m34 as f32,
+            self.m41 as f32, self.m42 as f32, self.m43 as f32, self.m44 as f32)
     }
+}
+
+// Used to specify the logical direction.
+#[derive(Debug, Clone, Copy)]
+pub enum Direction {
+    Inline,
+    Block
 }
 
 // https://drafts.csswg.org/css2/visudet.html#min-max-widths

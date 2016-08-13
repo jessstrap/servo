@@ -8,6 +8,7 @@
  * Copyright © 2013 W3C® (MIT, ERCIM, Keio, Beihang), All Rights Reserved.
  */
 
+[Exposed=(Window,Worker)]
 interface CSSStyleDeclaration {
   [SetterThrows]
            attribute DOMString cssText;
@@ -308,6 +309,9 @@ partial interface CSSStyleDeclaration {
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString transitionDelay;
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString transition-delay;
 
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString flex;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString flexFlow;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString flex-flow;
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString flexDirection;
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString flex-direction;
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString flexWrap;
@@ -327,4 +331,22 @@ partial interface CSSStyleDeclaration {
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString flex-shrink;
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString alignSelf;
   [SetterThrows, TreatNullAs=EmptyString] attribute DOMString align-self;
+
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-name;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationName;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-duration;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationDuration;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-timing-function;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationTimingFunction;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-iteration-count;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationIterationCount;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-direction;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationDirection;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-play-state;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationPlayState;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-fill-mode;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationFillMode;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animation-delay;
+  [SetterThrows, TreatNullAs=EmptyString] attribute DOMString animationDelay;
 };

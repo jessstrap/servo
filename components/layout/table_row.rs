@@ -17,6 +17,7 @@ use flow_list::MutFlowListIterator;
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use gfx::display_list::StackingContext;
 use gfx_traits::StackingContextId;
+use gfx_traits::print_tree::PrintTree;
 use layout_debug;
 use model::MaybeAuto;
 use rustc_serialize::{Encodable, Encoder};
@@ -25,12 +26,12 @@ use std::fmt;
 use std::iter::{Enumerate, IntoIterator, Peekable};
 use std::sync::Arc;
 use style::computed_values::{border_collapse, border_spacing, border_top_style};
+use style::context::SharedStyleContext;
 use style::logical_geometry::{LogicalSize, PhysicalSide, WritingMode};
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
 use style::values::computed::LengthOrPercentageOrAuto;
 use table::{ColumnComputedInlineSize, ColumnIntrinsicInlineSize, InternalTable, VecExt};
 use table_cell::{CollapsedBordersForCell, TableCellFlow};
-use util::print_tree::PrintTree;
 
 /// A single row of a table.
 pub struct TableRowFlow {
@@ -110,7 +111,7 @@ impl TableRowFlow {
         let mut max_block_size = Au(0);
         let thread_id = self.block_flow.base.thread_id;
         for kid in self.block_flow.base.child_iter_mut() {
-            kid.place_float_if_applicable(layout_context);
+            kid.place_float_if_applicable();
             if !flow::base(kid).flags.is_float() {
                 kid.assign_block_size_for_inorder_child_if_necessary(layout_context, thread_id);
             }
@@ -160,6 +161,9 @@ impl TableRowFlow {
 
             // Assign the child's block size.
             child_table_cell.block_flow.base.position.size.block = block_size;
+
+            // Now we know the cell height, vertical align the cell's children.
+            child_table_cell.valign_children();
 
             // Write in the size of the relative containing block for children. (This information
             // is also needed to handle RTL.)
@@ -311,7 +315,7 @@ impl Flow for TableRowFlow {
                                                                                 pref_inline_size);
     }
 
-    fn assign_inline_sizes(&mut self, layout_context: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, shared_context: &SharedStyleContext) {
         let _scope = layout_debug_scope!("table_row::assign_inline_sizes {:x}",
                                          self.block_flow.base.debug_id());
         debug!("assign_inline_sizes({}): assigning inline_size for flow", "table_row");
@@ -327,7 +331,7 @@ impl Flow for TableRowFlow {
             border_collapse: self.block_flow.fragment.style.get_inheritedtable().border_collapse,
         };
         inline_size_computer.compute_used_inline_size(&mut self.block_flow,
-                                                      layout_context,
+                                                      shared_context,
                                                       containing_block_inline_size);
 
         // Spread out the completed inline sizes among columns with spans > 1.
@@ -380,7 +384,7 @@ impl Flow for TableRowFlow {
         let spacing = self.spacing;
         let row_writing_mode = self.block_flow.base.writing_mode;
         let table_writing_mode = self.table_writing_mode;
-        self.block_flow.propagate_assigned_inline_size_to_children(layout_context,
+        self.block_flow.propagate_assigned_inline_size_to_children(shared_context,
                                                                    inline_start_content_edge,
                                                                    inline_end_content_edge,
                                                                    containing_block_inline_size,

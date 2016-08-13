@@ -21,6 +21,12 @@ from mach.decorators import (
 
 from servo.command_base import CommandBase, cd, call
 
+CARGO_PATHS = [
+    path.join('components', 'servo'),
+    path.join('ports', 'cef'),
+    path.join('ports', 'geckolib'),
+]
+
 
 @CommandProvider
 class MachCommands(CommandBase):
@@ -81,11 +87,7 @@ class MachCommands(CommandBase):
             print("flag or update all packages with --all-packages (-a) flag")
             sys.exit(1)
 
-        cargo_paths = [path.join('components', 'servo'),
-                       path.join('ports', 'cef'),
-                       path.join('ports', 'geckolib')]
-
-        for cargo_path in cargo_paths:
+        for cargo_path in CARGO_PATHS:
             with cd(cargo_path):
                 print(cargo_path)
                 call(["cargo", "update"] + params,
@@ -94,11 +96,21 @@ class MachCommands(CommandBase):
     @Command('clippy',
              description='Run Clippy',
              category='devenv')
-    def clippy(self):
-        features = "--features=script/plugins/clippy"
+    @CommandArgument(
+        '--package', '-p', default=None,
+        help='Updates the selected package')
+    @CommandArgument(
+        '--json', '-j', action="store_true",
+        help='Outputs')
+    def clippy(self, package=None, json=False):
+        params = ["--features=script/plugins/clippy"]
+        if package:
+            params += ["-p", package]
+        if json:
+            params += ["--", "-Zunstable-options", "--error-format", "json"]
 
         with cd(path.join(self.context.topdir, "components", "servo")):
-            return subprocess.call(["cargo", "build", features],
+            return subprocess.call(["cargo", "rustc", "-v"] + params,
                                    env=self.build_env())
 
     @Command('rustc',
@@ -142,6 +154,19 @@ class MachCommands(CommandBase):
         return call(
             ["git"] + ["grep"] + params + ['--'] + grep_paths + [':(exclude)*.min.js'],
             env=self.build_env())
+
+    @Command('fetch',
+             description='Fetch Rust, Cargo and Cargo dependencies',
+             category='devenv')
+    def fetch(self):
+        # Fetch Rust and Cargo
+        self.ensure_bootstrapped()
+
+        # Fetch Cargo dependencies
+        for cargo_path in CARGO_PATHS:
+            with cd(cargo_path):
+                print(cargo_path)
+                call(["cargo", "fetch"], env=self.build_env())
 
     @Command('wpt-upgrade',
              description='upgrade wptrunner.',

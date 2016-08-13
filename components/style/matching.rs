@@ -2,32 +2,32 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! High-level interface to CSS selector matching.
+
 #![allow(unsafe_code)]
 
-use animation::{self, Animation};
-use context::SharedStyleContext;
+use animation;
+use arc_ptr_eq;
+use cache::{LRUCache, SimpleHashCache};
+use context::{StyleContext, SharedStyleContext};
 use data::PrivateStyleData;
 use dom::{TElement, TNode, TRestyleDamage};
+use properties::longhands::display::computed_value as display;
 use properties::{ComputedValues, PropertyDeclaration, cascade};
-use selector_impl::{ElementExt, SelectorImplExt};
+use selector_impl::{ElementExt, TheSelectorImpl, PseudoElement};
 use selector_matching::{DeclarationBlock, Stylist};
-use selectors::Element;
 use selectors::bloom::BloomFilter;
-use selectors::matching::{CommonStyleAffectingAttributeMode, CommonStyleAffectingAttributes};
-use selectors::matching::{common_style_affecting_attributes, rare_style_affecting_attributes};
+use selectors::{Element, MatchAttr};
+use sink::ForgetfulSink;
 use smallvec::SmallVec;
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::slice::Iter;
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use string_cache::{Atom, Namespace};
-use util::arc_ptr_eq;
-use util::cache::{LRUCache, SimpleHashCache};
+use traversal::RestyleResult;
 use util::opts;
-use util::vec::ForgetfulSink;
-
-/// High-level interface to CSS selector matching.
 
 fn create_common_style_affecting_attributes_from_element<E: TElement>(element: &E)
                                                          -> CommonStyleAffectingAttributes {
@@ -35,16 +35,13 @@ fn create_common_style_affecting_attributes_from_element<E: TElement>(element: &
     for attribute_info in &common_style_affecting_attributes() {
         match attribute_info.mode {
             CommonStyleAffectingAttributeMode::IsPresent(flag) => {
-                if element.get_attr(&ns!(), &attribute_info.atom).is_some() {
+                if element.has_attr(&ns!(), &attribute_info.atom) {
                     flags.insert(flag)
                 }
             }
-            CommonStyleAffectingAttributeMode::IsEqual(target_value, flag) => {
-                match element.get_attr(&ns!(), &attribute_info.atom) {
-                    Some(element_value) if element_value == target_value => {
-                        flags.insert(flag)
-                    }
-                    _ => {}
+            CommonStyleAffectingAttributeMode::IsEqual(ref target_value, flag) => {
+                if element.attr_equals(&ns!(), &attribute_info.atom, target_value) {
+                    flags.insert(flag)
                 }
             }
         }
@@ -52,23 +49,25 @@ fn create_common_style_affecting_attributes_from_element<E: TElement>(element: &
     flags
 }
 
-pub struct ApplicableDeclarations<Impl: SelectorImplExt> {
+pub struct ApplicableDeclarations {
     pub normal: SmallVec<[DeclarationBlock; 16]>,
-    pub per_pseudo: HashMap<Impl::PseudoElement, Vec<DeclarationBlock>, BuildHasherDefault<::fnv::FnvHasher>>,
+    pub per_pseudo: HashMap<PseudoElement,
+                            Vec<DeclarationBlock>,
+                            BuildHasherDefault<::fnv::FnvHasher>>,
 
     /// Whether the `normal` declarations are shareable with other nodes.
     pub normal_shareable: bool,
 }
 
-impl<Impl: SelectorImplExt> ApplicableDeclarations<Impl> {
-    pub fn new() -> ApplicableDeclarations<Impl> {
+impl ApplicableDeclarations {
+    pub fn new() -> Self {
         let mut applicable_declarations = ApplicableDeclarations {
             normal: SmallVec::new(),
             per_pseudo: HashMap::with_hasher(Default::default()),
             normal_shareable: false,
         };
 
-        Impl::each_eagerly_cascaded_pseudo_element(|pseudo| {
+        TheSelectorImpl::each_eagerly_cascaded_pseudo_element(|pseudo| {
             applicable_declarations.per_pseudo.insert(pseudo, vec![]);
         });
 
@@ -151,25 +150,25 @@ impl<'a> Hash for ApplicableDeclarationsCacheQuery<'a> {
 
 static APPLICABLE_DECLARATIONS_CACHE_SIZE: usize = 32;
 
-pub struct ApplicableDeclarationsCache<C: ComputedValues> {
-    cache: SimpleHashCache<ApplicableDeclarationsCacheEntry, Arc<C>>,
+pub struct ApplicableDeclarationsCache {
+    cache: SimpleHashCache<ApplicableDeclarationsCacheEntry, Arc<ComputedValues>>,
 }
 
-impl<C: ComputedValues> ApplicableDeclarationsCache<C> {
+impl ApplicableDeclarationsCache {
     pub fn new() -> Self {
         ApplicableDeclarationsCache {
             cache: SimpleHashCache::new(APPLICABLE_DECLARATIONS_CACHE_SIZE),
         }
     }
 
-    pub fn find(&self, declarations: &[DeclarationBlock]) -> Option<Arc<C>> {
+    pub fn find(&self, declarations: &[DeclarationBlock]) -> Option<Arc<ComputedValues>> {
         match self.cache.find(&ApplicableDeclarationsCacheQuery::new(declarations)) {
             None => None,
             Some(ref values) => Some((*values).clone()),
         }
     }
 
-    pub fn insert(&mut self, declarations: Vec<DeclarationBlock>, style: Arc<C>) {
+    pub fn insert(&mut self, declarations: Vec<DeclarationBlock>, style: Arc<ComputedValues>) {
         self.cache.insert(ApplicableDeclarationsCacheEntry::new(declarations), style)
     }
 
@@ -179,40 +178,39 @@ impl<C: ComputedValues> ApplicableDeclarationsCache<C> {
 }
 
 /// An LRU cache of the last few nodes seen, so that we can aggressively try to reuse their styles.
-pub struct StyleSharingCandidateCache<C: ComputedValues> {
-    cache: LRUCache<StyleSharingCandidate<C>, ()>,
+pub struct StyleSharingCandidateCache {
+    cache: LRUCache<StyleSharingCandidate, ()>,
 }
 
 #[derive(Clone)]
-pub struct StyleSharingCandidate<C: ComputedValues> {
-    pub style: Arc<C>,
-    pub parent_style: Arc<C>,
+pub struct StyleSharingCandidate {
+    pub style: Arc<ComputedValues>,
+    pub parent_style: Arc<ComputedValues>,
     pub local_name: Atom,
-    // FIXME(pcwalton): Should be a list of atoms instead.
-    pub class: Option<String>,
+    pub classes: Vec<Atom>,
     pub namespace: Namespace,
     pub common_style_affecting_attributes: CommonStyleAffectingAttributes,
     pub link: bool,
 }
 
-impl<C: ComputedValues> PartialEq for StyleSharingCandidate<C> {
+impl PartialEq for StyleSharingCandidate {
     fn eq(&self, other: &Self) -> bool {
         arc_ptr_eq(&self.style, &other.style) &&
             arc_ptr_eq(&self.parent_style, &other.parent_style) &&
             self.local_name == other.local_name &&
-            self.class == other.class &&
+            self.classes == other.classes &&
             self.link == other.link &&
             self.namespace == other.namespace &&
             self.common_style_affecting_attributes == other.common_style_affecting_attributes
     }
 }
 
-impl<C: ComputedValues> StyleSharingCandidate<C> {
+impl StyleSharingCandidate {
     /// Attempts to create a style sharing candidate from this node. Returns
     /// the style sharing candidate or `None` if this node is ineligible for
     /// style sharing.
     #[allow(unsafe_code)]
-    fn new<N: TNode<ConcreteComputedValues=C>>(element: &N::ConcreteElement) -> Option<Self> {
+    fn new<N: TNode>(element: &N::ConcreteElement) -> Option<Self> {
         let parent_element = match element.parent_element() {
             None => return None,
             Some(parent_element) => parent_element,
@@ -245,12 +243,13 @@ impl<C: ComputedValues> StyleSharingCandidate<C> {
             return None
         }
 
+        let mut classes = Vec::new();
+        element.each_class(|c| classes.push(c.clone()));
         Some(StyleSharingCandidate {
             style: style,
             parent_style: parent_style,
             local_name: element.get_local_name().clone(),
-            class: element.get_attr(&ns!(), &atom!("class"))
-                          .map(|string| string.to_owned()),
+            classes: classes,
             link: element.is_link(),
             namespace: (*element.get_namespace()).clone(),
             common_style_affecting_attributes:
@@ -259,21 +258,26 @@ impl<C: ComputedValues> StyleSharingCandidate<C> {
     }
 
     pub fn can_share_style_with<E: TElement>(&self, element: &E) -> bool {
-        if *element.get_local_name() != self.local_name {
+        if element.get_local_name() != self.local_name.borrow() {
             return false
         }
 
-        // FIXME(pcwalton): Use `each_class` here instead of slow string comparison.
-        match (&self.class, element.get_attr(&ns!(), &atom!("class"))) {
-            (&None, Some(_)) | (&Some(_), None) => return false,
-            (&Some(ref this_class), Some(element_class)) if
-                    element_class != &**this_class => {
-                return false
+        let mut num_classes = 0;
+        let mut classes_match = true;
+        element.each_class(|c| {
+            num_classes += 1;
+            // Note that we could do this check more cheaply if we decided to
+            // only consider class lists as equal if the orders match, since
+            // we could then index by num_classes instead of using .contains().
+            if classes_match && !self.classes.contains(c) {
+                classes_match = false;
             }
-            (&Some(_), Some(_)) | (&None, None) => {}
+        });
+        if !classes_match || num_classes != self.classes.len() {
+            return false;
         }
 
-        if *element.get_namespace() != self.namespace {
+        if element.get_namespace() != self.namespace.borrow() {
             return false
         }
 
@@ -290,31 +294,25 @@ impl<C: ComputedValues> StyleSharingCandidate<C> {
             match attribute_info.mode {
                 CommonStyleAffectingAttributeMode::IsPresent(flag) => {
                     if self.common_style_affecting_attributes.contains(flag) !=
-                            element.get_attr(&ns!(), &attribute_info.atom).is_some() {
+                            element.has_attr(&ns!(), &attribute_info.atom) {
                         return false
                     }
                 }
-                CommonStyleAffectingAttributeMode::IsEqual(target_value, flag) => {
-                    match element.get_attr(&ns!(), &attribute_info.atom) {
-                        Some(ref element_value) if self.common_style_affecting_attributes
-                                                       .contains(flag) &&
-                                                       *element_value != target_value => {
+                CommonStyleAffectingAttributeMode::IsEqual(ref target_value, flag) => {
+                    let contains = self.common_style_affecting_attributes.contains(flag);
+                    if element.has_attr(&ns!(), &attribute_info.atom) {
+                        if !contains || !element.attr_equals(&ns!(), &attribute_info.atom, target_value) {
                             return false
                         }
-                        Some(_) if !self.common_style_affecting_attributes.contains(flag) => {
-                            return false
-                        }
-                        None if self.common_style_affecting_attributes.contains(flag) => {
-                            return false
-                        }
-                        _ => {}
+                    } else if contains {
+                        return false
                     }
                 }
             }
         }
 
         for attribute_name in &rare_style_affecting_attributes() {
-            if element.get_attr(&ns!(), attribute_name).is_some() {
+            if element.has_attr(&ns!(), attribute_name) {
                 return false
             }
         }
@@ -330,20 +328,75 @@ impl<C: ComputedValues> StyleSharingCandidate<C> {
     }
 }
 
+bitflags! {
+    pub flags CommonStyleAffectingAttributes: u8 {
+        const HIDDEN_ATTRIBUTE = 0x01,
+        const NO_WRAP_ATTRIBUTE = 0x02,
+        const ALIGN_LEFT_ATTRIBUTE = 0x04,
+        const ALIGN_CENTER_ATTRIBUTE = 0x08,
+        const ALIGN_RIGHT_ATTRIBUTE = 0x10,
+    }
+}
+
+pub struct CommonStyleAffectingAttributeInfo {
+    pub atom: Atom,
+    pub mode: CommonStyleAffectingAttributeMode,
+}
+
+#[derive(Clone)]
+pub enum CommonStyleAffectingAttributeMode {
+    IsPresent(CommonStyleAffectingAttributes),
+    IsEqual(Atom, CommonStyleAffectingAttributes),
+}
+
+// NB: This must match the order in `selectors::matching::CommonStyleAffectingAttributes`.
+#[inline]
+pub fn common_style_affecting_attributes() -> [CommonStyleAffectingAttributeInfo; 5] {
+    [
+        CommonStyleAffectingAttributeInfo {
+            atom: atom!("hidden"),
+            mode: CommonStyleAffectingAttributeMode::IsPresent(HIDDEN_ATTRIBUTE),
+        },
+        CommonStyleAffectingAttributeInfo {
+            atom: atom!("nowrap"),
+            mode: CommonStyleAffectingAttributeMode::IsPresent(NO_WRAP_ATTRIBUTE),
+        },
+        CommonStyleAffectingAttributeInfo {
+            atom: atom!("align"),
+            mode: CommonStyleAffectingAttributeMode::IsEqual(atom!("left"), ALIGN_LEFT_ATTRIBUTE),
+        },
+        CommonStyleAffectingAttributeInfo {
+            atom: atom!("align"),
+            mode: CommonStyleAffectingAttributeMode::IsEqual(atom!("center"), ALIGN_CENTER_ATTRIBUTE),
+        },
+        CommonStyleAffectingAttributeInfo {
+            atom: atom!("align"),
+            mode: CommonStyleAffectingAttributeMode::IsEqual(atom!("right"), ALIGN_RIGHT_ATTRIBUTE),
+        }
+    ]
+}
+
+/// Attributes that, if present, disable style sharing. All legacy HTML attributes must be in
+/// either this list or `common_style_affecting_attributes`. See the comment in
+/// `synthesize_presentational_hints_for_legacy_attributes`.
+pub fn rare_style_affecting_attributes() -> [Atom; 3] {
+    [ atom!("bgcolor"), atom!("border"), atom!("colspan") ]
+}
+
 static STYLE_SHARING_CANDIDATE_CACHE_SIZE: usize = 40;
 
-impl<C: ComputedValues> StyleSharingCandidateCache<C> {
+impl StyleSharingCandidateCache {
     pub fn new() -> Self {
         StyleSharingCandidateCache {
             cache: LRUCache::new(STYLE_SHARING_CANDIDATE_CACHE_SIZE),
         }
     }
 
-    pub fn iter(&self) -> Iter<(StyleSharingCandidate<C>, ())> {
+    pub fn iter(&self) -> Iter<(StyleSharingCandidate, ())> {
         self.cache.iter()
     }
 
-    pub fn insert_if_possible<N: TNode<ConcreteComputedValues=C>>(&mut self, element: &N::ConcreteElement) {
+    pub fn insert_if_possible<N: TNode>(&mut self, element: &N::ConcreteElement) {
         match StyleSharingCandidate::new::<N>(element) {
             None => {}
             Some(candidate) => self.cache.insert(candidate, ())
@@ -359,75 +412,91 @@ impl<C: ComputedValues> StyleSharingCandidateCache<C> {
 pub enum StyleSharingResult<ConcreteRestyleDamage: TRestyleDamage> {
     /// We didn't find anybody to share the style with.
     CannotShare,
-    /// The node's style can be shared. The integer specifies the index in the LRU cache that was
-    /// hit and the damage that was done.
-    StyleWasShared(usize, ConcreteRestyleDamage),
+    /// The node's style can be shared. The integer specifies the index in the
+    /// LRU cache that was hit and the damage that was done, and the restyle
+    /// result the original result of the candidate's styling, that is, whether
+    /// it should stop the traversal or not.
+    StyleWasShared(usize, ConcreteRestyleDamage, RestyleResult),
 }
 
-trait PrivateMatchMethods: TNode
-    where <Self::ConcreteElement as Element>::Impl: SelectorImplExt {
-    fn cascade_node_pseudo_element(&self,
-                                   context: &SharedStyleContext<<Self::ConcreteElement as Element>::Impl>,
-                                   parent_style: Option<&Arc<Self::ConcreteComputedValues>>,
-                                   applicable_declarations: &[DeclarationBlock],
-                                   mut style: Option<&mut Arc<Self::ConcreteComputedValues>>,
-                                   applicable_declarations_cache:
-                                    &mut ApplicableDeclarationsCache<Self::ConcreteComputedValues>,
-                                   new_animations_sender: &Mutex<Sender<Animation>>,
-                                   shareable: bool,
-                                   animate_properties: bool)
-                                   -> (Self::ConcreteRestyleDamage, Arc<Self::ConcreteComputedValues>) {
+trait PrivateMatchMethods: TNode {
+    /// Actually cascades style for a node or a pseudo-element of a node.
+    ///
+    /// Note that animations only apply to nodes or ::before or ::after
+    /// pseudo-elements.
+    fn cascade_node_pseudo_element<'a, Ctx>(&self,
+                                            context: &Ctx,
+                                            parent_style: Option<&Arc<ComputedValues>>,
+                                            applicable_declarations: &[DeclarationBlock],
+                                            mut old_style: Option<&mut Arc<ComputedValues>>,
+                                            applicable_declarations_cache:
+                                             &mut ApplicableDeclarationsCache,
+                                            shareable: bool,
+                                            animate_properties: bool)
+                                            -> Arc<ComputedValues>
+        where Ctx: StyleContext<'a>
+    {
         let mut cacheable = true;
+        let shared_context = context.shared_context();
         if animate_properties {
-            cacheable = !self.update_animations_for_cascade(context, &mut style) && cacheable;
+            cacheable = !self.update_animations_for_cascade(shared_context,
+                                                            &mut old_style) && cacheable;
         }
 
-        let mut this_style;
-        match parent_style {
+        let (this_style, is_cacheable) = match parent_style {
             Some(ref parent_style) => {
                 let cache_entry = applicable_declarations_cache.find(applicable_declarations);
                 let cached_computed_values = match cache_entry {
-                    None => None,
                     Some(ref style) => Some(&**style),
+                    None => None,
                 };
-                let (the_style, is_cacheable) = cascade(context.viewport_size,
-                                                        applicable_declarations,
-                                                        shareable,
-                                                        Some(&***parent_style),
-                                                        cached_computed_values,
-                                                        context.error_reporter.clone());
-                cacheable = cacheable && is_cacheable;
-                this_style = the_style
+
+                cascade(shared_context.viewport_size,
+                        applicable_declarations,
+                        shareable,
+                        Some(&***parent_style),
+                        cached_computed_values,
+                        shared_context.error_reporter.clone())
             }
             None => {
-                let (the_style, is_cacheable) = cascade(context.viewport_size,
-                                                        applicable_declarations,
-                                                        shareable,
-                                                        None,
-                                                        None,
-                                                        context.error_reporter.clone());
-                cacheable = cacheable && is_cacheable;
-                this_style = the_style
+                cascade(shared_context.viewport_size,
+                        applicable_declarations,
+                        shareable,
+                        None,
+                        None,
+                        shared_context.error_reporter.clone())
             }
         };
 
-        // Trigger transitions if necessary. This will reset `this_style` back to its old value if
-        // it did trigger a transition.
+        cacheable = cacheable && is_cacheable;
+
+        let mut this_style = Arc::new(this_style);
+
         if animate_properties {
-            if let Some(ref style) = style {
-                let animations_started =
-                    animation::start_transitions_if_applicable::<Self::ConcreteComputedValues>(
+            let new_animations_sender = &context.local_context().new_animations_sender;
+            let this_opaque = self.opaque();
+            // Trigger any present animations if necessary.
+            let mut animations_started = animation::maybe_start_animations(
+                &shared_context,
+                new_animations_sender,
+                this_opaque,
+                &this_style);
+
+            // Trigger transitions if necessary. This will reset `this_style` back
+            // to its old value if it did trigger a transition.
+            if let Some(ref style) = old_style {
+                animations_started |=
+                    animation::start_transitions_if_applicable(
                         new_animations_sender,
-                        self.opaque(),
+                        this_opaque,
                         &**style,
-                        &mut this_style);
-                cacheable = cacheable && !animations_started
+                        &mut this_style,
+                        &shared_context.timer);
             }
+
+            cacheable = cacheable && !animations_started
         }
 
-        // Calculate style difference.
-        let this_style = Arc::new(this_style);
-        let damage = Self::ConcreteRestyleDamage::compute(style.map(|s| &*s), &*this_style);
 
         // Cache the resolved style if it was cacheable.
         if cacheable {
@@ -435,13 +504,12 @@ trait PrivateMatchMethods: TNode
                                                  this_style.clone());
         }
 
-        // Return the final style and the damage done to our caller.
-        (damage, this_style)
+        this_style
     }
 
     fn update_animations_for_cascade(&self,
-                                     context: &SharedStyleContext<<Self::ConcreteElement as Element>::Impl>,
-                                     style: &mut Option<&mut Arc<Self::ConcreteComputedValues>>)
+                                     context: &SharedStyleContext,
+                                     style: &mut Option<&mut Arc<ComputedValues>>)
                                      -> bool {
         let style = match *style {
             None => return false,
@@ -450,21 +518,8 @@ trait PrivateMatchMethods: TNode
 
         // Finish any expired transitions.
         let this_opaque = self.opaque();
-        let had_animations_to_expire;
-        {
-            let all_expired_animations = context.expired_animations.read().unwrap();
-            let animations_to_expire = all_expired_animations.get(&this_opaque);
-            had_animations_to_expire = animations_to_expire.is_some();
-            if let Some(ref animations) = animations_to_expire {
-                for animation in *animations {
-                    animation.property_animation.update(Arc::make_mut(style).as_servo_mut(), 1.0);
-                }
-            }
-        }
-
-        if had_animations_to_expire {
-            context.expired_animations.write().unwrap().remove(&this_opaque);
-        }
+        let had_animations_to_expire =
+            animation::complete_expired_transitions(this_opaque, style, context);
 
         // Merge any running transitions into the current style, and cancel them.
         let had_running_animations = context.running_animations
@@ -474,32 +529,44 @@ trait PrivateMatchMethods: TNode
                                             .is_some();
         if had_running_animations {
             let mut all_running_animations = context.running_animations.write().unwrap();
-            for running_animation in all_running_animations.get(&this_opaque).unwrap() {
-                animation::update_style_for_animation::<Self::ConcreteComputedValues,
-                                                        Self::ConcreteRestyleDamage>(running_animation, style, None);
+            for mut running_animation in all_running_animations.get_mut(&this_opaque).unwrap() {
+                // This shouldn't happen frequently, but under some
+                // circumstances mainly huge load or debug builds, the
+                // constellation might be delayed in sending the
+                // `TickAllAnimations` message to layout.
+                //
+                // Thus, we can't assume all the animations have been already
+                // updated by layout, because other restyle due to script might
+                // be triggered by layout before the animation tick.
+                //
+                // See #12171 and the associated PR for an example where this
+                // happened while debugging other release panic.
+                if !running_animation.is_expired() {
+                    animation::update_style_for_animation(context,
+                                                          running_animation,
+                                                          style);
+                    running_animation.mark_as_expired();
+                }
             }
-            all_running_animations.remove(&this_opaque);
         }
 
         had_animations_to_expire || had_running_animations
     }
 }
 
-impl<N: TNode> PrivateMatchMethods for N
-    where <N::ConcreteElement as Element>::Impl: SelectorImplExt {}
+impl<N: TNode> PrivateMatchMethods for N {}
 
 trait PrivateElementMatchMethods: TElement {
     fn share_style_with_candidate_if_possible(&self,
                                               parent_node: Option<Self::ConcreteNode>,
-                                              candidate: &StyleSharingCandidate<<Self::ConcreteNode as
-                                                                                 TNode>::ConcreteComputedValues>)
-                                              -> Option<Arc<<Self::ConcreteNode as TNode>::ConcreteComputedValues>> {
+                                              candidate: &StyleSharingCandidate)
+                                              -> Option<Arc<ComputedValues>> {
         let parent_node = match parent_node {
             Some(ref parent_node) if parent_node.as_element().is_some() => parent_node,
             Some(_) | None => return None,
         };
 
-        let parent_data: Option<&PrivateStyleData<_, _>> = unsafe {
+        let parent_data: Option<&PrivateStyleData> = unsafe {
             parent_node.borrow_data_unchecked().map(|d| &*d)
         };
 
@@ -521,12 +588,11 @@ trait PrivateElementMatchMethods: TElement {
 
 impl<E: TElement> PrivateElementMatchMethods for E {}
 
-pub trait ElementMatchMethods : TElement
-    where Self::Impl: SelectorImplExt {
+pub trait ElementMatchMethods : TElement {
     fn match_element(&self,
-                     stylist: &Stylist<Self::Impl>,
+                     stylist: &Stylist,
                      parent_bf: Option<&BloomFilter>,
-                     applicable_declarations: &mut ApplicableDeclarations<Self::Impl>)
+                     applicable_declarations: &mut ApplicableDeclarations)
                      -> bool {
         let style_attribute = self.style_attribute().as_ref();
 
@@ -536,7 +602,7 @@ pub trait ElementMatchMethods : TElement
                                                  style_attribute,
                                                  None,
                                                  &mut applicable_declarations.normal);
-        Self::Impl::each_eagerly_cascaded_pseudo_element(|pseudo| {
+        TheSelectorImpl::each_eagerly_cascaded_pseudo_element(|pseudo| {
             stylist.push_applicable_declarations(self,
                                                  parent_bf,
                                                  None,
@@ -553,8 +619,7 @@ pub trait ElementMatchMethods : TElement
     /// guarantee that at the type system level yet.
     unsafe fn share_style_if_possible(&self,
                                       style_sharing_candidate_cache:
-                                        &mut StyleSharingCandidateCache<<Self::ConcreteNode as
-                                                                         TNode>::ConcreteComputedValues>,
+                                        &mut StyleSharingCandidateCache,
                                       parent: Option<Self::ConcreteNode>)
                                       -> StyleSharingResult<<Self::ConcreteNode as TNode>::ConcreteRestyleDamage> {
         if opts::get().disable_share_style_cache {
@@ -564,22 +629,38 @@ pub trait ElementMatchMethods : TElement
         if self.style_attribute().is_some() {
             return StyleSharingResult::CannotShare
         }
-        if self.get_attr(&ns!(), &atom!("id")).is_some() {
+        if self.has_attr(&ns!(), &atom!("id")) {
             return StyleSharingResult::CannotShare
         }
 
         for (i, &(ref candidate, ())) in style_sharing_candidate_cache.iter().enumerate() {
-            match self.share_style_with_candidate_if_possible(parent.clone(), candidate) {
-                Some(shared_style) => {
-                    // Yay, cache hit. Share the style.
-                    let node = self.as_node();
-                    let style = &mut node.mutate_data().unwrap().style;
-                    let damage = <<Self as TElement>::ConcreteNode as TNode>
-                                     ::ConcreteRestyleDamage::compute((*style).as_ref(), &*shared_style);
-                    *style = Some(shared_style);
-                    return StyleSharingResult::StyleWasShared(i, damage)
-                }
-                None => {}
+            if let Some(shared_style) = self.share_style_with_candidate_if_possible(parent.clone(), candidate) {
+                // Yay, cache hit. Share the style.
+                let node = self.as_node();
+
+                let style = &mut node.mutate_data().unwrap().style;
+
+                let damage =
+                    match node.existing_style_for_restyle_damage((*style).as_ref(), None) {
+                        Some(ref source) => {
+                            <<Self as TElement>::ConcreteNode as TNode>
+                            ::ConcreteRestyleDamage::compute(source, &shared_style)
+                        }
+                        None => {
+                            <<Self as TElement>::ConcreteNode as TNode>
+                            ::ConcreteRestyleDamage::rebuild_and_reflow()
+                        }
+                    };
+
+                let restyle_result = if shared_style.get_box().clone_display() == display::T::none {
+                    RestyleResult::Stop
+                } else {
+                    RestyleResult::Continue
+                };
+
+                *style = Some(shared_style);
+
+                return StyleSharingResult::StyleWasShared(i, damage, restyle_result)
             }
         }
 
@@ -587,8 +668,7 @@ pub trait ElementMatchMethods : TElement
     }
 }
 
-impl<E: TElement> ElementMatchMethods for E
-    where E::Impl: SelectorImplExt {}
+impl<E: TElement> ElementMatchMethods for E {}
 
 pub trait MatchMethods : TNode {
     // The below two functions are copy+paste because I can't figure out how to
@@ -639,86 +719,235 @@ pub trait MatchMethods : TNode {
         }
     }
 
-    unsafe fn cascade_node(&self,
-                           context: &SharedStyleContext<<Self::ConcreteElement as Element>::Impl>,
-                           parent: Option<Self>,
-                           applicable_declarations: &ApplicableDeclarations<<Self::ConcreteElement as Element>::Impl>,
-                           applicable_declarations_cache:
-                             &mut ApplicableDeclarationsCache<Self::ConcreteComputedValues>,
-                           new_animations_sender: &Mutex<Sender<Animation>>)
-                           where <Self::ConcreteElement as Element>::Impl: SelectorImplExt {
+    fn compute_restyle_damage(&self,
+                              old_style: Option<&Arc<ComputedValues>>,
+                              new_style: &Arc<ComputedValues>,
+                              pseudo: Option<&PseudoElement>)
+                              -> Self::ConcreteRestyleDamage
+    {
+        match self.existing_style_for_restyle_damage(old_style, pseudo) {
+            Some(ref source) => {
+                Self::ConcreteRestyleDamage::compute(source,
+                                                     new_style)
+            }
+            None => {
+                // If there's no style source, two things can happen:
+                //
+                //  1. This is not an incremental restyle (old_style is none).
+                //     In this case we can't do too much than sending
+                //     rebuild_and_reflow.
+                //
+                //  2. This is an incremental restyle, but the old display value
+                //     is none, so there's no effective way for Gecko to get the
+                //     style source. In this case, we could return either
+                //     RestyleDamage::empty(), in the case both displays are
+                //     none, or rebuild_and_reflow, otherwise. The first case
+                //     should be already handled when calling this function, so
+                //     we can assert that the new display value is not none.
+                //
+                //     Also, this can be a text node (in which case we don't
+                //     care of watching the new display value).
+                //
+                // Unfortunately we can't strongly assert part of this, since
+                // we style some nodes that in Gecko never generate a frame,
+                // like children of replaced content. Arguably, we shouldn't be
+                // styling those here, but until we implement that we'll have to
+                // stick without the assertions.
+                debug_assert!(pseudo.is_none() ||
+                              new_style.get_box().clone_display() != display::T::none);
+                Self::ConcreteRestyleDamage::rebuild_and_reflow()
+            }
+        }
+    }
+
+    unsafe fn cascade_node<'a, Ctx>(&self,
+                                    context: &Ctx,
+                                    parent: Option<Self>,
+                                    applicable_declarations: &ApplicableDeclarations)
+                                    -> RestyleResult
+        where Ctx: StyleContext<'a>
+    {
         // Get our parent's style. This must be unsafe so that we don't touch the parent's
         // borrow flags.
         //
         // FIXME(pcwalton): Isolate this unsafety into the `wrapper` module to allow
         // enforced safe, race-free access to the parent style.
         let parent_style = match parent {
-            None => None,
             Some(parent_node) => {
                 let parent_style = (*parent_node.borrow_data_unchecked().unwrap()).style.as_ref().unwrap();
                 Some(parent_style)
             }
+            None => None,
         };
 
-        let damage;
-        if self.is_text_node() {
+        let mut applicable_declarations_cache =
+            context.local_context().applicable_declarations_cache.borrow_mut();
+
+        let (damage, restyle_result) = if self.is_text_node() {
             let mut data_ref = self.mutate_data().unwrap();
             let mut data = &mut *data_ref;
-            let cloned_parent_style = Self::ConcreteComputedValues::style_for_child_text_node(parent_style.unwrap());
-            damage = Self::ConcreteRestyleDamage::compute(data.style.as_ref(),
-                                                          &*cloned_parent_style);
+            let cloned_parent_style = ComputedValues::style_for_child_text_node(parent_style.unwrap());
+
+            let damage =
+                self.compute_restyle_damage(data.style.as_ref(), &cloned_parent_style, None);
+
             data.style = Some(cloned_parent_style);
+
+            (damage, RestyleResult::Continue)
         } else {
-            damage = {
-                let mut data_ref = self.mutate_data().unwrap();
-                let mut data = &mut *data_ref;
-                let (mut damage, final_style) = self.cascade_node_pseudo_element(
-                    context,
-                    parent_style,
-                    &applicable_declarations.normal,
-                    data.style.as_mut(),
-                    applicable_declarations_cache,
-                    new_animations_sender,
-                    applicable_declarations.normal_shareable,
-                    true);
+            let mut data_ref = self.mutate_data().unwrap();
+            let mut data = &mut *data_ref;
+            let final_style =
+                self.cascade_node_pseudo_element(context, parent_style,
+                                                 &applicable_declarations.normal,
+                                                 data.style.as_mut(),
+                                                 &mut applicable_declarations_cache,
+                                                 applicable_declarations.normal_shareable,
+                                                 /* should_animate = */ true);
 
-                data.style = Some(final_style);
+            let (damage, restyle_result) =
+                self.compute_damage_and_cascade_pseudos(final_style,
+                                                        data,
+                                                        context,
+                                                        applicable_declarations,
+                                                        &mut applicable_declarations_cache);
 
-                <Self::ConcreteElement as Element>::Impl::each_eagerly_cascaded_pseudo_element(|pseudo| {
-                    let applicable_declarations_for_this_pseudo =
-                        applicable_declarations.per_pseudo.get(&pseudo).unwrap();
-
-
-                    if !applicable_declarations_for_this_pseudo.is_empty() {
-                        let (new_damage, style) = self.cascade_node_pseudo_element(
-                            context,
-                            Some(data.style.as_ref().unwrap()),
-                            &*applicable_declarations_for_this_pseudo,
-                            data.per_pseudo.get_mut(&pseudo),
-                            applicable_declarations_cache,
-                            new_animations_sender,
-                            false,
-                            false);
-                        data.per_pseudo.insert(pseudo, style);
-
-                        damage = damage | new_damage;
-                    }
-                });
-
-                damage
-            };
-
-            // This method needs to borrow the data as mutable, so make sure data_ref goes out of
-            // scope first.
             self.set_can_be_fragmented(parent.map_or(false, |p| {
                 p.can_be_fragmented() ||
                 parent_style.as_ref().unwrap().is_multicol()
             }));
+
+            (damage, restyle_result)
+        };
+
+
+        // This method needs to borrow the data as mutable, so make sure
+        // data_ref goes out of scope first.
+        self.set_restyle_damage(damage);
+
+        restyle_result
+    }
+
+    fn compute_damage_and_cascade_pseudos<'a, Ctx>(&self,
+                                                   final_style: Arc<ComputedValues>,
+                                                   data: &mut PrivateStyleData,
+                                                   context: &Ctx,
+                                                   applicable_declarations: &ApplicableDeclarations,
+                                                   mut applicable_declarations_cache: &mut ApplicableDeclarationsCache)
+                                                   -> (Self::ConcreteRestyleDamage, RestyleResult)
+        where Ctx: StyleContext<'a>
+    {
+        // Here we optimise the case of the style changing but both the
+        // previous and the new styles having display: none. In this
+        // case, we can always optimize the traversal, regardless of the
+        // restyle hint.
+        let this_display = final_style.get_box().clone_display();
+        if this_display == display::T::none {
+            let old_display = data.style.as_ref().map(|old_style| {
+                old_style.get_box().clone_display()
+            });
+
+            // If display passed from none to something, then we need to reflow,
+            // otherwise, we don't do anything.
+            let damage = match old_display {
+                Some(display) if display == this_display => {
+                    Self::ConcreteRestyleDamage::empty()
+                }
+                _ => Self::ConcreteRestyleDamage::rebuild_and_reflow()
+            };
+
+            debug!("Short-circuiting traversal: {:?} {:?} {:?}",
+                   this_display, old_display, damage);
+
+            data.style = Some(final_style);
+            return (damage, RestyleResult::Stop);
         }
 
-        // This method needs to borrow the data as mutable, so make sure data_ref goes out of
-        // scope first.
-        self.set_restyle_damage(damage);
+        // Otherwise, we just compute the damage normally, and sum up the damage
+        // related to pseudo-elements.
+        let mut damage =
+            self.compute_restyle_damage(data.style.as_ref(), &final_style, None);
+
+        data.style = Some(final_style);
+
+        let data_per_pseudo = &mut data.per_pseudo;
+        let new_style = data.style.as_ref();
+
+        debug_assert!(new_style.is_some());
+
+        let rebuild_and_reflow =
+            Self::ConcreteRestyleDamage::rebuild_and_reflow();
+
+        <Self::ConcreteElement as MatchAttr>::Impl::each_eagerly_cascaded_pseudo_element(|pseudo| {
+            use std::collections::hash_map::Entry;
+
+            let applicable_declarations_for_this_pseudo =
+                applicable_declarations.per_pseudo.get(&pseudo).unwrap();
+
+            let has_declarations =
+                !applicable_declarations_for_this_pseudo.is_empty();
+
+            // If there are declarations matching, we're going to need to
+            // recompute the style anyway, so do it now to simplify the logic
+            // below.
+            let pseudo_style_if_declarations = if has_declarations {
+                // NB: Transitions and animations should only work for
+                // pseudo-elements ::before and ::after
+                let should_animate_properties =
+                    <Self::ConcreteElement as MatchAttr>::Impl::pseudo_is_before_or_after(&pseudo);
+
+                Some(self.cascade_node_pseudo_element(context,
+                                                      new_style,
+                                                      &*applicable_declarations_for_this_pseudo,
+                                                      data_per_pseudo.get_mut(&pseudo),
+                                                      &mut applicable_declarations_cache,
+                                                      /* shareable = */ false,
+                                                      should_animate_properties))
+            } else {
+                None
+            };
+
+            // Let's see what we had before.
+            match data_per_pseudo.entry(pseudo.clone()) {
+                Entry::Vacant(vacant_entry) => {
+                    // If we had a vacant entry, and no rules that match, we're
+                    // fine so far.
+                    if !has_declarations {
+                        return;
+                    }
+
+                    // Otherwise, we need to insert the new computed styles, and
+                    // generate a rebuild_and_reflow damage.
+                    damage = damage | Self::ConcreteRestyleDamage::rebuild_and_reflow();
+                    vacant_entry.insert(pseudo_style_if_declarations.unwrap());
+                }
+                Entry::Occupied(mut occupied_entry) => {
+                    // If there was an existing style, and no declarations, we
+                    // need to remove us from the map, and ensure we're
+                    // reconstructing.
+                    if !has_declarations {
+                        damage = damage | Self::ConcreteRestyleDamage::rebuild_and_reflow();
+                        occupied_entry.remove();
+                        return;
+                    }
+
+                    // If there's a new style, we need to diff it and add the
+                    // damage, except if the damage was already
+                    // rebuild_and_reflow, in which case we can avoid it.
+                    if damage != rebuild_and_reflow {
+                        damage = damage |
+                                 self.compute_restyle_damage(Some(occupied_entry.get()),
+                                                             pseudo_style_if_declarations.as_ref().unwrap(),
+                                                             Some(&pseudo));
+                    }
+
+                    // And now, of course, use the new style.
+                    occupied_entry.insert(pseudo_style_if_declarations.unwrap());
+                }
+            }
+        });
+
+        (damage, RestyleResult::Continue)
     }
 }
 

@@ -9,18 +9,18 @@
 
 ${helpers.predefined_type("opacity",
                           "Opacity",
-                          "1.0")}
+                          "1.0",
+                          animatable=True)}
 
-<%helpers:longhand name="box-shadow">
+<%helpers:vector_longhand name="box-shadow" allow_empty="True" animatable="True">
     use cssparser::{self, ToCss};
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
-    #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
-    pub struct SpecifiedValue(Vec<SpecifiedBoxShadow>);
-
-    #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
-    pub struct SpecifiedBoxShadow {
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+    pub struct SpecifiedValue {
         pub offset_x: specified::Length,
         pub offset_y: specified::Length,
         pub blur_radius: specified::Length,
@@ -29,24 +29,16 @@ ${helpers.predefined_type("opacity",
         pub inset: bool,
     }
 
-    impl ToCss for SpecifiedValue {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-            let mut iter = self.0.iter();
-            if let Some(shadow) = iter.next() {
-                try!(shadow.to_css(dest));
-            } else {
-                try!(dest.write_str("none"));
-                return Ok(())
-            }
-            for shadow in iter {
-                try!(dest.write_str(", "));
-                try!(shadow.to_css(dest));
-            }
-            Ok(())
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            self.offset_x.has_viewport_percentage() ||
+            self.offset_y.has_viewport_percentage() ||
+            self.blur_radius.has_viewport_percentage() ||
+            self.spread_radius.has_viewport_percentage()
         }
     }
 
-    impl ToCss for SpecifiedBoxShadow {
+    impl ToCss for SpecifiedValue {
         fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             if self.inset {
                 try!(dest.write_str("inset "));
@@ -72,11 +64,9 @@ ${helpers.predefined_type("opacity",
         use std::fmt;
         use values::computed;
 
-        #[derive(Clone, PartialEq, HeapSizeOf, Debug)]
-        pub struct T(pub Vec<BoxShadow>);
-
-        #[derive(Clone, PartialEq, Copy, HeapSizeOf, Debug)]
-        pub struct BoxShadow {
+        #[derive(Clone, PartialEq, Copy, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+        pub struct T {
             pub offset_x: Au,
             pub offset_y: Au,
             pub blur_radius: Au,
@@ -87,23 +77,6 @@ ${helpers.predefined_type("opacity",
     }
 
     impl ToCss for computed_value::T {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-            let mut iter = self.0.iter();
-            if let Some(shadow) = iter.next() {
-                try!(shadow.to_css(dest));
-            } else {
-                try!(dest.write_str("none"));
-                return Ok(())
-            }
-            for shadow in iter {
-                try!(dest.write_str(", "));
-                try!(shadow.to_css(dest));
-            }
-            Ok(())
-        }
-    }
-
-    impl ToCss for computed_value::BoxShadow {
         fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             if self.inset {
                 try!(dest.write_str("inset "));
@@ -121,44 +94,26 @@ ${helpers.predefined_type("opacity",
         }
     }
 
-    #[inline]
-    pub fn get_initial_value() -> computed_value::T {
-        computed_value::T(Vec::new())
-    }
-
-    pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
-        if input.try(|input| input.expect_ident_matching("none")).is_ok() {
-            Ok(SpecifiedValue(Vec::new()))
-        } else {
-            input.parse_comma_separated(parse_one_box_shadow).map(SpecifiedValue)
-        }
-    }
-
     impl ToComputedValue for SpecifiedValue {
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
-            computed_value::T(self.0.iter().map(|value| compute_one_box_shadow(value, context)).collect())
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
+            computed_value::T {
+                offset_x: self.offset_x.to_computed_value(context),
+                offset_y: self.offset_y.to_computed_value(context),
+                blur_radius: self.blur_radius.to_computed_value(context),
+                spread_radius: self.spread_radius.to_computed_value(context),
+                color: self.color
+                            .as_ref()
+                            .map(|color| color.parsed)
+                            .unwrap_or(cssparser::Color::CurrentColor),
+                inset: self.inset,
+            }
         }
     }
 
-    pub fn compute_one_box_shadow<Cx: TContext>(value: &SpecifiedBoxShadow, context: &Cx)
-                                  -> computed_value::BoxShadow {
-        computed_value::BoxShadow {
-            offset_x: value.offset_x.to_computed_value(context),
-            offset_y: value.offset_y.to_computed_value(context),
-            blur_radius: value.blur_radius.to_computed_value(context),
-            spread_radius: value.spread_radius.to_computed_value(context),
-            color: value.color
-                        .as_ref()
-                        .map(|color| color.parsed)
-                        .unwrap_or(cssparser::Color::CurrentColor),
-            inset: value.inset,
-        }
-    }
-
-    pub fn parse_one_box_shadow(input: &mut Parser) -> Result<SpecifiedBoxShadow, ()> {
+    pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
         use app_units::Au;
         let mut lengths = [specified::Length::Absolute(Au(0)); 4];
         let mut lengths_parsed = false;
@@ -208,7 +163,7 @@ ${helpers.predefined_type("opacity",
             return Err(())
         }
 
-        Ok(SpecifiedBoxShadow {
+        Ok(SpecifiedValue {
             offset_x: lengths[0],
             offset_y: lengths[1],
             blur_radius: lengths[2],
@@ -217,19 +172,22 @@ ${helpers.predefined_type("opacity",
             inset: inset,
         })
     }
-</%helpers:longhand>
+</%helpers:vector_longhand>
 
-<%helpers:longhand name="clip">
+// FIXME: This prop should be animatable
+<%helpers:longhand name="clip" animatable="False">
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
 
     // NB: `top` and `left` are 0 if `auto` per CSS 2.1 11.1.2.
 
     pub mod computed_value {
         use app_units::Au;
 
-        #[derive(Clone, PartialEq, Eq, Copy, Debug, HeapSizeOf)]
+        #[derive(Clone, PartialEq, Eq, Copy, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct ClipRect {
             pub top: Au,
             pub right: Option<Au>,
@@ -237,7 +195,8 @@ ${helpers.predefined_type("opacity",
             pub left: Au,
         }
 
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<ClipRect>);
     }
 
@@ -271,7 +230,17 @@ ${helpers.predefined_type("opacity",
         }
     }
 
-    #[derive(Clone, Debug, PartialEq, Copy, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedClipRect {
+        fn has_viewport_percentage(&self) -> bool {
+            self.top.has_viewport_percentage() ||
+            self.right.map_or(false, |x| x.has_viewport_percentage()) ||
+            self.bottom.map_or(false, |x| x.has_viewport_percentage()) ||
+            self.left.has_viewport_percentage()
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Copy)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedClipRect {
         pub top: specified::Length,
         pub right: Option<specified::Length>,
@@ -279,7 +248,15 @@ ${helpers.predefined_type("opacity",
         pub left: specified::Length,
     }
 
-    #[derive(Clone, Debug, PartialEq, Copy, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            let &SpecifiedValue(clip) = self;
+            clip.map_or(false, |x| x.has_viewport_percentage())
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Copy)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue(Option<SpecifiedClipRect>);
 
     impl ToCss for SpecifiedClipRect {
@@ -329,7 +306,7 @@ ${helpers.predefined_type("opacity",
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             computed_value::T(self.0.map(|value| computed_value::ClipRect {
                 top: value.top.to_computed_value(context),
                 right: value.right.map(|right| right.to_computed_value(context)),
@@ -386,19 +363,39 @@ ${helpers.predefined_type("opacity",
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="filter">
+// FIXME: This prop should be animatable
+<%helpers:longhand name="filter" animatable="False">
     //pub use self::computed_value::T as SpecifiedValue;
     use cssparser::ToCss;
     use std::fmt;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
     use values::CSSFloat;
+    use values::HasViewportPercentage;
     use values::specified::{Angle, Length};
 
-    #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            let &SpecifiedValue(ref vec) = self;
+            vec.iter().any(|ref x| x.has_viewport_percentage())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue(Vec<SpecifiedFilter>);
 
+    impl HasViewportPercentage for SpecifiedFilter {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedFilter::Blur(length) => length.has_viewport_percentage(),
+                _ => false
+            }
+        }
+    }
+
     // TODO(pcwalton): `drop-shadow`
-    #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
+    #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedFilter {
         Blur(Length),
         Brightness(CSSFloat),
@@ -416,7 +413,8 @@ ${helpers.predefined_type("opacity",
         use values::CSSFloat;
         use values::specified::{Angle};
 
-        #[derive(Clone, PartialEq, Debug, HeapSizeOf, Deserialize, Serialize)]
+        #[derive(Clone, PartialEq, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
         pub enum Filter {
             Blur(Au),
             Brightness(CSSFloat),
@@ -429,7 +427,8 @@ ${helpers.predefined_type("opacity",
             Sepia(CSSFloat),
         }
 
-        #[derive(Clone, PartialEq, Debug, HeapSizeOf, Deserialize, Serialize)]
+        #[derive(Clone, PartialEq, Debug)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
         pub struct T { pub filters: Vec<Filter> }
 
         impl T {
@@ -599,7 +598,7 @@ ${helpers.predefined_type("opacity",
     impl ToComputedValue for SpecifiedValue {
         type ComputedValue = computed_value::T;
 
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             computed_value::T{ filters: self.0.iter().map(|value| {
                 match *value {
                     SpecifiedFilter::Blur(factor) =>
@@ -618,9 +617,10 @@ ${helpers.predefined_type("opacity",
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="transform">
+<%helpers:longhand name="transform" animatable="True">
     use app_units::Au;
     use values::CSSFloat;
+    use values::HasViewportPercentage;
 
     use cssparser::ToCss;
     use std::fmt;
@@ -629,7 +629,8 @@ ${helpers.predefined_type("opacity",
         use values::CSSFloat;
         use values::computed;
 
-        #[derive(Clone, Copy, Debug, PartialEq, HeapSizeOf)]
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct ComputedMatrix {
             pub m11: CSSFloat, pub m12: CSSFloat, pub m13: CSSFloat, pub m14: CSSFloat,
             pub m21: CSSFloat, pub m22: CSSFloat, pub m23: CSSFloat, pub m24: CSSFloat,
@@ -648,7 +649,8 @@ ${helpers.predefined_type("opacity",
             }
         }
 
-        #[derive(Clone, Debug, PartialEq, HeapSizeOf)]
+        #[derive(Clone, Debug, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub enum ComputedOperation {
             Matrix(ComputedMatrix),
             Skew(computed::Angle, computed::Angle),
@@ -660,7 +662,8 @@ ${helpers.predefined_type("opacity",
             Perspective(computed::Length),
         }
 
-        #[derive(Clone, Debug, PartialEq, HeapSizeOf)]
+        #[derive(Clone, Debug, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<Vec<ComputedOperation>>);
     }
 
@@ -695,7 +698,8 @@ ${helpers.predefined_type("opacity",
         Ok((first, second))
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, HeapSizeOf)]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     enum TranslateKind {
         Translate,
         TranslateX,
@@ -704,7 +708,8 @@ ${helpers.predefined_type("opacity",
         Translate3D,
     }
 
-    #[derive(Clone, Debug, PartialEq, HeapSizeOf)]
+    #[derive(Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     enum SpecifiedOperation {
         Matrix(SpecifiedMatrix),
         Skew(specified::Angle, specified::Angle),
@@ -721,6 +726,20 @@ ${helpers.predefined_type("opacity",
         fn to_css<W>(&self, _: &mut W) -> fmt::Result where W: fmt::Write {
             // TODO(pcwalton)
             Ok(())
+        }
+    }
+
+    impl HasViewportPercentage for SpecifiedOperation {
+        fn has_viewport_percentage(&self) -> bool {
+            match *self {
+                SpecifiedOperation::Translate(_, l1, l2, l3) => {
+                    l1.has_viewport_percentage() ||
+                    l2.has_viewport_percentage() ||
+                    l3.has_viewport_percentage()
+                },
+                SpecifiedOperation::Perspective(length) => length.has_viewport_percentage(),
+                _ => false
+            }
         }
     }
 
@@ -783,7 +802,15 @@ ${helpers.predefined_type("opacity",
         }
     }
 
-    #[derive(Clone, Debug, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            let &SpecifiedValue(ref specified_ops) = self;
+            specified_ops.iter().any(|ref x| x.has_viewport_percentage())
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue(Vec<SpecifiedOperation>);
 
     impl ToCss for SpecifiedValue {
@@ -1037,7 +1064,7 @@ ${helpers.predefined_type("opacity",
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             if self.0.is_empty() {
                 return computed_value::T(None)
             }
@@ -1156,15 +1183,23 @@ pub fn parse_origin(_: &ParserContext, input: &mut Parser) -> Result<OriginParse
     }
 }
 
-${helpers.single_keyword("backface-visibility", "visible hidden")}
+${helpers.single_keyword("backface-visibility",
+                         "visible hidden",
+                         animatable=False)}
 
-${helpers.single_keyword("transform-box", "border-box fill-box view-box", products="gecko")}
+${helpers.single_keyword("transform-box",
+                         "border-box fill-box view-box",
+                         products="gecko",
+                         animatable=False)}
 
-${helpers.single_keyword("transform-style", "auto flat preserve-3d")}
+${helpers.single_keyword("transform-style",
+                         "auto flat preserve-3d",
+                         animatable=False)}
 
-<%helpers:longhand name="transform-origin">
+<%helpers:longhand name="transform-origin" animatable="True">
     use app_units::Au;
-    use values::AuExtensionMethods;
+    use values::LocalToCss;
+    use values::HasViewportPercentage;
     use values::specified::{Length, LengthOrPercentage, Percentage};
 
     use cssparser::ToCss;
@@ -1173,7 +1208,8 @@ ${helpers.single_keyword("transform-style", "auto flat preserve-3d")}
     pub mod computed_value {
         use values::computed::{Length, LengthOrPercentage};
 
-        #[derive(Clone, Copy, Debug, PartialEq, HeapSizeOf)]
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T {
             pub horizontal: LengthOrPercentage,
             pub vertical: LengthOrPercentage,
@@ -1181,7 +1217,16 @@ ${helpers.single_keyword("transform-style", "auto flat preserve-3d")}
         }
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            self.horizontal.has_viewport_percentage() ||
+            self.vertical.has_viewport_percentage() ||
+            self.depth.has_viewport_percentage()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue {
         horizontal: LengthOrPercentage,
         vertical: LengthOrPercentage,
@@ -1230,7 +1275,7 @@ ${helpers.single_keyword("transform-style", "auto flat preserve-3d")}
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             computed_value::T {
                 horizontal: self.horizontal.to_computed_value(context),
                 vertical: self.vertical.to_computed_value(context),
@@ -1241,10 +1286,13 @@ ${helpers.single_keyword("transform-style", "auto flat preserve-3d")}
 </%helpers:longhand>
 
 ${helpers.predefined_type("perspective",
-                  "LengthOrNone",
-                  "computed::LengthOrNone::None")}
+                          "LengthOrNone",
+                          "computed::LengthOrNone::None",
+                          animatable=True)}
 
-<%helpers:longhand name="perspective-origin">
+// FIXME: This prop should be animatable
+<%helpers:longhand name="perspective-origin" animatable="False">
+    use values::HasViewportPercentage;
     use values::specified::{LengthOrPercentage, Percentage};
 
     use cssparser::ToCss;
@@ -1253,7 +1301,8 @@ ${helpers.predefined_type("perspective",
     pub mod computed_value {
         use values::computed::LengthOrPercentage;
 
-        #[derive(Clone, Copy, Debug, PartialEq, HeapSizeOf)]
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T {
             pub horizontal: LengthOrPercentage,
             pub vertical: LengthOrPercentage,
@@ -1268,7 +1317,14 @@ ${helpers.predefined_type("perspective",
         }
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, HeapSizeOf)]
+    impl HasViewportPercentage for SpecifiedValue {
+        fn has_viewport_percentage(&self) -> bool {
+            self.horizontal.has_viewport_percentage() || self.vertical.has_viewport_percentage()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue {
         horizontal: LengthOrPercentage,
         vertical: LengthOrPercentage,
@@ -1305,7 +1361,7 @@ ${helpers.predefined_type("perspective",
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, context: &Context) -> computed_value::T {
             computed_value::T {
                 horizontal: self.horizontal.to_computed_value(context),
                 vertical: self.vertical.to_computed_value(context),
@@ -1315,6 +1371,7 @@ ${helpers.predefined_type("perspective",
 </%helpers:longhand>
 
 ${helpers.single_keyword("mix-blend-mode",
-                 """normal multiply screen overlay darken lighten color-dodge
-                    color-burn hard-light soft-light difference exclusion hue
-                    saturation color luminosity""", gecko_constant_prefix="NS_STYLE_BLEND")}
+                         """normal multiply screen overlay darken lighten color-dodge
+                            color-burn hard-light soft-light difference exclusion hue
+                            saturation color luminosity""", gecko_constant_prefix="NS_STYLE_BLEND",
+                         animatable=False)}

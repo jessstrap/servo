@@ -32,18 +32,19 @@ use range::Range;
 use std::default::Default;
 use std::{f32, mem, ptr};
 use style::computed_values::{border_style, filter, image_rendering, mix_blend_mode};
+use style_traits::PagePx;
 use text::TextRun;
 use text::glyph::ByteIndex;
-use util::geometry::{self, MAX_RECT, PagePx, ScreenPx};
+use util::geometry::{self, max_rect, ScreenPx};
 use util::opts;
 
 pub struct PaintContext<'a> {
     pub draw_target: DrawTarget,
     pub font_context: &'a mut Box<FontContext>,
     /// The rectangle that this context encompasses in page coordinates.
-    pub page_rect: TypedRect<PagePx, f32>,
+    pub page_rect: TypedRect<f32, PagePx>,
     /// The rectangle that this context encompasses in screen coordinates (pixels).
-    pub screen_rect: TypedRect<ScreenPx, usize>,
+    pub screen_rect: TypedRect<usize, ScreenPx>,
     /// The clipping rect for the stacking context as a whole.
     pub clip_rect: Option<Rect<Au>>,
     /// The current transient clipping region, if any. A "transient clipping region" is the
@@ -52,6 +53,10 @@ pub struct PaintContext<'a> {
     pub transient_clip: Option<ClippingRegion>,
     /// A temporary hack to disable clipping optimizations on 3d layers.
     pub layer_kind: LayerKind,
+    /// The current subpixel offset, used to make pixel snapping aware of accumulated subpixels
+    /// from the StackingContext.
+    /// TODO: Eventually this should be added to all points handled by the PaintContext.
+    pub subpixel_offset: Point2D<Au>,
 }
 
 #[derive(Copy, Clone)]
@@ -117,8 +122,12 @@ struct CornerOrigin {
 }
 
 impl<'a> PaintContext<'a> {
-    pub fn screen_pixels_per_px(&self) -> ScaleFactor<PagePx, ScreenPx, f32> {
-        self.screen_rect.as_f32().size.width / self.page_rect.size.width
+    pub fn to_nearest_azure_rect(&self, rect: &Rect<Au>) -> Rect<AzFloat> {
+        rect.translate(&self.subpixel_offset).to_nearest_azure_rect(self.screen_pixels_per_px())
+    }
+
+    pub fn screen_pixels_per_px(&self) -> ScaleFactor<f32, PagePx, ScreenPx> {
+        ScaleFactor::new(self.screen_rect.as_f32().size.width / self.page_rect.size.width)
     }
 
     pub fn draw_target(&self) -> &DrawTarget {
@@ -127,7 +136,7 @@ impl<'a> PaintContext<'a> {
 
     pub fn draw_solid_color(&self, bounds: &Rect<Au>, color: Color) {
         self.draw_target.make_current();
-        self.draw_target.fill_rect(&bounds.to_nearest_azure_rect(self.screen_pixels_per_px()),
+        self.draw_target.fill_rect(&self.to_nearest_azure_rect(&bounds),
                                    PatternRef::Color(&ColorPattern::new(color)),
                                    None);
     }
@@ -155,7 +164,7 @@ impl<'a> PaintContext<'a> {
     }
 
     pub fn draw_push_clip(&self, bounds: &Rect<Au>) {
-        let rect = bounds.to_nearest_azure_rect(self.screen_pixels_per_px());
+        let rect = self.to_nearest_azure_rect(bounds);
         let path_builder = self.draw_target.create_path_builder();
 
         let left_top = Point2D::new(rect.origin.x, rect.origin.y);
@@ -206,7 +215,7 @@ impl<'a> PaintContext<'a> {
         let source_rect = Rect::new(Point2D::new(0.0, 0.0),
                                     Size2D::new(image_info.width as AzFloat,
                                                 image_info.height as AzFloat));
-        let dest_rect = bounds.to_nearest_azure_rect(scale);
+        let dest_rect = self.to_nearest_azure_rect(bounds);
 
         // TODO(pcwalton): According to CSS-IMAGES-3 § 5.3, nearest-neighbor interpolation is a
         // conforming implementation of `crisp-edges`, but it is not the best we could do.
@@ -1122,7 +1131,7 @@ impl<'a> PaintContext<'a> {
                                   radius: &BorderRadii<AzFloat>,
                                   color: Color,
                                   dash_size: DashSize) {
-        let rect = bounds.to_nearest_azure_rect(self.screen_pixels_per_px());
+        let rect = self.to_nearest_azure_rect(bounds);
         let draw_opts = DrawOptions::new(1.0, CompositionOp::Over, AntialiasMode::None);
         let border_width = match direction {
             Direction::Top => border.top,
@@ -1190,7 +1199,7 @@ impl<'a> PaintContext<'a> {
                                  border: &SideOffsets2D<f32>,
                                  radius: &BorderRadii<AzFloat>,
                                  color: Color) {
-        let rect = bounds.to_nearest_azure_rect(self.screen_pixels_per_px());
+        let rect = self.to_nearest_azure_rect(bounds);
         self.draw_border_path(&rect, direction, border, radius, color);
     }
 
@@ -1198,7 +1207,7 @@ impl<'a> PaintContext<'a> {
                              bounds: &Rect<Au>,
                              border: &SideOffsets2D<f32>,
                              shrink_factor: f32) -> Rect<f32> {
-        let rect            = bounds.to_nearest_azure_rect(self.screen_pixels_per_px());
+        let rect            = self.to_nearest_azure_rect(bounds);
         let scaled_border   = SideOffsets2D::new(shrink_factor * border.top,
                                                  shrink_factor * border.right,
                                                  shrink_factor * border.bottom,
@@ -1337,24 +1346,26 @@ impl<'a> PaintContext<'a> {
     pub fn draw_text(&mut self, text: &TextDisplayItem) {
         let draw_target_transform = self.draw_target.get_transform();
 
+        let origin = text.baseline_origin + self.subpixel_offset;
+
         // Optimization: Don’t set a transform matrix for upright text, and pass a start point to
         // `draw_text_into_context`.
         //
         // For sideways text, it’s easier to do the rotation such that its center (the baseline’s
         // start point) is at (0, 0) coordinates.
         let baseline_origin = match text.orientation {
-            Upright => text.baseline_origin,
+            Upright => origin,
             SidewaysLeft => {
-                let x = text.baseline_origin.x.to_f32_px();
-                let y = text.baseline_origin.y.to_f32_px();
+                let x = origin.x.to_f32_px();
+                let y = origin.y.to_f32_px();
                 self.draw_target.set_transform(&draw_target_transform.mul(&Matrix2D::new(0., -1.,
                                                                                          1., 0.,
                                                                                          x, y)));
                 Point2D::zero()
             }
             SidewaysRight => {
-                let x = text.baseline_origin.x.to_f32_px();
-                let y = text.baseline_origin.y.to_f32_px();
+                let x = origin.x.to_f32_px();
+                let y = origin.y.to_f32_px();
                 self.draw_target.set_transform(&draw_target_transform.mul(&Matrix2D::new(0., 1.,
                                                                                          -1., 0.,
                                                                                          x, y)));
@@ -1381,10 +1392,7 @@ impl<'a> PaintContext<'a> {
         // Blur, if necessary.
         self.blur_if_necessary(temporary_draw_target, text.blur_radius);
 
-        // Undo the transform, only when we did one.
-        if text.orientation != Upright {
-            self.draw_target.set_transform(&draw_target_transform)
-        }
+        self.draw_target.set_transform(&draw_target_transform)
     }
 
     /// Draws a linear gradient in the given boundaries from the given start point to the given end
@@ -1402,7 +1410,7 @@ impl<'a> PaintContext<'a> {
                                                  &end_point.to_nearest_azure_point(scale),
                                                  stops,
                                                  &Matrix2D::identity());
-        self.draw_target.fill_rect(&bounds.to_nearest_azure_rect(scale),
+        self.draw_target.fill_rect(&self.to_nearest_azure_rect(&bounds),
                                    PatternRef::LinearGradient(&pattern),
                                    None);
     }
@@ -1531,7 +1539,7 @@ impl<'a> PaintContext<'a> {
         match clip_mode {
             BoxShadowClipMode::Inset => {
                 path = temporary_draw_target.draw_target
-                                            .create_rectangular_border_path(&MAX_RECT,
+                                            .create_rectangular_border_path(&max_rect(),
                                                                             &shadow_bounds,
                                                                             pixels_per_px);
                 self.draw_target.push_clip(
@@ -1541,7 +1549,7 @@ impl<'a> PaintContext<'a> {
                 path = temporary_draw_target.draw_target.create_rectangular_path(&shadow_bounds,
                                                                                 pixels_per_px);
                 self.draw_target.push_clip(
-                    &self.draw_target.create_rectangular_border_path(&MAX_RECT, box_bounds,
+                    &self.draw_target.create_rectangular_border_path(&max_rect(), box_bounds,
                                                                      pixels_per_px))
             }
             BoxShadowClipMode::None => {
@@ -1628,7 +1636,7 @@ impl<'a> PaintContext<'a> {
         self.draw_push_clip(&clip_region.main);
         for complex_region in &clip_region.complex {
             // FIXME(pcwalton): Actually draw a rounded rect.
-            self.push_rounded_rect_clip(&complex_region.rect.to_nearest_azure_rect(scale),
+            self.push_rounded_rect_clip(&self.to_nearest_azure_rect(&complex_region.rect),
                                         &complex_region.radii.to_radii_pixels(scale))
         }
         self.transient_clip = Some(clip_region)
@@ -1636,12 +1644,12 @@ impl<'a> PaintContext<'a> {
 }
 
 pub trait ToAzurePoint {
-    fn to_nearest_azure_point(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Point2D<AzFloat>;
+    fn to_nearest_azure_point(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Point2D<AzFloat>;
     fn to_azure_point(&self) -> Point2D<AzFloat>;
 }
 
 impl ToAzurePoint for Point2D<Au> {
-    fn to_nearest_azure_point(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Point2D<AzFloat> {
+    fn to_nearest_azure_point(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Point2D<AzFloat> {
         Point2D::new(self.x.to_nearest_pixel(pixels_per_px.get()) as AzFloat,
                      self.y.to_nearest_pixel(pixels_per_px.get()) as AzFloat)
     }
@@ -1651,15 +1659,15 @@ impl ToAzurePoint for Point2D<Au> {
 }
 
 pub trait ToAzureRect {
-    fn to_nearest_azure_rect(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Rect<AzFloat>;
-    fn to_nearest_non_empty_azure_rect(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Rect<AzFloat>;
+    fn to_nearest_azure_rect(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Rect<AzFloat>;
+    fn to_nearest_non_empty_azure_rect(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Rect<AzFloat>;
     fn to_azure_rect(&self) -> Rect<AzFloat>;
 }
 
 impl ToAzureRect for Rect<Au> {
     /// Round rects to pixel coordinates, maintaining the invariant of non-overlap,
     /// assuming that before rounding rects don't overlap.
-    fn to_nearest_azure_rect(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Rect<AzFloat> {
+    fn to_nearest_azure_rect(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Rect<AzFloat> {
         // Rounding the top left corner to the nearest pixel with the size rounded
         // to the nearest pixel multiple would violate the non-overlap condition,
         // e.g.
@@ -1679,7 +1687,7 @@ impl ToAzureRect for Rect<Au> {
     /// 10px×0.6px at 0px,28.56px -> 10px×0px at 0px,29px
     /// Instead round the top left to the nearest pixel and the size to the nearest pixel
     /// multiple. It's possible for non-overlapping rects after this rounding to overlap.
-    fn to_nearest_non_empty_azure_rect(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Rect<AzFloat> {
+    fn to_nearest_non_empty_azure_rect(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Rect<AzFloat> {
         Rect::new(self.origin.to_nearest_azure_point(pixels_per_px),
                   self.size.to_nearest_azure_size(pixels_per_px))
     }
@@ -1690,11 +1698,11 @@ impl ToAzureRect for Rect<Au> {
 }
 
 pub trait ToNearestAzureSize {
-    fn to_nearest_azure_size(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Size2D<AzFloat>;
+    fn to_nearest_azure_size(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Size2D<AzFloat>;
 }
 
 impl ToNearestAzureSize for Size2D<Au> {
-    fn to_nearest_azure_size(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Size2D<AzFloat> {
+    fn to_nearest_azure_size(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Size2D<AzFloat> {
         Size2D::new(self.width.to_nearest_pixel(pixels_per_px.get()) as AzFloat,
                     self.height.to_nearest_pixel(pixels_per_px.get()) as AzFloat)
     }
@@ -1727,11 +1735,11 @@ impl ToAzureIntSize for Size2D<AzFloat> {
 }
 
 trait ToSideOffsetsPixels {
-    fn to_float_pixels(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> SideOffsets2D<AzFloat>;
+    fn to_float_pixels(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> SideOffsets2D<AzFloat>;
 }
 
 impl ToSideOffsetsPixels for SideOffsets2D<Au> {
-    fn to_float_pixels(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> SideOffsets2D<AzFloat> {
+    fn to_float_pixels(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> SideOffsets2D<AzFloat> {
         SideOffsets2D::new(self.top.to_nearest_pixel(pixels_per_px.get()) as AzFloat,
                            self.right.to_nearest_pixel(pixels_per_px.get()) as AzFloat,
                            self.bottom.to_nearest_pixel(pixels_per_px.get()) as AzFloat,
@@ -1740,24 +1748,24 @@ impl ToSideOffsetsPixels for SideOffsets2D<Au> {
 }
 
 trait ToRadiiPixels {
-    fn to_radii_pixels(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> BorderRadii<AzFloat>;
+    fn to_radii_pixels(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> BorderRadii<AzFloat>;
 }
 
 impl ToRadiiPixels for BorderRadii<Au> {
-    fn to_radii_pixels(&self, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> BorderRadii<AzFloat> {
+    fn to_radii_pixels(&self, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> BorderRadii<AzFloat> {
         let to_nearest_px = |x: Au| -> AzFloat {
             x.to_nearest_pixel(pixels_per_px.get()) as AzFloat
         };
 
         BorderRadii {
-            top_left: Size2D { width: to_nearest_px(self.top_left.width),
-                               height: to_nearest_px(self.top_left.height) },
-            top_right: Size2D { width: to_nearest_px(self.top_right.width),
-                                height: to_nearest_px(self.top_right.height) },
-            bottom_left: Size2D { width: to_nearest_px(self.bottom_left.width),
-                                  height: to_nearest_px(self.bottom_left.height) },
-            bottom_right: Size2D { width: to_nearest_px(self.bottom_right.width),
-                                   height: to_nearest_px(self.bottom_right.height) },
+            top_left: Size2D::new(to_nearest_px(self.top_left.width),
+                                  to_nearest_px(self.top_left.height)),
+            top_right: Size2D::new(to_nearest_px(self.top_right.width),
+                                   to_nearest_px(self.top_right.height)),
+            bottom_left: Size2D::new(to_nearest_px(self.bottom_left.width),
+                                     to_nearest_px(self.bottom_left.height)),
+            bottom_right: Size2D::new(to_nearest_px(self.bottom_right.width),
+                                      to_nearest_px(self.bottom_right.height)),
        }
     }
 }
@@ -1788,8 +1796,11 @@ impl ScaledFontExtensionMethods for ScaledFont {
         let mut options = struct__AzDrawOptions {
             mAlpha: 1f64 as AzFloat,
             mCompositionOp: CompositionOp::Over as u8,
-            mAntialiasMode: if antialias { AntialiasMode::Subpixel as u8 }
-                            else { AntialiasMode::None as u8 }
+            mAntialiasMode: if antialias {
+                                AntialiasMode::Subpixel as u8
+                            } else {
+                                AntialiasMode::None as u8
+                            }
         };
 
         let mut origin = baseline_origin.clone();
@@ -1852,17 +1863,17 @@ trait DrawTargetExtensions {
     fn create_rectangular_border_path(&self,
                                       outer_rect: &Rect<Au>,
                                       inner_rect: &Rect<Au>,
-                                      pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Path;
+                                      pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Path;
 
     /// Creates and returns a path that represents a rectangle.
-    fn create_rectangular_path(&self, rect: &Rect<Au>, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Path;
+    fn create_rectangular_path(&self, rect: &Rect<Au>, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Path;
 }
 
 impl DrawTargetExtensions for DrawTarget {
     fn create_rectangular_border_path(&self,
                                       outer_rect: &Rect<Au>,
                                       inner_rect: &Rect<Au>,
-                                      pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Path {
+                                      pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Path {
         // +-----------+
         // |2          |1
         // |           |
@@ -1891,7 +1902,7 @@ impl DrawTargetExtensions for DrawTarget {
         path_builder.finish()
     }
 
-    fn create_rectangular_path(&self, rect: &Rect<Au>, pixels_per_px: ScaleFactor<PagePx, ScreenPx, f32>) -> Path {
+    fn create_rectangular_path(&self, rect: &Rect<Au>, pixels_per_px: ScaleFactor<f32, PagePx, ScreenPx>) -> Path {
         // Explicitly round to the nearest non-empty rect because when drawing
         // box-shadow the rect height can be between 0.5px & 1px and could
         // otherwise round to an empty rect.

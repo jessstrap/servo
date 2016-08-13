@@ -22,12 +22,14 @@ use dom::virtualmethods::VirtualMethods;
 use encoding::EncodingRef;
 use encoding::all::UTF_8;
 use hyper::header::ContentType;
+use hyper::http::RawStatus;
 use hyper::mime::{Mime, TopLevel, SubLevel};
+use hyper_serde::Serde;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use layout_interface::Msg;
 use net_traits::{AsyncResponseListener, AsyncResponseTarget, Metadata, NetworkError};
 use network_listener::{NetworkListener, PreInvoke};
+use script_layout_interface::message::Msg;
 use script_traits::{MozBrowserEvent, ScriptMsg as ConstellationMsg};
 use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
@@ -39,10 +41,9 @@ use string_cache::Atom;
 use style::attr::AttrValue;
 use style::media_queries::{MediaQueryList, parse_media_query_list};
 use style::parser::ParserContextExtraData;
-use style::servo::Stylesheet;
-use style::stylesheets::Origin;
+use style::str::HTML_SPACE_CHARACTERS;
+use style::stylesheets::{Stylesheet, Origin};
 use url::Url;
-use util::str::HTML_SPACE_CHARACTERS;
 
 no_jsmanaged_fields!(Stylesheet);
 
@@ -72,8 +73,9 @@ impl HTMLLinkElement {
                prefix: Option<DOMString>,
                document: &Document,
                creator: ElementCreator) -> Root<HTMLLinkElement> {
-        let element = HTMLLinkElement::new_inherited(localName, prefix, document, creator);
-        Node::reflect_node(box element, document, HTMLLinkElementBinding::Wrap)
+        Node::reflect_node(box HTMLLinkElement::new_inherited(localName, prefix, document, creator),
+                           document,
+                           HTMLLinkElementBinding::Wrap)
     }
 
     pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
@@ -194,6 +196,10 @@ impl VirtualMethods for HTMLLinkElement {
 impl HTMLLinkElement {
     fn handle_stylesheet_url(&self, href: &str) {
         let document = document_from_node(self);
+        if document.browsing_context().is_none() {
+            return;
+        }
+
         match document.base_url().join(href) {
             Ok(url) => {
                 let element = self.upcast::<Element>();
@@ -222,12 +228,13 @@ impl HTMLLinkElement {
                 let listener = NetworkListener {
                     context: context,
                     script_chan: document.window().networking_task_source(),
+                    wrapper: Some(document.window().get_runnable_wrapper()),
                 };
                 let response_target = AsyncResponseTarget {
                     sender: action_sender,
                 };
                 ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
-                    listener.notify(message.to().unwrap());
+                    listener.notify_action(message.to().unwrap());
                 });
 
                 if self.parser_inserted.get() {
@@ -276,7 +283,7 @@ impl AsyncResponseListener for StylesheetContext {
     fn headers_available(&mut self, metadata: Result<Metadata, NetworkError>) {
         self.metadata = metadata.ok();
         if let Some(ref meta) = self.metadata {
-            if let Some(ContentType(Mime(TopLevel::Text, SubLevel::Css, _))) = meta.content_type {
+            if let Some(Serde(ContentType(Mime(TopLevel::Text, SubLevel::Css, _)))) = meta.content_type {
             } else {
                 self.elem.root().upcast::<EventTarget>().fire_simple_event("error");
             }
@@ -289,44 +296,57 @@ impl AsyncResponseListener for StylesheetContext {
     }
 
     fn response_complete(&mut self, status: Result<(), NetworkError>) {
-        if status.is_err() {
-            self.elem.root().upcast::<EventTarget>().fire_simple_event("error");
-            return;
-        }
-        let data = mem::replace(&mut self.data, vec!());
-        let metadata = match self.metadata.take() {
-            Some(meta) => meta,
-            None => return,
-        };
-        // TODO: Get the actual value. http://dev.w3.org/csswg/css-syntax/#environment-encoding
-        let environment_encoding = UTF_8 as EncodingRef;
-        let protocol_encoding_label = metadata.charset.as_ref().map(|s| &**s);
-        let final_url = metadata.final_url;
-
         let elem = self.elem.root();
-        let win = window_from_node(&*elem);
+        let document = document_from_node(&*elem);
+        let mut successful = false;
 
-        let mut sheet = Stylesheet::from_bytes(&data, final_url, protocol_encoding_label,
-                                               Some(environment_encoding), Origin::Author,
-                                               win.css_error_reporter(),
-                                               ParserContextExtraData::default());
-        let media = self.media.take().unwrap();
-        sheet.set_media(Some(media));
-        let sheet = Arc::new(sheet);
+        if status.is_ok() {
+            let metadata = match self.metadata.take() {
+                Some(meta) => meta,
+                None => return,
+            };
+            let is_css = metadata.content_type.map_or(false, |Serde(ContentType(Mime(top, sub, _)))|
+                top == TopLevel::Text && sub == SubLevel::Css);
 
-        let elem = elem.r();
-        let document = document_from_node(elem);
-        let document = document.r();
+            let data = if is_css { mem::replace(&mut self.data, vec!()) } else { vec!() };
 
-        let win = window_from_node(elem);
-        win.layout_chan().send(Msg::AddStylesheet(sheet.clone())).unwrap();
+            // TODO: Get the actual value. http://dev.w3.org/csswg/css-syntax/#environment-encoding
+            let environment_encoding = UTF_8 as EncodingRef;
+            let protocol_encoding_label = metadata.charset.as_ref().map(|s| &**s);
+            let final_url = metadata.final_url;
 
-        *elem.stylesheet.borrow_mut() = Some(sheet);
-        document.invalidate_stylesheets();
+            let win = window_from_node(&*elem);
+
+            let mut sheet = Stylesheet::from_bytes(&data, final_url, protocol_encoding_label,
+                                                   Some(environment_encoding), Origin::Author,
+                                                   win.css_error_reporter(),
+                                                   ParserContextExtraData::default());
+            let media = self.media.take().unwrap();
+            sheet.set_media(Some(media));
+            let sheet = Arc::new(sheet);
+
+            let elem = elem.r();
+            let document = document.r();
+
+            let win = window_from_node(elem);
+            win.layout_chan().send(Msg::AddStylesheet(sheet.clone())).unwrap();
+
+            *elem.stylesheet.borrow_mut() = Some(sheet);
+            document.invalidate_stylesheets();
+
+            // FIXME: Revisit once consensus is reached at: https://github.com/whatwg/html/issues/1142
+            successful = metadata.status.map_or(false, |Serde(RawStatus(code, _))| code == 200);
+        }
+
         if elem.parser_inserted.get() {
             document.decrement_script_blocking_stylesheet_count();
         }
+
         document.finish_load(LoadType::Stylesheet(self.url.clone()));
+
+        let event = if successful { "load" } else { "error" };
+
+        elem.upcast::<EventTarget>().fire_simple_event(event);
     }
 }
 

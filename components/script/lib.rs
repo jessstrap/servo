@@ -10,7 +10,6 @@
 #![feature(custom_attribute)]
 #![feature(custom_derive)]
 #![feature(fnbox)]
-#![feature(iter_arith)]
 #![feature(mpsc_select)]
 #![feature(nonzero)]
 #![feature(on_unimplemented)]
@@ -19,6 +18,7 @@
 #![feature(slice_patterns)]
 #![feature(stmt_expr_attributes)]
 #![feature(question_mark)]
+#![feature(try_from)]
 
 #![deny(unsafe_code)]
 #![allow(non_snake_case)]
@@ -34,9 +34,9 @@ extern crate app_units;
 #[allow(unused_extern_crates)]
 #[macro_use]
 extern crate bitflags;
-extern crate canvas;
 extern crate canvas_traits;
 extern crate caseless;
+extern crate cookie as cookie_rs;
 extern crate core;
 #[macro_use]
 extern crate cssparser;
@@ -48,14 +48,17 @@ extern crate gfx_traits;
 extern crate heapsize;
 extern crate html5ever;
 extern crate hyper;
+extern crate hyper_serde;
 extern crate image;
 extern crate ipc_channel;
+#[macro_use]
 extern crate js;
 extern crate libc;
 #[macro_use]
 extern crate log;
 #[macro_use]
 extern crate mime;
+extern crate mime_guess;
 extern crate msg;
 extern crate net_traits;
 extern crate num_traits;
@@ -65,10 +68,12 @@ extern crate phf;
 #[macro_use]
 extern crate profile_traits;
 extern crate rand;
+extern crate range;
 extern crate ref_filter_map;
 extern crate ref_slice;
 extern crate regex;
 extern crate rustc_serialize;
+extern crate script_layout_interface;
 extern crate script_traits;
 extern crate selectors;
 extern crate serde;
@@ -77,34 +82,33 @@ extern crate smallvec;
 #[macro_use]
 extern crate style;
 extern crate time;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 extern crate tinyfiledialogs;
-extern crate unicase;
 extern crate url;
 #[macro_use]
 extern crate util;
 extern crate uuid;
+#[cfg(not(any(target_os = "android", target_arch = "arm", target_arch = "aarch64")))]
+extern crate video_metadata;
 extern crate webrender_traits;
 extern crate websocket;
 extern crate xml5ever;
 
-mod blob_url_store;
 pub mod bluetooth_blacklist;
 pub mod clipboard_provider;
-pub mod cors;
 mod devtools;
 pub mod document_loader;
 #[macro_use]
 pub mod dom;
-pub mod layout_interface;
+pub mod layout_wrapper;
 mod mem;
 mod network_listener;
 pub mod origin;
 pub mod parse;
-pub mod reporter;
 pub mod script_runtime;
 #[allow(unsafe_code)]
 pub mod script_thread;
+mod serviceworker_manager;
 mod task_source;
 pub mod textinput;
 mod timers;
@@ -113,6 +117,8 @@ mod webdriver_handlers;
 
 use dom::bindings::codegen::RegisterBindings;
 use js::jsapi::{Handle, JSContext, JSObject, SetDOMProxyInformation};
+use script_traits::SWManagerSenders;
+use serviceworker_manager::ServiceWorkerManager;
 use std::ptr;
 use util::opts;
 
@@ -158,10 +164,13 @@ fn perform_platform_specific_initialization() {
 fn perform_platform_specific_initialization() {}
 
 #[allow(unsafe_code)]
-pub fn init() {
+pub fn init(sw_senders: SWManagerSenders) {
     unsafe {
         SetDOMProxyInformation(ptr::null(), 0, Some(script_thread::shadow_check_callback));
     }
+
+    // Spawn the service worker manager passing the constellation sender
+    ServiceWorkerManager::spawn_manager(sw_senders);
 
     // Create the global vtables used by the (generated) DOM
     // bindings to implement JS proxies.
@@ -179,4 +188,3 @@ pub fn init() {
 pub unsafe fn script_can_initiate_scroll(_: *mut JSContext, _: Handle<*mut JSObject>) -> bool {
     !opts::get().use_webrender
 }
-

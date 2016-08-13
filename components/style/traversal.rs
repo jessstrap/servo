@@ -2,19 +2,31 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! Traversing the DOM tree; the bloom filter.
+
+use animation;
 use context::{SharedStyleContext, StyleContext};
-use dom::{OpaqueNode, TNode, TRestyleDamage, UnsafeNode};
+use dom::{OpaqueNode, TElement, TNode, TRestyleDamage, UnsafeNode};
 use matching::{ApplicableDeclarations, ElementMatchMethods, MatchMethods, StyleSharingResult};
-use selector_impl::SelectorImplExt;
-use selectors::Element;
 use selectors::bloom::BloomFilter;
 use std::cell::RefCell;
+use tid::tid;
 use util::opts;
-use util::tid::tid;
+use values::HasViewportPercentage;
 
 /// Every time we do another layout, the old bloom filters are invalid. This is
 /// detected by ticking a generation number every layout.
 pub type Generation = u32;
+
+/// This enum tells us about whether we can stop restyling or not after styling
+/// an element.
+///
+/// So far this only happens where a display: none node is found.
+pub enum RestyleResult {
+    Continue,
+    Stop,
+}
+
 
 /// A pair of the bloom filter used for css selector matching, and the node to
 /// which it applies. This is used to efficiently do `Descendant` selector
@@ -37,27 +49,27 @@ pub type Generation = u32;
 /// will no longer be the for the parent of the node we're currently on. When
 /// this happens, the thread local bloom filter will be thrown away and rebuilt.
 thread_local!(
-    pub static STYLE_BLOOM: RefCell<Option<(Box<BloomFilter>, UnsafeNode, Generation)>> = RefCell::new(None));
+    static STYLE_BLOOM: RefCell<Option<(Box<BloomFilter>, UnsafeNode, Generation)>> = RefCell::new(None));
 
 /// Returns the thread local bloom filter.
 ///
 /// If one does not exist, a new one will be made for you. If it is out of date,
 /// it will be cleared and reused.
-fn take_thread_local_bloom_filter<N, Impl: SelectorImplExt>(parent_node: Option<N>,
-                                                            root: OpaqueNode,
-                                                            context: &SharedStyleContext<Impl>)
-                                                            -> Box<BloomFilter>
-                                                            where N: TNode {
+fn take_thread_local_bloom_filter<N>(parent_node: Option<N>,
+                                     root: OpaqueNode,
+                                     context: &SharedStyleContext)
+                                     -> Box<BloomFilter>
+                                     where N: TNode {
     STYLE_BLOOM.with(|style_bloom| {
         match (parent_node, style_bloom.borrow_mut().take()) {
             // Root node. Needs new bloom filter.
             (None,     _  ) => {
                 debug!("[{}] No parent, but new bloom filter!", tid());
-                box BloomFilter::new()
+                Box::new(BloomFilter::new())
             }
             // No bloom filter for this thread yet.
             (Some(parent), None) => {
-                let mut bloom_filter = box BloomFilter::new();
+                let mut bloom_filter = Box::new(BloomFilter::new());
                 insert_ancestors_into_bloom_filter(&mut bloom_filter, parent, root);
                 bloom_filter
             }
@@ -79,9 +91,8 @@ fn take_thread_local_bloom_filter<N, Impl: SelectorImplExt>(parent_node: Option<
     })
 }
 
-pub fn put_thread_local_bloom_filter<Impl: SelectorImplExt>(bf: Box<BloomFilter>,
-                                                            unsafe_node: &UnsafeNode,
-                                                            context: &SharedStyleContext<Impl>) {
+fn put_thread_local_bloom_filter(bf: Box<BloomFilter>, unsafe_node: &UnsafeNode,
+                                 context: &SharedStyleContext) {
     STYLE_BLOOM.with(move |style_bloom| {
         assert!(style_bloom.borrow().is_none(),
                 "Putting into a never-taken thread-local bloom filter");
@@ -108,29 +119,162 @@ fn insert_ancestors_into_bloom_filter<N>(bf: &mut Box<BloomFilter>,
     debug!("[{}] Inserted {} ancestors.", tid(), ancestors);
 }
 
-pub trait DomTraversalContext<N: TNode>  {
-    type SharedContext: Sync + 'static;
-    fn new<'a>(&'a Self::SharedContext, OpaqueNode) -> Self;
-    fn process_preorder(&self, node: N);
-    fn process_postorder(&self, node: N);
+pub fn remove_from_bloom_filter<'a, N, C>(context: &C, root: OpaqueNode, node: N)
+    where N: TNode,
+          C: StyleContext<'a>
+{
+    let unsafe_layout_node = node.to_unsafe();
+
+    let (mut bf, old_node, old_generation) =
+        STYLE_BLOOM.with(|style_bloom| {
+            style_bloom.borrow_mut()
+                       .take()
+                       .expect("The bloom filter should have been set by style recalc.")
+        });
+
+    assert_eq!(old_node, unsafe_layout_node);
+    assert_eq!(old_generation, context.shared_context().generation);
+
+    match node.layout_parent_node(root) {
+        None => {
+            debug!("[{}] - {:X}, and deleting BF.", tid(), unsafe_layout_node.0);
+            // If this is the reflow root, eat the thread-local bloom filter.
+        }
+        Some(parent) => {
+            // Otherwise, put it back, but remove this node.
+            node.remove_from_bloom_filter(&mut *bf);
+            let unsafe_parent = parent.to_unsafe();
+            put_thread_local_bloom_filter(bf, &unsafe_parent, &context.shared_context());
+        },
+    };
 }
 
-/// The recalc-style-for-node traversal, which styles each node and must run before
-/// layout computation. This computes the styles applied to each node.
+pub trait DomTraversalContext<N: TNode>  {
+    type SharedContext: Sync + 'static;
+
+    fn new<'a>(&'a Self::SharedContext, OpaqueNode) -> Self;
+
+    /// Process `node` on the way down, before its children have been processed.
+    fn process_preorder(&self, node: N) -> RestyleResult;
+
+    /// Process `node` on the way up, after its children have been processed.
+    ///
+    /// This is only executed if `needs_postorder_traversal` returns true.
+    fn process_postorder(&self, node: N);
+
+    /// Boolean that specifies whether a bottom up traversal should be
+    /// performed.
+    ///
+    /// If it's false, then process_postorder has no effect at all.
+    fn needs_postorder_traversal(&self) -> bool { true }
+
+    /// Returns if the node should be processed by the preorder traversal (and
+    /// then by the post-order one).
+    ///
+    /// Note that this is true unconditionally for servo, since it requires to
+    /// bubble the widths bottom-up for all the DOM.
+    fn should_process(&self, node: N) -> bool {
+        node.is_dirty() || node.has_dirty_descendants()
+    }
+
+    /// Do an action over the child before pushing him to the work queue.
+    ///
+    /// By default, propagate the IS_DIRTY flag down the tree.
+    #[allow(unsafe_code)]
+    fn pre_process_child_hook(&self, parent: N, kid: N) {
+        // NOTE: At this point is completely safe to modify either the parent or
+        // the child, since we have exclusive access to both of them.
+        if parent.is_dirty() {
+            unsafe {
+                kid.set_dirty(true);
+                parent.set_dirty_descendants(true);
+            }
+        }
+    }
+}
+
+pub fn ensure_node_styled<'a, N, C>(node: N,
+                                    context: &'a C)
+    where N: TNode,
+          C: StyleContext<'a>
+{
+    let mut display_none = false;
+    ensure_node_styled_internal(node, context, &mut display_none);
+}
+
+#[allow(unsafe_code)]
+fn ensure_node_styled_internal<'a, N, C>(node: N,
+                                         context: &'a C,
+                                         parents_had_display_none: &mut bool)
+    where N: TNode,
+          C: StyleContext<'a>
+{
+    use properties::longhands::display::computed_value as display;
+
+    // Ensure we have style data available. This must be done externally because
+    // there's no way to initialize the style data from the style system
+    // (because in Servo it's coupled with the layout data too).
+    //
+    // Ideally we'd have an initialize_data() or something similar but just for
+    // style data.
+    debug_assert!(node.borrow_data().is_some(),
+                  "Need to initialize the data before calling ensure_node_styled");
+
+    // We need to go to the root and ensure their style is up to date.
+    //
+    // This means potentially a bit of wasted work (usually not much). We could
+    // add a flag at the node at which point we stopped the traversal to know
+    // where should we stop, but let's not add that complication unless needed.
+    let parent = match node.parent_node() {
+        Some(parent) if parent.is_element() => Some(parent),
+        _ => None,
+    };
+
+    if let Some(parent) = parent {
+        ensure_node_styled_internal(parent, context, parents_had_display_none);
+    }
+
+    // Common case: our style is already resolved and none of our ancestors had
+    // display: none.
+    //
+    // We only need to mark whether we have display none, and forget about it,
+    // our style is up to date.
+    if let Some(ref style) = node.borrow_data().unwrap().style {
+        if !*parents_had_display_none {
+            *parents_had_display_none = style.get_box().clone_display() == display::T::none;
+            return;
+        }
+    }
+
+    // Otherwise, our style might be out of date. Time to do selector matching
+    // if appropriate and cascade the node.
+    //
+    // Note that we could add the bloom filter's complexity here, but that's
+    // probably not necessary since we're likely to be matching only a few
+    // nodes, at best.
+    let mut applicable_declarations = ApplicableDeclarations::new();
+    if let Some(element) = node.as_element() {
+        let stylist = &context.shared_context().stylist;
+
+        element.match_element(&**stylist,
+                              None,
+                              &mut applicable_declarations);
+    }
+
+    unsafe {
+        node.cascade_node(context, parent, &applicable_declarations);
+    }
+}
+
+/// Calculates the style for a single node.
 #[inline]
 #[allow(unsafe_code)]
 pub fn recalc_style_at<'a, N, C>(context: &'a C,
                                  root: OpaqueNode,
-                                 node: N)
+                                 node: N) -> RestyleResult
     where N: TNode,
-          C: StyleContext<'a, <N::ConcreteElement as Element>::Impl>,
-          <N::ConcreteElement as Element>::Impl: SelectorImplExt<ComputedValues=N::ConcreteComputedValues> + 'a {
-    // Initialize layout data.
-    //
-    // FIXME(pcwalton): Stop allocating here. Ideally this should just be done by the HTML
-    // parser.
-    node.initialize_data();
-
+          C: StyleContext<'a>
+{
     // Get the parent node.
     let parent_opt = match node.parent_node() {
         Some(parent) if parent.is_element() => Some(parent),
@@ -141,6 +285,7 @@ pub fn recalc_style_at<'a, N, C>(context: &'a C,
     let mut bf = take_thread_local_bloom_filter(parent_opt, root, context.shared_context());
 
     let nonincremental_layout = opts::get().nonincremental_layout;
+    let mut restyle_result = RestyleResult::Continue;
     if nonincremental_layout || node.is_dirty() {
         // Remove existing CSS styles from nodes whose content has changed (e.g. text changed),
         // to force non-incremental reflow.
@@ -190,11 +335,9 @@ pub fn recalc_style_at<'a, N, C>(context: &'a C,
 
                 // Perform the CSS cascade.
                 unsafe {
-                    node.cascade_node(&context.shared_context(),
-                                      parent_opt,
-                                      &applicable_declarations,
-                                      &mut context.local_context().applicable_declarations_cache.borrow_mut(),
-                                      &context.shared_context().new_animations_sender);
+                    restyle_result = node.cascade_node(context,
+                                                    parent_opt,
+                                                    &applicable_declarations);
                 }
 
                 // Add ourselves to the LRU cache.
@@ -202,11 +345,19 @@ pub fn recalc_style_at<'a, N, C>(context: &'a C,
                     style_sharing_candidate_cache.insert_if_possible::<'ln, N>(&element);
                 }
             }
-            StyleSharingResult::StyleWasShared(index, damage) => {
+            StyleSharingResult::StyleWasShared(index, damage, restyle_result_cascade) => {
+                restyle_result = restyle_result_cascade;
                 style_sharing_candidate_cache.touch(index);
                 node.set_restyle_damage(damage);
             }
         }
+    } else {
+        // Finish any expired transitions.
+        animation::complete_expired_transitions(
+            node.opaque(),
+            node.mutate_data().unwrap().style.as_mut().unwrap(),
+            context.shared_context()
+        );
     }
 
     let unsafe_layout_node = node.to_unsafe();
@@ -218,5 +369,24 @@ pub fn recalc_style_at<'a, N, C>(context: &'a C,
 
     // NB: flow construction updates the bloom filter on the way up.
     put_thread_local_bloom_filter(bf, &unsafe_layout_node, context.shared_context());
-}
 
+    // Mark the node as DIRTY_ON_VIEWPORT_SIZE_CHANGE is it uses viewport
+    // percentage units.
+    if !node.needs_dirty_on_viewport_size_changed() {
+        if let Some(element) = node.as_element() {
+            if let Some(ref property_declaration_block) = *element.style_attribute() {
+                if property_declaration_block.declarations().any(|d| d.0.has_viewport_percentage()) {
+                    unsafe {
+                        node.set_dirty_on_viewport_size_changed();
+                    }
+                }
+            }
+        }
+    }
+
+    if nonincremental_layout {
+        RestyleResult::Continue
+    } else {
+        restyle_result
+    }
+}

@@ -6,7 +6,7 @@
 
 use clipboard_provider::ClipboardProvider;
 use dom::bindings::str::DOMString;
-use dom::keyboardevent::{KeyboardEvent, key_value};
+use dom::keyboardevent::KeyboardEvent;
 use msg::constellation_msg::{ALT, CONTROL, SHIFT, SUPER};
 use msg::constellation_msg::{Key, KeyModifiers};
 use std::borrow::ToOwned;
@@ -120,24 +120,6 @@ fn is_control_key(mods: KeyModifiers) -> bool {
     mods.contains(CONTROL) && !mods.contains(SUPER | ALT)
 }
 
-fn is_printable_key(key: Key) -> bool {
-    match key {
-        Key::Space | Key::Apostrophe | Key::Comma | Key::Minus |
-        Key::Period | Key::Slash | Key::GraveAccent | Key::Num0 |
-        Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 |
-        Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9 | Key::Semicolon |
-        Key::Equal | Key::A | Key::B | Key::C | Key::D | Key::E | Key::F |
-        Key::G | Key::H | Key::I | Key::J | Key::K | Key::L | Key::M | Key::N |
-        Key::O | Key::P | Key::Q | Key::R | Key::S | Key::T | Key::U | Key::V |
-        Key::W | Key::X | Key::Y | Key::Z | Key::LeftBracket | Key::Backslash |
-        Key::RightBracket | Key::Kp0 | Key::Kp1 | Key::Kp2 | Key::Kp3 |
-        Key::Kp4 | Key::Kp5 | Key::Kp6 | Key::Kp7 | Key::Kp8 | Key::Kp9 |
-        Key::KpDecimal | Key::KpDivide | Key::KpMultiply | Key::KpSubtract |
-        Key::KpAdd | Key::KpEqual => true,
-        _ => false,
-    }
-}
-
 /// The length in bytes of the first n characters in a UTF-8 string.
 ///
 /// If the string has fewer than n characters, returns the length of the whole string.
@@ -213,6 +195,16 @@ impl<T: ClipboardProvider> TextInput<T> {
                 (end, begin)
             }
         })
+    }
+
+    // Check that the selection is valid.
+    fn assert_ok_selection(&self) {
+        if let Some(begin) = self.selection_begin {
+            debug_assert!(begin.line < self.lines.len());
+            debug_assert!(begin.index <= self.lines[begin.line].len());
+        }
+        debug_assert!(self.edit_point.line < self.lines.len());
+        debug_assert!(self.edit_point.index <= self.lines[self.edit_point.line].len());
     }
 
     /// Return the selection range as UTF-8 byte offsets from the start of the content.
@@ -319,6 +311,7 @@ impl<T: ClipboardProvider> TextInput<T> {
 
             self.lines = new_lines;
         }
+        self.assert_ok_selection();
     }
 
     /// Return the length in UTF-8 bytes of the current line under the editing point.
@@ -360,6 +353,7 @@ impl<T: ClipboardProvider> TextInput<T> {
 
         self.edit_point.line = target_line as usize;
         self.edit_point.index = len_of_first_n_chars(&self.lines[self.edit_point.line], col);
+        self.assert_ok_selection();
     }
 
     /// Adjust the editing point position by a given number of bytes. If the adjustment
@@ -441,6 +435,7 @@ impl<T: ClipboardProvider> TextInput<T> {
                                             self.edit_point.index + adjust as usize);
             }
         }
+        self.assert_ok_selection();
     }
 
     /// Deal with a newline input.
@@ -462,6 +457,7 @@ impl<T: ClipboardProvider> TextInput<T> {
         let last_line = self.lines.len() - 1;
         self.edit_point.line = last_line;
         self.edit_point.index = self.lines[last_line].len();
+        self.assert_ok_selection();
     }
 
     /// Remove the current selection.
@@ -472,79 +468,80 @@ impl<T: ClipboardProvider> TextInput<T> {
     /// Process a given `KeyboardEvent` and return an action for the caller to execute.
     pub fn handle_keydown(&mut self, event: &KeyboardEvent) -> KeyReaction {
         if let Some(key) = event.get_key() {
-            self.handle_keydown_aux(key, event.get_key_modifiers())
+            self.handle_keydown_aux(event.printable(), key, event.get_key_modifiers())
         } else {
             KeyReaction::Nothing
         }
     }
-    pub fn handle_keydown_aux(&mut self, key: Key, mods: KeyModifiers) -> KeyReaction {
+
+    pub fn handle_keydown_aux(&mut self,
+                              printable: Option<char>,
+                              key: Key,
+                              mods: KeyModifiers) -> KeyReaction {
         let maybe_select = if mods.contains(SHIFT) { Selection::Selected } else { Selection::NotSelected };
-        match key {
-            Key::A if is_control_key(mods) => {
+        match (printable, key) {
+            (Some('a'), _) if is_control_key(mods) => {
                 self.select_all();
                 KeyReaction::RedrawSelection
             },
-            Key::C if is_control_key(mods) => {
+            (Some('c'), _) if is_control_key(mods) => {
                 if let Some(text) = self.get_selection_text() {
                     self.clipboard_provider.set_clipboard_contents(text);
                 }
                 KeyReaction::DispatchInput
             },
-            Key::V if is_control_key(mods) => {
+            (Some('v'), _) if is_control_key(mods) => {
                 let contents = self.clipboard_provider.clipboard_contents();
                 self.insert_string(contents);
                 KeyReaction::DispatchInput
             },
-            _ if is_printable_key(key) => {
-                self.insert_string(key_value(key, mods));
+            (Some(c), _) => {
+                self.insert_char(c);
                 KeyReaction::DispatchInput
             }
-            Key::Space => {
-                self.insert_char(' ');
-                KeyReaction::DispatchInput
-            }
-            Key::Delete => {
+            (None, Key::Delete) => {
                 self.delete_char(Direction::Forward);
                 KeyReaction::DispatchInput
             }
-            Key::Backspace => {
+            (None, Key::Backspace) => {
                 self.delete_char(Direction::Backward);
                 KeyReaction::DispatchInput
             }
-            Key::Left => {
+            (None, Key::Left) => {
                 self.adjust_horizontal_by_one(Direction::Backward, maybe_select);
                 KeyReaction::RedrawSelection
             }
-            Key::Right => {
+            (None, Key::Right) => {
                 self.adjust_horizontal_by_one(Direction::Forward, maybe_select);
                 KeyReaction::RedrawSelection
             }
-            Key::Up => {
+            (None, Key::Up) => {
                 self.adjust_vertical(-1, maybe_select);
                 KeyReaction::RedrawSelection
             }
-            Key::Down => {
+            (None, Key::Down) => {
                 self.adjust_vertical(1, maybe_select);
                 KeyReaction::RedrawSelection
             }
-            Key::Enter | Key::KpEnter => self.handle_return(),
-            Key::Home => {
+            (None, Key::Enter) | (None, Key::KpEnter) => self.handle_return(),
+            (None, Key::Home) => {
                 self.edit_point.index = 0;
                 KeyReaction::RedrawSelection
             }
-            Key::End => {
+            (None, Key::End) => {
                 self.edit_point.index = self.current_line_length();
+                self.assert_ok_selection();
                 KeyReaction::RedrawSelection
             }
-            Key::PageUp => {
+            (None, Key::PageUp) => {
                 self.adjust_vertical(-28, maybe_select);
                 KeyReaction::RedrawSelection
             }
-            Key::PageDown => {
+            (None, Key::PageDown) => {
                 self.adjust_vertical(28, maybe_select);
                 KeyReaction::RedrawSelection
             }
-            Key::Tab => KeyReaction::TriggerDefaultAction,
+            (None, Key::Tab) => KeyReaction::TriggerDefaultAction,
             _ => KeyReaction::Nothing,
         }
     }
@@ -598,6 +595,7 @@ impl<T: ClipboardProvider> TextInput<T> {
         self.edit_point.line = min(self.edit_point.line, self.lines.len() - 1);
         self.edit_point.index = min(self.edit_point.index, self.current_line_length());
         self.selection_begin = None;
+        self.assert_ok_selection();
     }
 
     /// Get the insertion point as a byte offset from the start of the content.
@@ -646,16 +644,25 @@ impl<T: ClipboardProvider> TextInput<T> {
         let mut end = end as usize;
         let text_end = self.get_content().len();
 
-        if start > text_end {
-            start = text_end;
-        } else if end > text_end {
+        if end > text_end {
             end = text_end;
-        } else if start >= end {
+        }
+        if start > end {
             start = end;
         }
 
-        self.selection_begin = Some(self.get_text_point_for_absolute_point(start));
-        self.edit_point = self.get_text_point_for_absolute_point(end);
+        match self.selection_direction {
+            SelectionDirection::None |
+            SelectionDirection::Forward => {
+                self.selection_begin = Some(self.get_text_point_for_absolute_point(start));
+                self.edit_point = self.get_text_point_for_absolute_point(end);
+            },
+            SelectionDirection::Backward => {
+                self.selection_begin = Some(self.get_text_point_for_absolute_point(end));
+                self.edit_point = self.get_text_point_for_absolute_point(start);
+            }
+        }
+        self.assert_ok_selection();
     }
 
     pub fn get_selection_start(&self) -> u32 {

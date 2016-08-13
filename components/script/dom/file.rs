@@ -10,7 +10,7 @@ use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::reflect_dom_object;
 use dom::bindings::str::DOMString;
-use dom::blob::{Blob, BlobImpl, DataSlice, blob_parts_to_bytes};
+use dom::blob::{Blob, BlobImpl, blob_parts_to_bytes};
 use dom::window::Window;
 use net_traits::filemanager_thread::SelectedFile;
 use time;
@@ -23,10 +23,11 @@ pub struct File {
 }
 
 impl File {
+    #[allow(unrooted_must_root)]
     fn new_inherited(blob_impl: BlobImpl, name: DOMString,
                      modified: Option<i64>, typeString: &str) -> File {
         File {
-            blob: Blob::new_inherited(blob_impl, typeString),
+            blob: Blob::new_inherited(blob_impl, typeString.to_owned()),
             name: name,
             // https://w3c.github.io/FileAPI/#dfn-lastModified
             modified: match modified {
@@ -39,6 +40,7 @@ impl File {
         }
     }
 
+    #[allow(unrooted_must_root)]
     pub fn new(global: GlobalRef, blob_impl: BlobImpl,
                name: DOMString, modified: Option<i64>, typeString: &str) -> Root<File> {
         reflect_dom_object(box File::new_inherited(blob_impl, name, modified, typeString),
@@ -52,7 +54,8 @@ impl File {
 
         let global = GlobalRef::Window(window);
 
-        File::new(global, BlobImpl::new_from_file(selected.id), name, Some(selected.modified as i64), "")
+        File::new(global, BlobImpl::new_from_file(selected.id, selected.filename, selected.size),
+                  name, Some(selected.modified as i64), &selected.type_string)
     }
 
     // https://w3c.github.io/FileAPI/#file-constructor
@@ -67,11 +70,13 @@ impl File {
         };
 
         let ref blobPropertyBag = filePropertyBag.parent;
-        let typeString = blobPropertyBag.get_typestring();
+        let ref typeString = blobPropertyBag.type_;
 
-        let slice = DataSlice::from_bytes(bytes);
         let modified = filePropertyBag.lastModified;
-        Ok(File::new(global, BlobImpl::new_from_slice(slice), filename, modified, &typeString))
+        // NOTE: Following behaviour might be removed in future,
+        // see https://github.com/w3c/FileAPI/issues/41
+        let replaced_filename = DOMString::from_string(filename.replace("/", ":"));
+        Ok(File::new(global, BlobImpl::new_from_bytes(bytes), replaced_filename, modified, typeString))
     }
 
     pub fn name(&self) -> &DOMString {

@@ -2,20 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+//! [Media queries][mq].
+//!
+//! [mq]: https://drafts.csswg.org/mediaqueries/
+
 use app_units::Au;
 use cssparser::{Delimiter, Parser, Token};
 use euclid::size::{Size2D, TypedSize2D};
 use properties::longhands;
-use util::geometry::ViewportPx;
+use style_traits::ViewportPx;
 use values::specified;
 
 
-#[derive(Debug, HeapSizeOf, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct MediaQueryList {
     pub media_queries: Vec<MediaQuery>
 }
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug, HeapSizeOf)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum Range<T> {
     Min(T),
     Max(T),
@@ -58,20 +64,23 @@ impl<T: Ord> Range<T> {
 }
 
 /// http://dev.w3.org/csswg/mediaqueries-3/#media1
-#[derive(PartialEq, Copy, Clone, Debug, HeapSizeOf)]
+#[derive(PartialEq, Copy, Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum Expression {
     /// http://dev.w3.org/csswg/mediaqueries-3/#width
     Width(Range<specified::Length>),
 }
 
 /// http://dev.w3.org/csswg/mediaqueries-3/#media0
-#[derive(PartialEq, Eq, Copy, Clone, Debug, HeapSizeOf)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum Qualifier {
     Only,
     Not,
 }
 
-#[derive(Debug, HeapSizeOf, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct MediaQuery {
     pub qualifier: Option<Qualifier>,
     pub media_type: MediaQueryType,
@@ -90,27 +99,30 @@ impl MediaQuery {
 }
 
 /// http://dev.w3.org/csswg/mediaqueries-3/#media0
-#[derive(PartialEq, Eq, Copy, Clone, Debug, HeapSizeOf)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum MediaQueryType {
     All,  // Always true
     MediaType(MediaType),
 }
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug, HeapSizeOf)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum MediaType {
     Screen,
     Print,
     Unknown,
 }
 
-#[derive(Debug, HeapSizeOf)]
+#[derive(Debug)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct Device {
     pub media_type: MediaType,
-    pub viewport_size: TypedSize2D<ViewportPx, f32>,
+    pub viewport_size: TypedSize2D<f32, ViewportPx>,
 }
 
 impl Device {
-    pub fn new(media_type: MediaType, viewport_size: TypedSize2D<ViewportPx, f32>) -> Device {
+    pub fn new(media_type: MediaType, viewport_size: TypedSize2D<f32, ViewportPx>) -> Device {
         Device {
             media_type: media_type,
             viewport_size: viewport_size,
@@ -119,8 +131,8 @@ impl Device {
 
     #[inline]
     pub fn au_viewport_size(&self) -> Size2D<Au> {
-        Size2D::new(Au::from_f32_px(self.viewport_size.width.get()),
-                    Au::from_f32_px(self.viewport_size.height.get()))
+        Size2D::new(Au::from_f32_px(self.viewport_size.width),
+                    Au::from_f32_px(self.viewport_size.height))
     }
 
 }

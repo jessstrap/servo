@@ -48,6 +48,16 @@ class CheckTidiness(unittest.TestCase):
         self.assertEqual('incorrect license', errors.next()[2])
         self.assertNoMoreErrors(errors)
 
+    def test_shell(self):
+        errors = tidy.collect_errors_for_files(iterFile('shell_tidy.sh'), [], [tidy.check_shell], print_text=False)
+        self.assertEqual('script does not have shebang "#!/usr/bin/env bash"', errors.next()[2])
+        self.assertEqual('script is missing options "set -o errexit", "set -o pipefail"', errors.next()[2])
+        self.assertEqual('script should not use backticks for command substitution', errors.next()[2])
+        self.assertEqual('variable substitutions should use the full \"${VAR}\" form', errors.next()[2])
+        self.assertEqual('script should use `[[` instead of `[` for conditional testing', errors.next()[2])
+        self.assertEqual('script should use `[[` instead of `[` for conditional testing', errors.next()[2])
+        self.assertNoMoreErrors(errors)
+
     def test_rust(self):
         errors = tidy.collect_errors_for_files(iterFile('rust_tidy.rs'), [], [tidy.check_rust], print_text=False)
         self.assertEqual('use statement spans multiple lines', errors.next()[2])
@@ -76,10 +86,11 @@ class CheckTidiness(unittest.TestCase):
         self.assertEqual('use &str instead of &String', errors.next()[2])
         self.assertEqual('use &T instead of &Root<T>', errors.next()[2])
         self.assertEqual('operators should go at the end of the first line', errors.next()[2])
+        self.assertEqual('else braces should be on the same line', errors.next()[2])
         self.assertNoMoreErrors(errors)
 
     def test_spec_link(self):
-        tidy.spec_base_path = base_path
+        tidy.SPEC_BASE_PATH = base_path
         errors = tidy.collect_errors_for_files(iterFile('speclink.rs'), [], [tidy.check_spec], print_text=False)
         self.assertEqual('method declared in webidl is missing a comment with a specification link', errors.next()[2])
         self.assertNoMoreErrors(errors)
@@ -92,6 +103,7 @@ class CheckTidiness(unittest.TestCase):
     def test_toml(self):
         errors = tidy.collect_errors_for_files(iterFile('test.toml'), [tidy.check_toml], [], print_text=False)
         self.assertEqual('found asterisk instead of minimum version number', errors.next()[2])
+        self.assertEqual('.toml file should contain a valid license.', errors.next()[2])
         self.assertNoMoreErrors(errors)
 
     def test_modeline(self):
@@ -101,6 +113,16 @@ class CheckTidiness(unittest.TestCase):
         self.assertEqual('vi modeline present', errors.next()[2])
         self.assertEqual('emacs file variables present', errors.next()[2])
         self.assertEqual('emacs file variables present', errors.next()[2])
+        self.assertNoMoreErrors(errors)
+
+    def test_malformed_json(self):
+        errors = tidy.collect_errors_for_files(iterFile('malformed_json.json'), [tidy.check_json], [], print_text=False)
+        self.assertEqual('Invalid control character at: line 3 column 40 (char 61)', errors.next()[2])
+        self.assertNoMoreErrors(errors)
+
+    def test_json_with_duplicate_key(self):
+        errors = tidy.collect_errors_for_files(iterFile('duplicate_key.json'), [tidy.check_json], [], print_text=False)
+        self.assertEqual('Duplicated Key (the_duplicated_key)', errors.next()[2])
         self.assertNoMoreErrors(errors)
 
     def test_lock(self):
@@ -114,7 +136,17 @@ class CheckTidiness(unittest.TestCase):
         self.assertEqual(msg, errors.next()[2])
         self.assertNoMoreErrors(errors)
 
+    def test_file_list(self):
+        base_path='./python/tidy/servo_tidy_tests/test_ignored'
+        file_list = tidy.get_file_list(base_path, only_changed_files=False,
+                                       exclude_dirs=[])
+        lst = list(file_list)
+        self.assertEqual([os.path.join(base_path, 'whee', 'test.rs'), os.path.join(base_path, 'whee', 'foo', 'bar.rs')], lst)
+        file_list = tidy.get_file_list(base_path, only_changed_files=False,
+                                       exclude_dirs=[os.path.join(base_path, 'whee', 'foo')])
+        lst = list(file_list)
+        self.assertEqual([os.path.join(base_path, 'whee', 'test.rs')], lst)
 
 def do_tests():
     suite = unittest.TestLoader().loadTestsFromTestCase(CheckTidiness)
-    unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1

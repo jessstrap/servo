@@ -8,22 +8,22 @@ use resource_thread;
 use std::borrow::ToOwned;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use url::Url;
-use util::opts;
 use util::thread::spawn_named;
 
 const QUOTA_SIZE_LIMIT: usize = 5 * 1024 * 1024;
 
 pub trait StorageThreadFactory {
-    fn new() -> Self;
+    fn new(config_dir: Option<PathBuf>) -> Self;
 }
 
 impl StorageThreadFactory for IpcSender<StorageThreadMsg> {
     /// Create a storage thread
-    fn new() -> IpcSender<StorageThreadMsg> {
+    fn new(config_dir: Option<PathBuf>) -> IpcSender<StorageThreadMsg> {
         let (chan, port) = ipc::channel().unwrap();
         spawn_named("StorageManager".to_owned(), move || {
-            StorageManager::new(port).start();
+            StorageManager::new(port, config_dir).start();
         });
         chan
     }
@@ -33,18 +33,22 @@ struct StorageManager {
     port: IpcReceiver<StorageThreadMsg>,
     session_data: HashMap<String, (usize, BTreeMap<String, String>)>,
     local_data: HashMap<String, (usize, BTreeMap<String, String>)>,
+    config_dir: Option<PathBuf>,
 }
 
 impl StorageManager {
-    fn new(port: IpcReceiver<StorageThreadMsg>) -> StorageManager {
+    fn new(port: IpcReceiver<StorageThreadMsg>,
+           config_dir: Option<PathBuf>)
+           -> StorageManager {
         let mut local_data = HashMap::new();
-        if let Some(ref config_dir) = opts::get().config_dir {
+        if let Some(ref config_dir) = config_dir {
             resource_thread::read_json_from_file(&mut local_data, config_dir, "local_data.json");
         }
         StorageManager {
             port: port,
             session_data: HashMap::new(),
             local_data: local_data,
+            config_dir: config_dir,
         }
     }
 }
@@ -75,7 +79,7 @@ impl StorageManager {
                     self.clear(sender, url, storage_type)
                 }
                 StorageThreadMsg::Exit(sender) => {
-                    if let Some(ref config_dir) = opts::get().config_dir {
+                    if let Some(ref config_dir) = self.config_dir {
                         resource_thread::write_json_to_file(&self.local_data, config_dir, "local_data.json");
                     }
                     let _ = sender.send(());
@@ -144,12 +148,15 @@ impl StorageManager {
                 value: String) {
         let origin = self.origin_as_string(url);
 
-        let current_total_size = {
+        let (this_storage_size, other_storage_size) = {
             let local_data = self.select_data(StorageType::Local);
             let session_data = self.select_data(StorageType::Session);
             let local_data_size = local_data.get(&origin).map_or(0, |&(total, _)| total);
             let session_data_size = session_data.get(&origin).map_or(0, |&(total, _)| total);
-            local_data_size + session_data_size
+            match storage_type {
+                StorageType::Local => (local_data_size, session_data_size),
+                StorageType::Session => (session_data_size, local_data_size),
+            }
         };
 
         let data = self.select_data_mut(storage_type);
@@ -158,14 +165,14 @@ impl StorageManager {
         }
 
         let message = data.get_mut(&origin).map(|&mut (ref mut total, ref mut entry)| {
-            let mut new_total_size = current_total_size + value.as_bytes().len();
+            let mut new_total_size = this_storage_size + value.as_bytes().len();
             if let Some(old_value) = entry.get(&name) {
                 new_total_size -= old_value.as_bytes().len();
             } else {
                 new_total_size += name.as_bytes().len();
             }
 
-            if new_total_size > QUOTA_SIZE_LIMIT {
+            if (new_total_size + other_storage_size) > QUOTA_SIZE_LIMIT {
                 return Err(());
             }
 

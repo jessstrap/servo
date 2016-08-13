@@ -16,18 +16,18 @@ use flow::{self, Flow, FlowClass, OpaqueFlow};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use gfx::display_list::StackingContext;
 use gfx_traits::StackingContextId;
-use incremental::REFLOW;
+use gfx_traits::print_tree::PrintTree;
 use layout_debug;
 use model::MaybeAuto;
+use script_layout_interface::wrapper_traits::ThreadSafeLayoutNode;
 use std::fmt;
 use std::sync::Arc;
 use style::computed_values::{border_collapse, border_top_style, vertical_align};
+use style::context::SharedStyleContext;
 use style::logical_geometry::{LogicalMargin, LogicalRect, LogicalSize, WritingMode};
-use style::properties::{ComputedValues, ServoComputedValues};
+use style::properties::ServoComputedValues;
 use table::InternalTable;
 use table_row::{CollapsedBorder, CollapsedBorderProvenance};
-use util::print_tree::PrintTree;
-use wrapper::ThreadSafeLayoutNode;
 
 /// A table formatting context.
 #[derive(RustcEncodable)]
@@ -76,11 +76,16 @@ impl TableCellFlow {
             None,
             MarginsMayCollapseFlag::MarginsMayNotCollapse);
         debug_assert!(remaining.is_none());
-        if !flow::base(self).restyle_damage.contains(REFLOW) {
-            return;
-        }
+    }
+
+    /// Position this cell's children according to vertical-align.
+    pub fn valign_children(&mut self) {
+        // Note to the reader: this code has been tested with negative margins.
+        // We end up with a "end" that's before the "start," but the math still works out.
         let first_start = flow::base(self).children.front().map(|kid| {
+            let kid_base = flow::base(kid);
             flow::base(kid).position.start.b
+                - kid_base.collapsible_margins.block_start_margin_for_noncollapsible_context()
         });
         if let Some(mut first_start) = first_start {
             let mut last_end = first_start;
@@ -101,6 +106,9 @@ impl TableCellFlow {
             let self_size = flow::base(self).position.size.block -
                 self.block_flow.fragment.border_padding.block_start_end();
             let kids_self_gap = self_size - kids_size;
+
+            // This offset should also account for vertical_align::T::baseline.
+            // Need max cell ascent from the first row of this cell.
             let offset = match self.block_flow.fragment.style().get_box().vertical_align {
                 vertical_align::T::middle => kids_self_gap / 2,
                 vertical_align::T::bottom => kids_self_gap,
@@ -162,7 +170,7 @@ impl Flow for TableCellFlow {
     /// Recursively (top-down) determines the actual inline-size of child contexts and fragments.
     /// When called on this context, the context has had its inline-size set by the parent table
     /// row.
-    fn assign_inline_sizes(&mut self, layout_context: &LayoutContext) {
+    fn assign_inline_sizes(&mut self, shared_context: &SharedStyleContext) {
         let _scope = layout_debug_scope!("table_cell::assign_inline_sizes {:x}",
                                             self.block_flow.base.debug_id());
         debug!("assign_inline_sizes({}): assigning inline_size for flow", "table_cell");
@@ -174,7 +182,7 @@ impl Flow for TableCellFlow {
             border_collapse: self.block_flow.fragment.style.get_inheritedtable().border_collapse,
         };
         inline_size_computer.compute_used_inline_size(&mut self.block_flow,
-                                                      layout_context,
+                                                      shared_context,
                                                       containing_block_inline_size);
 
         let inline_start_content_edge =
@@ -188,7 +196,7 @@ impl Flow for TableCellFlow {
         let content_inline_size =
             self.block_flow.fragment.border_box.size.inline - padding_and_borders;
 
-        self.block_flow.propagate_assigned_inline_size_to_children(layout_context,
+        self.block_flow.propagate_assigned_inline_size_to_children(shared_context,
                                                                    inline_start_content_edge,
                                                                    inline_end_content_edge,
                                                                    content_inline_size,

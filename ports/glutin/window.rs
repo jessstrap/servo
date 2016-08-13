@@ -10,14 +10,14 @@ use compositing::windowing::{MouseWindowEvent, WindowNavigateMsg};
 use compositing::windowing::{WindowEvent, WindowMethods};
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::TypedSize2D;
-use euclid::{Size2D, Point2D};
+use euclid::{Size2D, Point2D, TypedPoint2D};
 #[cfg(target_os = "windows")] use gdi32;
 use gleam::gl;
 use glutin;
-use glutin::TouchPhase;
 #[cfg(target_os = "macos")]
 use glutin::os::macos::{ActivationPolicy, WindowBuilderExt};
 use glutin::{Api, ElementState, Event, GlRequest, MouseButton, VirtualKeyCode, MouseScrollDelta};
+use glutin::{ScanCode, TouchPhase};
 use layers::geometry::DevicePixel;
 use layers::platform::surface::NativeDisplay;
 use msg::constellation_msg::{KeyState, NONE, CONTROL, SHIFT, ALT, SUPER};
@@ -36,7 +36,7 @@ use util::geometry::ScreenPx;
 use util::opts;
 #[cfg(not(target_os = "android"))]
 use util::opts::RenderApi;
-use util::prefs;
+use util::prefs::PREFS;
 use util::resource_files;
 #[cfg(target_os = "windows")] use winapi;
 
@@ -81,7 +81,6 @@ fn builder_with_platform_options(mut builder: glutin::WindowBuilder) -> glutin::
         builder = builder.with_activation_policy(ActivationPolicy::Prohibited)
     }
     builder.with_app_name(String::from("Servo"))
-           .with_transparent_corner_radius(8)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -100,15 +99,21 @@ pub struct Window {
     mouse_pos: Cell<Point2D<i32>>,
     key_modifiers: Cell<KeyModifiers>,
     current_url: RefCell<Option<Url>>,
+
+    /// The contents of the last ReceivedCharacter event for use in a subsequent KeyEvent.
+    pending_key_event_char: Cell<Option<char>>,
+    /// The list of keys that have been pressed but not yet released, to allow providing
+    /// the equivalent ReceivedCharacter data as was received for the press event.
+    pressed_key_map: RefCell<Vec<(ScanCode, char)>>,
 }
 
 #[cfg(not(target_os = "windows"))]
-fn window_creation_scale_factor() -> ScaleFactor<ScreenPx, DevicePixel, f32> {
+fn window_creation_scale_factor() -> ScaleFactor<f32, ScreenPx, DevicePixel> {
     ScaleFactor::new(1.0)
 }
 
 #[cfg(target_os = "windows")]
-fn window_creation_scale_factor() -> ScaleFactor<ScreenPx, DevicePixel, f32> {
+fn window_creation_scale_factor() -> ScaleFactor<f32, ScreenPx, DevicePixel> {
         let hdc = unsafe { user32::GetDC(::std::ptr::null_mut()) };
         let ppi = unsafe { gdi32::GetDeviceCaps(hdc, winapi::wingdi::LOGPIXELSY) };
         ScaleFactor::new(ppi as f32 / 96.0)
@@ -117,9 +122,9 @@ fn window_creation_scale_factor() -> ScaleFactor<ScreenPx, DevicePixel, f32> {
 
 impl Window {
     pub fn new(is_foreground: bool,
-               window_size: TypedSize2D<ScreenPx, u32>,
+               window_size: TypedSize2D<u32, ScreenPx>,
                parent: Option<glutin::WindowID>) -> Rc<Window> {
-        let win_size: TypedSize2D<DevicePixel, u32> =
+        let win_size: TypedSize2D<u32, DevicePixel> =
             (window_size.as_f32() * window_creation_scale_factor())
             .as_uint().cast().expect("Window size should fit in u32");
         let width = win_size.to_untyped().width;
@@ -131,8 +136,6 @@ impl Window {
         // #9996.
         let visible = is_foreground && !opts::get().no_native_titlebar;
 
-        let mut icon_path = resource_files::resources_dir_path();
-        icon_path.push("servo.png");
 
         let mut builder =
             glutin::WindowBuilder::new().with_title("Servo".to_string())
@@ -142,15 +145,16 @@ impl Window {
                                         .with_gl(Window::gl_version())
                                         .with_visibility(visible)
                                         .with_parent(parent)
-                                        .with_multitouch()
-                                        .with_icon(icon_path);
+                                        .with_multitouch();
+
+
+        if let Ok(mut icon_path) = resource_files::resources_dir_path() {
+            icon_path.push("servo.png");
+            builder = builder.with_icon(icon_path);
+        }
 
         if opts::get().enable_vsync {
             builder = builder.with_vsync();
-        }
-
-        if opts::get().use_webrender {
-            builder = builder.with_stencil_buffer(8);
         }
 
         if opts::get().use_msaa {
@@ -176,6 +180,9 @@ impl Window {
             mouse_pos: Cell::new(Point2D::new(0, 0)),
             key_modifiers: Cell::new(KeyModifiers::empty()),
             current_url: RefCell::new(None),
+
+            pending_key_event_char: Cell::new(None),
+            pressed_key_map: RefCell::new(vec![]),
         };
 
         gl::clear_color(0.6, 0.6, 0.6, 1.0);
@@ -196,7 +203,7 @@ impl Window {
                 None => {}
                 Some(listener) => {
                     (*listener).handle_event_from_nested_event_loop(
-                        WindowEvent::Resize(Size2D::typed(width, height)));
+                        WindowEvent::Resize(TypedSize2D::new(width, height)));
                 }
             }
         }
@@ -233,7 +240,12 @@ impl Window {
 
     fn handle_window_event(&self, event: glutin::Event) -> bool {
         match event {
-            Event::KeyboardInput(element_state, _scan_code, Some(virtual_key_code)) => {
+            Event::ReceivedCharacter(ch) => {
+                if !ch.is_control() {
+                    self.pending_key_event_char.set(Some(ch));
+                }
+            }
+            Event::KeyboardInput(element_state, scan_code, Some(virtual_key_code)) => {
                 match virtual_key_code {
                     VirtualKeyCode::LControl => self.toggle_modifier(LEFT_CONTROL),
                     VirtualKeyCode::RControl => self.toggle_modifier(RIGHT_CONTROL),
@@ -246,32 +258,68 @@ impl Window {
                     _ => {}
                 }
 
+                let ch = match element_state {
+                    ElementState::Pressed => {
+                        // Retrieve any previosly stored ReceivedCharacter value.
+                        // Store the association between the scan code and the actual
+                        // character value, if there is one.
+                        let ch = self.pending_key_event_char
+                                     .get()
+                                     .and_then(|ch| filter_nonprintable(ch, virtual_key_code));
+                        self.pending_key_event_char.set(None);
+                        if let Some(ch) = ch {
+                            self.pressed_key_map.borrow_mut().push((scan_code, ch));
+                        }
+                        ch
+                    }
+
+                    ElementState::Released => {
+                        // Retrieve the associated character value for this release key,
+                        // if one was previously stored.
+                        let idx = self.pressed_key_map
+                                      .borrow()
+                                      .iter()
+                                      .position(|&(code, _)| code == scan_code);
+                        idx.map(|idx| self.pressed_key_map.borrow_mut().swap_remove(idx).1)
+                    }
+                };
+
                 if let Ok(key) = Window::glutin_key_to_script_key(virtual_key_code) {
                     let state = match element_state {
                         ElementState::Pressed => KeyState::Pressed,
                         ElementState::Released => KeyState::Released,
                     };
                     let modifiers = Window::glutin_mods_to_script_mods(self.key_modifiers.get());
-                    self.event_queue.borrow_mut().push(WindowEvent::KeyEvent(key, state, modifiers));
+                    self.event_queue.borrow_mut().push(WindowEvent::KeyEvent(ch, key, state, modifiers));
                 }
             }
             Event::KeyboardInput(_, _, None) => {
                 debug!("Keyboard input without virtual key.");
             }
             Event::Resized(width, height) => {
-                self.event_queue.borrow_mut().push(WindowEvent::Resize(Size2D::typed(width, height)));
+                self.event_queue.borrow_mut().push(WindowEvent::Resize(TypedSize2D::new(width, height)));
             }
-            Event::MouseInput(element_state, mouse_button) => {
+            Event::MouseInput(element_state, mouse_button, pos) => {
                 if mouse_button == MouseButton::Left ||
-                                    mouse_button == MouseButton::Right {
-                        let mouse_pos = self.mouse_pos.get();
-                        self.handle_mouse(mouse_button, element_state, mouse_pos.x, mouse_pos.y);
-                   }
+                   mouse_button == MouseButton::Right {
+                    match pos {
+                        Some((x, y)) => {
+                            self.mouse_pos.set(Point2D::new(x, y));
+                            self.event_queue.borrow_mut().push(
+                                WindowEvent::MouseWindowMoveEventClass(TypedPoint2D::new(x as f32, y as f32)));
+                            self.handle_mouse(mouse_button, element_state, x, y);
+                        }
+                        None => {
+                            let mouse_pos = self.mouse_pos.get();
+                            self.handle_mouse(mouse_button, element_state, mouse_pos.x, mouse_pos.y);
+                        }
+                    }
+                }
             }
             Event::MouseMoved(x, y) => {
                 self.mouse_pos.set(Point2D::new(x, y));
                 self.event_queue.borrow_mut().push(
-                    WindowEvent::MouseWindowMoveEventClass(Point2D::typed(x as f32, y as f32)));
+                    WindowEvent::MouseWindowMoveEventClass(TypedPoint2D::new(x as f32, y as f32)));
             }
             Event::MouseWheel(delta, phase) => {
                 let (dx, dy) = match delta {
@@ -286,12 +334,12 @@ impl Window {
 
                 let phase = glutin_phase_to_touch_event_type(touch.phase);
                 let id = TouchId(touch.id as i32);
-                let point = Point2D::typed(touch.location.0 as f32, touch.location.1 as f32);
+                let point = TypedPoint2D::new(touch.location.0 as f32, touch.location.1 as f32);
                 self.event_queue.borrow_mut().push(WindowEvent::Touch(phase, id, point));
             }
             Event::TouchpadPressure(pressure, stage) => {
                 let m = self.mouse_pos.get();
-                let point = Point2D::typed(m.x as f32, m.y as f32);
+                let point = TypedPoint2D::new(m.x as f32, m.y as f32);
                 let phase = glutin_pressure_stage_to_touchpad_pressure_phase(stage);
                 self.event_queue.borrow_mut().push(WindowEvent::TouchpadPressure(point, pressure, phase));
             }
@@ -323,8 +371,8 @@ impl Window {
             dy = 0.0;
         }
         let mouse_pos = self.mouse_pos.get();
-        let event = WindowEvent::Scroll(Point2D::typed(dx as f32, dy as f32),
-                                        Point2D::typed(mouse_pos.x as i32, mouse_pos.y as i32),
+        let event = WindowEvent::Scroll(TypedPoint2D::new(dx as f32, dy as f32),
+                                        TypedPoint2D::new(mouse_pos.x as i32, mouse_pos.y as i32),
                                         phase);
         self.event_queue.borrow_mut().push(event);
     }
@@ -339,10 +387,11 @@ impl Window {
             ElementState::Pressed => {
                 self.mouse_down_point.set(Point2D::new(x, y));
                 self.mouse_down_button.set(Some(button));
-                MouseWindowEvent::MouseDown(MouseButton::Left, Point2D::typed(x as f32, y as f32))
+                MouseWindowEvent::MouseDown(MouseButton::Left, TypedPoint2D::new(x as f32, y as f32))
             }
             ElementState::Released => {
-                let mouse_up_event = MouseWindowEvent::MouseUp(MouseButton::Left, Point2D::typed(x as f32, y as f32));
+                let mouse_up_event = MouseWindowEvent::MouseUp(MouseButton::Left,
+                                                               TypedPoint2D::new(x as f32, y as f32));
                 match self.mouse_down_button.get() {
                     None => mouse_up_event,
                     Some(but) if button == but => {
@@ -351,7 +400,7 @@ impl Window {
                                            pixel_dist.y * pixel_dist.y) as f64).sqrt();
                         if pixel_dist < max_pixel_dist {
                             self.event_queue.borrow_mut().push(WindowEvent::MouseWindowEventClass(mouse_up_event));
-                            MouseWindowEvent::Click(MouseButton::Left, Point2D::typed(x as f32, y as f32))
+                            MouseWindowEvent::Click(MouseButton::Left, TypedPoint2D::new(x as f32, y as f32))
                         } else {
                             mouse_up_event
                         }
@@ -576,7 +625,7 @@ impl Window {
     }
 
     fn glutin_mods_to_script_mods(modifiers: KeyModifiers) -> constellation_msg::KeyModifiers {
-        let mut result = constellation_msg::KeyModifiers::from_bits(0).expect("infallible");
+        let mut result = constellation_msg::KeyModifiers::empty();
         if modifiers.intersects(LEFT_SHIFT | RIGHT_SHIFT) {
             result.insert(SHIFT);
         }
@@ -623,17 +672,17 @@ fn create_window_proxy(window: &Window) -> Option<glutin::WindowProxy> {
 }
 
 impl WindowMethods for Window {
-    fn framebuffer_size(&self) -> TypedSize2D<DevicePixel, u32> {
+    fn framebuffer_size(&self) -> TypedSize2D<u32, DevicePixel> {
         let scale_factor = self.window.hidpi_factor() as u32;
         // TODO(ajeffrey): can this fail?
         let (width, height) = self.window.get_inner_size().expect("Failed to get window inner size.");
-        Size2D::typed(width * scale_factor, height * scale_factor)
+        TypedSize2D::new(width * scale_factor, height * scale_factor)
     }
 
-    fn size(&self) -> TypedSize2D<ScreenPx, f32> {
+    fn size(&self) -> TypedSize2D<f32, ScreenPx> {
         // TODO(ajeffrey): can this fail?
         let (width, height) = self.window.get_inner_size().expect("Failed to get window inner size.");
-        Size2D::typed(width as f32, height as f32)
+        TypedSize2D::new(width as f32, height as f32)
     }
 
     fn client_window(&self) -> (Size2D<u32>, Point2D<i32>) {
@@ -674,12 +723,12 @@ impl WindowMethods for Window {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn scale_factor(&self) -> ScaleFactor<ScreenPx, DevicePixel, f32> {
+    fn scale_factor(&self) -> ScaleFactor<f32, ScreenPx, DevicePixel> {
         ScaleFactor::new(self.window.hidpi_factor())
     }
 
     #[cfg(target_os = "windows")]
-    fn scale_factor(&self) -> ScaleFactor<ScreenPx, DevicePixel, f32> {
+    fn scale_factor(&self) -> ScaleFactor<f32, ScreenPx, DevicePixel> {
         let hdc = unsafe { user32::GetDC(::std::ptr::null_mut()) };
         let ppi = unsafe { gdi32::GetDeviceCaps(hdc, winapi::wingdi::LOGPIXELSY) };
         ScaleFactor::new(ppi as f32 / 96.0)
@@ -727,41 +776,41 @@ impl WindowMethods for Window {
         use glutin::MouseCursor;
 
         let glutin_cursor = match c {
-            Cursor::NoCursor => MouseCursor::NoneCursor,
-            Cursor::DefaultCursor => MouseCursor::Default,
-            Cursor::PointerCursor => MouseCursor::Hand,
-            Cursor::ContextMenuCursor => MouseCursor::ContextMenu,
-            Cursor::HelpCursor => MouseCursor::Help,
-            Cursor::ProgressCursor => MouseCursor::Progress,
-            Cursor::WaitCursor => MouseCursor::Wait,
-            Cursor::CellCursor => MouseCursor::Cell,
-            Cursor::CrosshairCursor => MouseCursor::Crosshair,
-            Cursor::TextCursor => MouseCursor::Text,
-            Cursor::VerticalTextCursor => MouseCursor::VerticalText,
-            Cursor::AliasCursor => MouseCursor::Alias,
-            Cursor::CopyCursor => MouseCursor::Copy,
-            Cursor::MoveCursor => MouseCursor::Move,
-            Cursor::NoDropCursor => MouseCursor::NoDrop,
-            Cursor::NotAllowedCursor => MouseCursor::NotAllowed,
-            Cursor::GrabCursor => MouseCursor::Grab,
-            Cursor::GrabbingCursor => MouseCursor::Grabbing,
-            Cursor::EResizeCursor => MouseCursor::EResize,
-            Cursor::NResizeCursor => MouseCursor::NResize,
-            Cursor::NeResizeCursor => MouseCursor::NeResize,
-            Cursor::NwResizeCursor => MouseCursor::NwResize,
-            Cursor::SResizeCursor => MouseCursor::SResize,
-            Cursor::SeResizeCursor => MouseCursor::SeResize,
-            Cursor::SwResizeCursor => MouseCursor::SwResize,
-            Cursor::WResizeCursor => MouseCursor::WResize,
-            Cursor::EwResizeCursor => MouseCursor::EwResize,
-            Cursor::NsResizeCursor => MouseCursor::NsResize,
-            Cursor::NeswResizeCursor => MouseCursor::NeswResize,
-            Cursor::NwseResizeCursor => MouseCursor::NwseResize,
-            Cursor::ColResizeCursor => MouseCursor::ColResize,
-            Cursor::RowResizeCursor => MouseCursor::RowResize,
-            Cursor::AllScrollCursor => MouseCursor::AllScroll,
-            Cursor::ZoomInCursor => MouseCursor::ZoomIn,
-            Cursor::ZoomOutCursor => MouseCursor::ZoomOut,
+            Cursor::None => MouseCursor::NoneCursor,
+            Cursor::Default => MouseCursor::Default,
+            Cursor::Pointer => MouseCursor::Hand,
+            Cursor::ContextMenu => MouseCursor::ContextMenu,
+            Cursor::Help => MouseCursor::Help,
+            Cursor::Progress => MouseCursor::Progress,
+            Cursor::Wait => MouseCursor::Wait,
+            Cursor::Cell => MouseCursor::Cell,
+            Cursor::Crosshair => MouseCursor::Crosshair,
+            Cursor::Text => MouseCursor::Text,
+            Cursor::VerticalText => MouseCursor::VerticalText,
+            Cursor::Alias => MouseCursor::Alias,
+            Cursor::Copy => MouseCursor::Copy,
+            Cursor::Move => MouseCursor::Move,
+            Cursor::NoDrop => MouseCursor::NoDrop,
+            Cursor::NotAllowed => MouseCursor::NotAllowed,
+            Cursor::Grab => MouseCursor::Grab,
+            Cursor::Grabbing => MouseCursor::Grabbing,
+            Cursor::EResize => MouseCursor::EResize,
+            Cursor::NResize => MouseCursor::NResize,
+            Cursor::NeResize => MouseCursor::NeResize,
+            Cursor::NwResize => MouseCursor::NwResize,
+            Cursor::SResize => MouseCursor::SResize,
+            Cursor::SeResize => MouseCursor::SeResize,
+            Cursor::SwResize => MouseCursor::SwResize,
+            Cursor::WResize => MouseCursor::WResize,
+            Cursor::EwResize => MouseCursor::EwResize,
+            Cursor::NsResize => MouseCursor::NsResize,
+            Cursor::NeswResize => MouseCursor::NeswResize,
+            Cursor::NwseResize => MouseCursor::NwseResize,
+            Cursor::ColResize => MouseCursor::ColResize,
+            Cursor::RowResize => MouseCursor::RowResize,
+            Cursor::AllScroll => MouseCursor::AllScroll,
+            Cursor::ZoomIn => MouseCursor::ZoomIn,
+            Cursor::ZoomOut => MouseCursor::ZoomOut,
         };
         self.window.set_cursor(glutin_cursor);
     }
@@ -794,48 +843,47 @@ impl WindowMethods for Window {
     }
 
     /// Helper function to handle keyboard events.
-    fn handle_key(&self, key: Key, mods: constellation_msg::KeyModifiers) {
-        match (mods, key) {
-            (_, Key::Equal) => {
+    fn handle_key(&self, ch: Option<char>, key: Key, mods: constellation_msg::KeyModifiers) {
+        match (mods, ch, key) {
+            (_, Some('+'), _) => {
                 if mods & !SHIFT == CMD_OR_CONTROL {
                     self.event_queue.borrow_mut().push(WindowEvent::Zoom(1.1));
                 } else if mods & !SHIFT == CMD_OR_CONTROL | ALT {
                     self.event_queue.borrow_mut().push(WindowEvent::PinchZoom(1.1));
                 }
             }
-            (CMD_OR_CONTROL, Key::Minus) => {
+            (CMD_OR_CONTROL, Some('-'), _) => {
                 self.event_queue.borrow_mut().push(WindowEvent::Zoom(1.0 / 1.1));
             }
-            (_, Key::Minus) if mods == CMD_OR_CONTROL | ALT => {
+            (_, Some('-'), _) if mods == CMD_OR_CONTROL | ALT => {
                 self.event_queue.borrow_mut().push(WindowEvent::PinchZoom(1.0 / 1.1));
             }
-            (CMD_OR_CONTROL, Key::Num0) |
-            (CMD_OR_CONTROL, Key::Kp0) => {
+            (CMD_OR_CONTROL, Some('0'), _) => {
                 self.event_queue.borrow_mut().push(WindowEvent::ResetZoom);
             }
 
-            (NONE, Key::NavigateForward) => {
+            (NONE, None, Key::NavigateForward) => {
                 self.event_queue.borrow_mut().push(WindowEvent::Navigation(WindowNavigateMsg::Forward));
             }
-            (NONE, Key::NavigateBackward) => {
+            (NONE, None, Key::NavigateBackward) => {
                 self.event_queue.borrow_mut().push(WindowEvent::Navigation(WindowNavigateMsg::Back));
             }
 
-            (NONE, Key::Escape) => {
-                if let Some(true) = prefs::get_pref("shell.quit-on-escape.enabled").as_boolean() {
+            (NONE, None, Key::Escape) => {
+                if let Some(true) = PREFS.get("shell.builtin-key-shortcuts.enabled").as_boolean() {
                     self.event_queue.borrow_mut().push(WindowEvent::Quit);
                 }
             }
 
-            (CMD_OR_ALT, Key::Right) => {
+            (CMD_OR_ALT, None, Key::Right) => {
                 self.event_queue.borrow_mut().push(WindowEvent::Navigation(WindowNavigateMsg::Forward));
             }
-            (CMD_OR_ALT, Key::Left) => {
+            (CMD_OR_ALT, None, Key::Left) => {
                 self.event_queue.borrow_mut().push(WindowEvent::Navigation(WindowNavigateMsg::Back));
             }
 
-            (NONE, Key::PageDown) |
-            (NONE, Key::Space) => {
+            (NONE, None, Key::PageDown) |
+            (NONE, Some(' '), _) => {
                 self.scroll_window(0.0,
                                    -self.framebuffer_size()
                                         .as_f32()
@@ -843,8 +891,8 @@ impl WindowMethods for Window {
                                         .height + 2.0 * LINE_HEIGHT,
                                    TouchEventType::Move);
             }
-            (NONE, Key::PageUp) |
-            (SHIFT, Key::Space) => {
+            (NONE, None, Key::PageUp) |
+            (SHIFT, Some(' '), _) => {
                 self.scroll_window(0.0,
                                    self.framebuffer_size()
                                        .as_f32()
@@ -852,17 +900,27 @@ impl WindowMethods for Window {
                                        .height - 2.0 * LINE_HEIGHT,
                                    TouchEventType::Move);
             }
-            (NONE, Key::Up) => {
+            (NONE, None, Key::Up) => {
                 self.scroll_window(0.0, 3.0 * LINE_HEIGHT, TouchEventType::Move);
             }
-            (NONE, Key::Down) => {
+            (NONE, None, Key::Down) => {
                 self.scroll_window(0.0, -3.0 * LINE_HEIGHT, TouchEventType::Move);
             }
-            (NONE, Key::Left) => {
+            (NONE, None, Key::Left) => {
                 self.scroll_window(LINE_HEIGHT, 0.0, TouchEventType::Move);
             }
-            (NONE, Key::Right) => {
+            (NONE, None, Key::Right) => {
                 self.scroll_window(-LINE_HEIGHT, 0.0, TouchEventType::Move);
+            }
+            (CMD_OR_CONTROL, Some('r'), _) => {
+                if let Some(true) = PREFS.get("shell.builtin-key-shortcuts.enabled").as_boolean() {
+                    self.event_queue.borrow_mut().push(WindowEvent::Reload);
+                }
+            }
+            (CMD_OR_CONTROL, Some('q'), _) => {
+                if let Some(true) = PREFS.get("shell.builtin-key-shortcuts.enabled").as_boolean() {
+                    self.event_queue.borrow_mut().push(WindowEvent::Quit);
+                }
             }
 
             _ => {
@@ -872,7 +930,7 @@ impl WindowMethods for Window {
     }
 
     fn supports_clipboard(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -915,6 +973,77 @@ fn glutin_pressure_stage_to_touchpad_pressure_phase(stage: i64) -> TouchpadPress
         TouchpadPressurePhase::AfterFirstClick
     } else {
         TouchpadPressurePhase::AfterSecondClick
+    }
+}
+
+fn filter_nonprintable(ch: char, key_code: VirtualKeyCode) -> Option<char> {
+    use glutin::VirtualKeyCode::*;
+    match key_code {
+        Escape |
+        F1 |
+        F2 |
+        F3 |
+        F4 |
+        F5 |
+        F6 |
+        F7 |
+        F8 |
+        F9 |
+        F10 |
+        F11 |
+        F12 |
+        F13 |
+        F14 |
+        F15 |
+        Snapshot |
+        Scroll |
+        Pause |
+        Insert |
+        Home |
+        Delete |
+        End |
+        PageDown |
+        PageUp |
+        Left |
+        Up |
+        Right |
+        Down |
+        Back |
+        LAlt |
+        LControl |
+        LMenu |
+        LShift |
+        LWin |
+        Mail |
+        MediaSelect |
+        MediaStop |
+        Mute |
+        MyComputer |
+        NavigateForward |
+        NavigateBackward |
+        NextTrack |
+        NoConvert |
+        PlayPause |
+        Power |
+        PrevTrack |
+        RAlt |
+        RControl |
+        RMenu |
+        RShift |
+        RWin |
+        Sleep |
+        Stop |
+        VolumeDown |
+        VolumeUp |
+        Wake |
+        WebBack |
+        WebFavorites |
+        WebForward |
+        WebHome |
+        WebRefresh |
+        WebSearch |
+        WebStop => None,
+        _ => Some(ch),
     }
 }
 

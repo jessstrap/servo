@@ -6,7 +6,7 @@
 
 <% data.new_style_struct("List", inherited=True) %>
 
-${helpers.single_keyword("list-style-position", "outside inside")}
+${helpers.single_keyword("list-style-position", "outside inside", animatable=False)}
 
 // TODO(pcwalton): Implement the full set of counter styles per CSS-COUNTER-STYLES [1] 6.1:
 //
@@ -23,15 +23,20 @@ ${helpers.single_keyword("list-style-type", """
                            myanmar oriya persian telugu thai tibetan cjk-earthly-branch
                            cjk-heavenly-stem lower-greek hiragana hiragana-iroha katakana
                            katakana-iroha""",
-    gecko_constant_prefix="NS_STYLE_LIST_STYLE")}
+    gecko_constant_prefix="NS_STYLE_LIST_STYLE",
+    animatable=False)}
 
-<%helpers:longhand name="list-style-image">
+<%helpers:longhand name="list-style-image" animatable="False">
     use cssparser::{ToCss, Token};
     use std::fmt;
     use url::Url;
     use values::LocalToCss;
+    use values::NoViewportPercentage;
 
-    #[derive(Debug, Clone, PartialEq, Eq, HeapSizeOf)]
+    impl NoViewportPercentage for SpecifiedValue {}
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub enum SpecifiedValue {
         None,
         Url(Url),
@@ -52,7 +57,8 @@ ${helpers.single_keyword("list-style-type", """
         use url::Url;
         use values::LocalToCss;
 
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Option<Url>);
 
         impl ToCss for T {
@@ -69,7 +75,7 @@ ${helpers.single_keyword("list-style-type", """
         type ComputedValue = computed_value::T;
 
         #[inline]
-        fn to_computed_value<Cx: TContext>(&self, _context: &Cx) -> computed_value::T {
+        fn to_computed_value(&self, _context: &Context) -> computed_value::T {
             match *self {
                 SpecifiedValue::None => computed_value::T(None),
                 SpecifiedValue::Url(ref url) => computed_value::T(Some(url.clone())),
@@ -90,9 +96,10 @@ ${helpers.single_keyword("list-style-type", """
     }
 </%helpers:longhand>
 
-<%helpers:longhand name="quotes">
+<%helpers:longhand name="quotes" animatable="False">
     use std::borrow::Cow;
     use std::fmt;
+    use values::NoViewportPercentage;
     use values::computed::ComputedValueAsSpecified;
 
     use cssparser::{ToCss, Token};
@@ -100,11 +107,13 @@ ${helpers.single_keyword("list-style-type", """
     pub use self::computed_value::T as SpecifiedValue;
 
     pub mod computed_value {
-        #[derive(Debug, Clone, PartialEq, HeapSizeOf)]
+        #[derive(Debug, Clone, PartialEq)]
+        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T(pub Vec<(String,String)>);
     }
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
 
     impl ToCss for SpecifiedValue {
         fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {

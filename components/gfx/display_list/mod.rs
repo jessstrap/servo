@@ -18,10 +18,12 @@ use app_units::Au;
 use azure::azure::AzFloat;
 use azure::azure_hl::Color;
 use euclid::approxeq::ApproxEq;
-use euclid::num::Zero;
+use euclid::num::{One, Zero};
 use euclid::rect::TypedRect;
-use euclid::{Matrix2D, Matrix4D, Point2D, Rect, SideOffsets2D, Size2D};
+use euclid::side_offsets::SideOffsets2D;
+use euclid::{Matrix2D, Matrix4D, Point2D, Rect, Size2D};
 use fnv::FnvHasher;
+use gfx_traits::print_tree::PrintTree;
 use gfx_traits::{LayerId, ScrollPolicy, StackingContextId};
 use ipc_channel::ipc::IpcSharedMemory;
 use msg::constellation_msg::PipelineId;
@@ -29,7 +31,6 @@ use net_traits::image::base::{Image, PixelFormat};
 use paint_context::PaintContext;
 use range::Range;
 use serde::de::{self, Deserialize, Deserializer, MapVisitor, Visitor};
-use serde::ser::impls::MapIteratorVisitor;
 use serde::ser::{Serialize, Serializer};
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
@@ -43,8 +44,7 @@ use style::computed_values::{border_style, filter, image_rendering, mix_blend_mo
 use style_traits::cursor::Cursor;
 use text::TextRun;
 use text::glyph::ByteIndex;
-use util::geometry::{self, MAX_RECT, ScreenPx};
-use util::print_tree::PrintTree;
+use util::geometry::{self, max_rect, ScreenPx};
 use webrender_traits::{self, WebGLContextId};
 
 pub use style::dom::OpaqueNode;
@@ -60,7 +60,7 @@ pub static BLUR_INFLATION_FACTOR: i32 = 3;
 /// LayerInfo is used to store PaintLayer metadata during DisplayList construction.
 /// It is also used for tracking LayerIds when creating layers to preserve ordering when
 /// layered DisplayItems should render underneath unlayered DisplayItems.
-#[derive(Clone, Copy, HeapSizeOf, Deserialize, Serialize)]
+#[derive(Clone, Copy, HeapSizeOf, Deserialize, Serialize, Debug)]
 pub struct LayerInfo {
     /// The base LayerId of this layer.
     pub layer_id: LayerId,
@@ -132,7 +132,7 @@ impl<'a> DisplayListTraversal<'a> {
     }
 }
 
-#[derive(HeapSizeOf, Deserialize, Serialize)]
+#[derive(HeapSizeOf, Deserialize, Serialize, Debug)]
 pub struct StackingContextOffsets {
     pub start: u32,
     pub block_backgrounds_and_borders: u32,
@@ -160,7 +160,12 @@ impl<K, V> DerefMut for FnvHashMap<K, V> {
 impl<K, V> Serialize for FnvHashMap<K, V> where K: Eq + Hash + Serialize, V: Serialize {
     #[inline]
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error> where S: Serializer {
-        serializer.serialize_map(MapIteratorVisitor::new(self.iter(), Some(self.len())))
+        let mut state = try!(serializer.serialize_map(Some(self.len())));
+        for (key, value) in self.iter() {
+            try!(serializer.serialize_map_key(&mut state, key));
+            try!(serializer.serialize_map_value(&mut state, value));
+        }
+        serializer.serialize_map_end(state)
     }
 }
 
@@ -214,13 +219,8 @@ pub struct DisplayList {
 
 impl DisplayList {
     pub fn new(mut root_stacking_context: StackingContext,
-               items: &mut Option<Vec<DisplayItem>>)
+               items: Vec<DisplayItem>)
                -> DisplayList {
-        let items = match items.take() {
-            Some(items) => items,
-            None => panic!("Tried to create empty display list."),
-        };
-
         let mut offsets = FnvHashMap(HashMap::with_hasher(Default::default()));
         DisplayList::sort_and_count_stacking_contexts(&mut root_stacking_context, &mut offsets, 0);
 
@@ -386,7 +386,11 @@ impl DisplayList {
             current_item_index: start,
             last_item_index: end,
         };
-        self.draw_stacking_context(stacking_context, &mut traversal, paint_context, transform);
+        self.draw_stacking_context(stacking_context,
+                                   &mut traversal,
+                                   paint_context,
+                                   transform,
+                                   &Point2D::zero());
     }
 
     fn draw_stacking_context_contents<'a>(&'a self,
@@ -394,6 +398,7 @@ impl DisplayList {
                                           traversal: &mut DisplayListTraversal<'a>,
                                           paint_context: &mut PaintContext,
                                           transform: &Matrix4D<f32>,
+                                          subpixel_offset: &Point2D<Au>,
                                           tile_rect: Option<Rect<Au>>) {
         for child in stacking_context.children.iter() {
             while let Some(item) = traversal.advance(stacking_context) {
@@ -403,7 +408,11 @@ impl DisplayList {
             }
 
             if child.intersects_rect_in_parent_context(tile_rect) {
-                self.draw_stacking_context(child, traversal, paint_context, &transform);
+                self.draw_stacking_context(child,
+                                           traversal,
+                                           paint_context,
+                                           &transform,
+                                           subpixel_offset);
             } else {
                 traversal.skip_past_stacking_context(child);
             }
@@ -421,12 +430,14 @@ impl DisplayList {
                                  stacking_context: &StackingContext,
                                  traversal: &mut DisplayListTraversal<'a>,
                                  paint_context: &mut PaintContext,
-                                 transform: &Matrix4D<f32>) {
+                                 transform: &Matrix4D<f32>,
+                                 subpixel_offset: &Point2D<Au>) {
         if stacking_context.context_type != StackingContextType::Real {
             self.draw_stacking_context_contents(stacking_context,
                                                 traversal,
                                                 paint_context,
                                                 transform,
+                                                subpixel_offset,
                                                 None);
             return;
         }
@@ -435,18 +446,33 @@ impl DisplayList {
             &stacking_context.filters,
             stacking_context.blend_mode);
 
-        // If a layer is being used, the transform for this layer
-        // will be handled by the compositor.
         let old_transform = paint_context.draw_target.get_transform();
-        let transform = match stacking_context.layer_info {
-            Some(..) => *transform,
+        let pixels_per_px = paint_context.screen_pixels_per_px();
+        let (transform, subpixel_offset) = match stacking_context.layer_info {
+            // If this stacking context starts a layer, the offset and transformation are handled
+            // by layer position within the compositor.
+            Some(..) => (*transform, *subpixel_offset),
             None => {
-                let pixels_per_px = paint_context.screen_pixels_per_px();
-                let origin = &stacking_context.bounds.origin;
-                transform.translate(
-                    origin.x.to_nearest_pixel(pixels_per_px.get()) as AzFloat,
-                    origin.y.to_nearest_pixel(pixels_per_px.get()) as AzFloat,
-                    0.0).mul(&stacking_context.transform)
+                let origin = stacking_context.bounds.origin + *subpixel_offset;
+                let pixel_snapped_origin =
+                    Point2D::new(origin.x.to_nearest_pixel(pixels_per_px.get()),
+                                 origin.y.to_nearest_pixel(pixels_per_px.get()));
+
+                let transform = transform.translate(pixel_snapped_origin.x as AzFloat,
+                                                    pixel_snapped_origin.y as AzFloat,
+                                                    0.0).mul(&stacking_context.transform);
+
+                if transform.is_identity_or_simple_translation() {
+                    let pixel_snapped_origin = Point2D::new(Au::from_f32_px(pixel_snapped_origin.x),
+                                                            Au::from_f32_px(pixel_snapped_origin.y));
+                    (transform, origin - pixel_snapped_origin)
+                } else {
+                    // In the case of a more complicated transformation, don't attempt to
+                    // preserve subpixel offsets. This causes problems with reference tests
+                    // that do scaling and rotation and it's unclear if we even want to be doing
+                    // this.
+                    (transform, Point2D::zero())
+                }
             }
         };
 
@@ -459,6 +485,7 @@ impl DisplayList {
                 clip_rect: Some(stacking_context.overflow),
                 transient_clip: None,
                 layer_kind: paint_context.layer_kind,
+                subpixel_offset: subpixel_offset,
             };
 
             // Set up our clip rect and transform.
@@ -473,6 +500,7 @@ impl DisplayList {
                 traversal,
                 &mut paint_subcontext,
                 &transform,
+                &subpixel_offset,
                 Some(transformed_tile_rect(paint_context.screen_rect, &transform)));
 
             paint_subcontext.remove_transient_clip_if_applicable();
@@ -484,10 +512,12 @@ impl DisplayList {
             &draw_target, &stacking_context.filters, stacking_context.blend_mode);
     }
 
-    /// Places all nodes containing the point of interest into `result`, topmost first. Respects
-    /// the `pointer-events` CSS property If `topmost_only` is true, stops after placing one node
-    /// into the list. `result` must be empty upon entry to this function.
-    pub fn hit_test(&self, point: &Point2D<Au>, scroll_offsets: &ScrollOffsetMap)
+    /// Return all nodes containing the point of interest, bottommost first, and
+    /// respecting the `pointer-events` CSS property.
+    pub fn hit_test(&self,
+                    translated_point: &Point2D<Au>,
+                    client_point: &Point2D<Au>,
+                    scroll_offsets: &ScrollOffsetMap)
                     -> Vec<DisplayItemMetadata> {
         let mut traversal = DisplayListTraversal {
             display_list: self,
@@ -495,13 +525,16 @@ impl DisplayList {
             last_item_index: self.list.len() - 1,
         };
         let mut result = Vec::new();
-        self.root_stacking_context.hit_test(&mut traversal, point, scroll_offsets, &mut result);
-        result.reverse();
+        self.root_stacking_context.hit_test(&mut traversal,
+                                            translated_point,
+                                            client_point,
+                                            scroll_offsets,
+                                            &mut result);
         result
     }
 }
 
-fn transformed_tile_rect(tile_rect: TypedRect<ScreenPx, usize>, transform: &Matrix4D<f32>) -> Rect<Au> {
+fn transformed_tile_rect(tile_rect: TypedRect<usize, ScreenPx>, transform: &Matrix4D<f32>) -> Rect<Au> {
     // Invert the current transform, then use this to back transform
     // the tile rect (placed at the origin) into the space of this
     // stacking context.
@@ -611,27 +644,35 @@ impl StackingContext {
 
     pub fn hit_test<'a>(&self,
                         traversal: &mut DisplayListTraversal<'a>,
-                        point: &Point2D<Au>,
+                        translated_point: &Point2D<Au>,
+                        client_point: &Point2D<Au>,
                         scroll_offsets: &ScrollOffsetMap,
                         result: &mut Vec<DisplayItemMetadata>) {
+        let is_fixed = match self.layer_info {
+            Some(ref layer_info) => layer_info.scroll_policy == ScrollPolicy::FixedPosition,
+            None => false,
+        };
+
+        let effective_point = if is_fixed { client_point } else { translated_point };
+
         // Convert the point into stacking context local transform space.
         let mut point = if self.context_type == StackingContextType::Real {
-            let point = *point - self.bounds.origin;
+            let point = *effective_point - self.bounds.origin;
             let inv_transform = self.transform.invert();
             let frac_point = inv_transform.transform_point(&Point2D::new(point.x.to_f32_px(),
                                                                          point.y.to_f32_px()));
             Point2D::new(Au::from_f32_px(frac_point.x), Au::from_f32_px(frac_point.y))
         } else {
-            *point
+            *effective_point
         };
 
-        // Adjust the point to account for the scroll offset if necessary. This can only happen
-        // when WebRender is in use.
+        // Adjust the translated point to account for the scroll offset if
+        // necessary. This can only happen when WebRender is in use.
         //
-        // We don't perform this adjustment on the root stacking context because the DOM-side code
-        // has already translated the point for us (e.g. in `Document::handle_mouse_move_event()`)
-        // by now.
-        if self.id != StackingContextId::root() {
+        // We don't perform this adjustment on the root stacking context because
+        // the DOM-side code has already translated the point for us (e.g. in
+        // `Window::hit_test_query()`) by now.
+        if !is_fixed && self.id != StackingContextId::root() {
             if let Some(scroll_offset) = scroll_offsets.get(&self.id) {
                 point.x -= Au::from_f32_px(scroll_offset.x);
                 point.y -= Au::from_f32_px(scroll_offset.y);
@@ -640,13 +681,17 @@ impl StackingContext {
 
         for child in self.children.iter() {
             while let Some(item) = traversal.advance(self) {
-                item.hit_test(point, result);
+                if let Some(meta) = item.hit_test(point) {
+                    result.push(meta);
+                }
             }
-            child.hit_test(traversal, &point, scroll_offsets, result);
+            child.hit_test(traversal, translated_point, client_point, scroll_offsets, result);
         }
 
         while let Some(item) = traversal.advance(self) {
-            item.hit_test(point, result);
+            if let Some(meta) = item.hit_test(point) {
+                result.push(meta);
+            }
         }
     }
 
@@ -842,7 +887,7 @@ impl ClippingRegion {
     #[inline]
     pub fn max() -> ClippingRegion {
         ClippingRegion {
-            main: MAX_RECT,
+            main: max_rect(),
             complex: Vec::new(),
         }
     }
@@ -1134,7 +1179,7 @@ impl BorderRadii<Au> {
 
     // Scale the border corner radius by the specified factor
     pub fn scale_corner_by(corner: Size2D<Au>, s: f32) -> Size2D<Au> {
-        Size2D { width: corner.width.scale_by(s), height: corner.height.scale_by(s) }
+        Size2D::new(corner.width.scale_by(s), corner.height.scale_by(s))
     }
 }
 
@@ -1151,10 +1196,10 @@ impl<T> BorderRadii<T> where T: PartialEq + Zero + Clone {
     /// Returns a set of border radii that all have the given value.
     pub fn all_same(value: T) -> BorderRadii<T> {
         BorderRadii {
-            top_left: Size2D { width: value.clone(), height: value.clone() },
-            top_right: Size2D { width: value.clone(), height: value.clone() },
-            bottom_right: Size2D { width: value.clone(), height: value.clone() },
-            bottom_left: Size2D { width: value.clone(), height: value.clone() },
+            top_left: Size2D::new(value.clone(), value.clone()),
+            top_right: Size2D::new(value.clone(), value.clone()),
+            bottom_right: Size2D::new(value.clone(), value.clone()),
+            bottom_left: Size2D::new(value.clone(), value.clone()),
         }
     }
 }
@@ -1335,21 +1380,22 @@ impl DisplayItem {
         println!("{}+ {:?}", indent, self);
     }
 
-    fn hit_test(&self, point: Point2D<Au>, result: &mut Vec<DisplayItemMetadata>) {
+    fn hit_test(&self, point: Point2D<Au>) -> Option<DisplayItemMetadata> {
         // TODO(pcwalton): Use a precise algorithm here. This will allow us to properly hit
         // test elements with `border-radius`, for example.
         let base_item = self.base();
+
         if !base_item.clip.might_intersect_point(&point) {
             // Clipped out.
-            return;
+            return None;
         }
         if !self.bounds().contains(&point) {
             // Can't possibly hit.
-            return;
+            return None;
         }
         if base_item.metadata.pointing.is_none() {
             // `pointer-events` is `none`. Ignore this item.
-            return;
+            return None;
         }
 
         match *self {
@@ -1368,18 +1414,17 @@ impl DisplayItem {
                                     (border.border_widths.top +
                                      border.border_widths.bottom)));
                 if interior_rect.contains(&point) {
-                    return;
+                    return None;
                 }
             }
             DisplayItem::BoxShadowClass(_) => {
                 // Box shadows can never be hit.
-                return
+                return None;
             }
             _ => {}
         }
 
-        // We found a hit!
-        result.push(base_item.metadata);
+        Some(base_item.metadata)
     }
 }
 
@@ -1434,3 +1479,18 @@ impl WebRenderImageInfo {
 /// The type of the scroll offset list. This is only populated if WebRender is in use.
 pub type ScrollOffsetMap = HashMap<StackingContextId, Point2D<f32>>;
 
+
+pub trait SimpleMatrixDetection {
+    fn is_identity_or_simple_translation(&self) -> bool;
+}
+
+impl SimpleMatrixDetection for Matrix4D<f32> {
+    #[inline]
+    fn is_identity_or_simple_translation(&self) -> bool {
+        let (_0, _1) = (Zero::zero(), One::one());
+        self.m11 == _1 && self.m12 == _0 && self.m13 == _0 && self.m14 == _0 &&
+        self.m21 == _0 && self.m22 == _1 && self.m23 == _0 && self.m24 == _0 &&
+        self.m31 == _0 && self.m32 == _0 && self.m33 == _1 && self.m34 == _0 &&
+        self.m44 == _1
+    }
+}

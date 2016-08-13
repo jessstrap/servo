@@ -2,14 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>English</string>
 	<key>CFBundleExecutable</key>
+	<string>run-servo</string>
+	<key>CFBundleGetInfoString</key>
 	<string>Servo</string>
 	<key>CFBundleIconFile</key>
-	<string>Calculator.icns</string>
+	<string>servo.icns</string>
 	<key>CFBundleIdentifier</key>
-	<string>org.mozilla.servo</string>
+	<string>org.servo.Servo</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -17,18 +17,12 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1</string>
-	<key>CFBundleSignature</key>
-	<string>????</string>
-	<key>CFBundleVersion</key>
-	<string>0.1</string>
-	<key>LSHasLocalizedDisplayName</key>
+	<string>0.0.1</string>
+	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>LSMinimumSystemVersion</key>
-	<string>10.3</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>NSSupportsSuddenTermination</key>
+	<key>NSQuitAlwaysKeepsWindows</key>
 	<false/>
 </dict>
 </plist>

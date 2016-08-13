@@ -28,7 +28,6 @@ use dom::bindings::num::Finite;
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::{Reflectable, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
-use dom::bindings::trace::RootedVec;
 use dom::bindings::xmlname::XMLName::InvalidXMLName;
 use dom::bindings::xmlname::{validate_and_extract, namespace_from_domstring, xml_name_type};
 use dom::browsingcontext::BrowsingContext;
@@ -92,7 +91,6 @@ use html5ever::tree_builder::{LimitedQuirks, NoQuirks, Quirks, QuirksMode};
 use ipc_channel::ipc::{self, IpcSender};
 use js::jsapi::JS_GetRuntime;
 use js::jsapi::{JSContext, JSObject, JSRuntime};
-use layout_interface::{Msg, ReflowQueryType};
 use msg::constellation_msg::{ALT, CONTROL, SHIFT, SUPER};
 use msg::constellation_msg::{Key, KeyModifiers, KeyState};
 use msg::constellation_msg::{PipelineId, ReferrerPolicy, SubpageId};
@@ -103,6 +101,7 @@ use net_traits::{AsyncResponseTarget, PendingAsyncLoad, IpcSend};
 use num_traits::ToPrimitive;
 use origin::Origin;
 use parse::{ParserRoot, ParserRef, MutNullableParserField};
+use script_layout_interface::message::{Msg, ReflowQueryType};
 use script_thread::{MainThreadScriptMsg, Runnable};
 use script_traits::UntrustedNodeAddress;
 use script_traits::{AnimationState, MouseButton, MouseEventType, MozBrowserEvent};
@@ -115,6 +114,7 @@ use std::cell::{Cell, Ref, RefMut};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::default::Default;
+use std::iter::once;
 use std::mem;
 use std::ptr;
 use std::rc::Rc;
@@ -122,13 +122,13 @@ use std::sync::Arc;
 use string_cache::{Atom, QualName};
 use style::attr::AttrValue;
 use style::context::ReflowGoal;
-use style::restyle_hints::ElementSnapshot;
-use style::servo::Stylesheet;
+use style::selector_impl::ElementSnapshot;
+use style::str::{split_html_space_chars, str_join};
+use style::stylesheets::Stylesheet;
 use time;
 use url::Url;
 use url::percent_encoding::percent_decode;
-use util::prefs::mozbrowser_enabled;
-use util::str::{split_html_space_chars, str_join};
+use util::prefs::PREFS;
 
 #[derive(JSTraceable, PartialEq, HeapSizeOf)]
 pub enum IsHTMLDocument {
@@ -239,6 +239,10 @@ pub struct Document {
     origin: Origin,
     ///  https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-states
     referrer_policy: Cell<Option<ReferrerPolicy>>,
+    /// https://html.spec.whatwg.org/multipage/#dom-document-referrer
+    referrer: Option<String>,
+    /// https://html.spec.whatwg.org/multipage/#target-element
+    target_element: MutNullableHeap<JS<Element>>,
 }
 
 #[derive(JSTraceable, HeapSizeOf)]
@@ -345,6 +349,10 @@ impl Document {
         true
     }
 
+    pub fn origin(&self) -> &Origin {
+        &self.origin
+    }
+
     // https://dom.spec.whatwg.org/#concept-document-url
     pub fn url(&self) -> &Url {
         &self.url
@@ -374,6 +382,7 @@ impl Document {
         // that workable.
         match self.GetDocumentElement() {
             Some(root) => {
+                root.upcast::<Node>().is_dirty() ||
                 root.upcast::<Node>().has_dirty_descendants() ||
                 !self.modified_elements.borrow().is_empty()
             }
@@ -599,6 +608,9 @@ impl Document {
     /// Reassign the focus context to the element that last requested focus during this
     /// transaction, or none if no elements requested it.
     pub fn commit_focus_transaction(&self, focus_type: FocusType) {
+        if self.focused == self.possibly_focused.get().r() {
+            return
+        }
         if let Some(ref elem) = self.focused.get() {
             let node = elem.upcast::<Node>();
             elem.set_focus_state(false);
@@ -660,9 +672,7 @@ impl Document {
         };
         debug!("{}: at {:?}", mouse_event_type_string, client_point);
 
-        let page_point = Point2D::new(client_point.x + self.window.PageXOffset() as f32,
-                                      client_point.y + self.window.PageYOffset() as f32);
-        let node = match self.window.hit_test_query(page_point, false) {
+        let node = match self.window.hit_test_query(client_point, false) {
             Some(node_address) => {
                 debug!("node address is {:?}", node_address);
                 node::from_untrusted_node_address(js_runtime, node_address)
@@ -732,9 +742,22 @@ impl Document {
         // https://w3c.github.io/uievents/#trusted-events
         event.set_trusted(true);
         // https://html.spec.whatwg.org/multipage/#run-authentic-click-activation-steps
+        let activatable = el.as_maybe_activatable();
         match mouse_event_type {
             MouseEventType::Click => el.authentic_click_activation(event),
-            _ => {
+            MouseEventType::MouseDown => {
+                if let Some(a) = activatable {
+                    a.enter_formal_activation_state();
+                }
+
+                let target = node.upcast();
+                event.fire(target);
+            },
+            MouseEventType::MouseUp => {
+                if let Some(a) = activatable {
+                    a.exit_formal_activation_state();
+                }
+
                 let target = node.upcast();
                 event.fire(target);
             },
@@ -761,9 +784,7 @@ impl Document {
             return;
         }
 
-        let page_point = Point2D::new(client_point.x + self.window.PageXOffset() as f32,
-                                      client_point.y + self.window.PageYOffset() as f32);
-        let node = match self.window.hit_test_query(page_point, false) {
+        let node = match self.window.hit_test_query(client_point, false) {
             Some(node_address) => node::from_untrusted_node_address(js_runtime, node_address),
             None => return
         };
@@ -839,22 +860,17 @@ impl Document {
                                    js_runtime: *mut JSRuntime,
                                    client_point: Option<Point2D<f32>>,
                                    prev_mouse_over_target: &MutNullableHeap<JS<Element>>) {
-        let page_point = match client_point {
+        let client_point = match client_point {
             None => {
                 // If there's no point, there's no target under the mouse
                 // FIXME: dispatch mouseout here. We have no point.
                 prev_mouse_over_target.set(None);
                 return;
             }
-            Some(ref client_point) => {
-                Point2D::new(client_point.x + self.window.PageXOffset() as f32,
-                             client_point.y + self.window.PageYOffset() as f32)
-            }
+            Some(client_point) => client_point,
         };
 
-        let client_point = client_point.unwrap();
-
-        let maybe_new_target = self.window.hit_test_query(page_point, true).and_then(|address| {
+        let maybe_new_target = self.window.hit_test_query(client_point, true).and_then(|address| {
             let node = node::from_untrusted_node_address(js_runtime, address);
             node.inclusive_ancestors()
                 .filter_map(Root::downcast::<Element>)
@@ -901,6 +917,7 @@ impl Document {
                                          .inclusive_ancestors()
                                          .filter_map(Root::downcast::<Element>) {
                     element.set_hover_state(false);
+                    element.set_active_state(false);
                 }
             }
 
@@ -1006,18 +1023,15 @@ impl Document {
             }
         }
 
-        let mut touches = RootedVec::new();
+        rooted_vec!(let mut touches);
         touches.extend(self.active_touch_points.borrow().iter().cloned());
-
-        let mut changed_touches = RootedVec::new();
-        changed_touches.push(JS::from_ref(&*touch));
-
-        let mut target_touches = RootedVec::new();
+        rooted_vec!(let mut target_touches);
         target_touches.extend(self.active_touch_points
                                   .borrow()
                                   .iter()
                                   .filter(|t| t.Target() == target)
                                   .cloned());
+        rooted_vec!(let changed_touches <- once(touch));
 
         let event = TouchEvent::new(window,
                                     DOMString::from(event_name),
@@ -1044,6 +1058,7 @@ impl Document {
 
     /// The entry point for all key processing for web content
     pub fn dispatch_key_event(&self,
+                              ch: Option<char>,
                               key: Key,
                               state: KeyState,
                               modifiers: KeyModifiers,
@@ -1070,7 +1085,7 @@ impl Document {
                                       }
                                       .to_owned());
 
-        let props = KeyboardEvent::key_properties(key, modifiers);
+        let props = KeyboardEvent::key_properties(ch, key, modifiers);
 
         let keyevent = KeyboardEvent::new(&self.window,
                                           ev_type,
@@ -1078,8 +1093,9 @@ impl Document {
                                           true,
                                           Some(&self.window),
                                           0,
+                                          ch,
                                           Some(key),
-                                          DOMString::from(props.key_string),
+                                          DOMString::from(props.key_string.clone()),
                                           DOMString::from(props.code),
                                           props.location,
                                           is_repeating,
@@ -1103,6 +1119,7 @@ impl Document {
                                            true,
                                            Some(&self.window),
                                            0,
+                                           ch,
                                            Some(key),
                                            DOMString::from(props.key_string),
                                            DOMString::from(props.code),
@@ -1122,7 +1139,7 @@ impl Document {
         }
 
         if !prevented {
-            constellation.send(ConstellationMsg::SendKeyEvent(key, state, modifiers)).unwrap();
+            constellation.send(ConstellationMsg::SendKeyEvent(ch, key, state, modifiers)).unwrap();
         }
 
         // This behavior is unspecced
@@ -1259,10 +1276,10 @@ impl Document {
     }
 
     pub fn trigger_mozbrowser_event(&self, event: MozBrowserEvent) {
-        if mozbrowser_enabled() {
+        if PREFS.is_mozbrowser_enabled() {
             if let Some((containing_pipeline_id, subpage_id, _)) = self.window.parent_info() {
                 let event = ConstellationMsg::MozBrowserEvent(containing_pipeline_id,
-                                                              subpage_id,
+                                                              Some(subpage_id),
                                                               event);
                 self.window.constellation_chan().send(event).unwrap();
             }
@@ -1352,6 +1369,7 @@ impl Document {
     }
 
     pub fn finish_load(&self, load: LoadType) {
+        debug!("Document got finish_load: {:?}", load);
         // The parser might need the loader, so restrict the lifetime of the borrow.
         {
             let mut loader = self.loader.borrow_mut();
@@ -1377,9 +1395,9 @@ impl Document {
             // If we don't have a parser, and the reflow timer has been reset, explicitly
             // trigger a reflow.
             if let LoadType::Stylesheet(_) = load {
-                self.window().reflow(ReflowGoal::ForDisplay,
-                                     ReflowQueryType::NoQuery,
-                                     ReflowReason::StylesheetLoaded);
+                self.window.reflow(ReflowGoal::ForDisplay,
+                                   ReflowQueryType::NoQuery,
+                                   ReflowReason::StylesheetLoaded);
             }
         }
 
@@ -1468,23 +1486,25 @@ impl Document {
             return;
         }
         self.domcontentloaded_dispatched.set(true);
+        assert!(self.ReadyState() != DocumentReadyState::Complete,
+                "Complete before DOMContentLoaded?");
 
         update_with_current_time_ms(&self.dom_content_loaded_event_start);
 
-        self.window().dom_manipulation_task_source().queue_event(self.upcast(), atom!("DOMContentLoaded"),
-            EventBubbles::Bubbles, EventCancelable::NotCancelable);
-        self.window().reflow(ReflowGoal::ForDisplay,
-                             ReflowQueryType::NoQuery,
-                             ReflowReason::DOMContentLoaded);
+        let window = self.window();
+        window.dom_manipulation_task_source().queue_event(self.upcast(), atom!("DOMContentLoaded"),
+            EventBubbles::Bubbles, EventCancelable::NotCancelable, window);
 
+        window.reflow(ReflowGoal::ForDisplay,
+                      ReflowQueryType::NoQuery,
+                      ReflowReason::DOMContentLoaded);
         update_with_current_time_ms(&self.dom_content_loaded_event_end);
     }
 
     pub fn notify_constellation_load(&self) {
         let pipeline_id = self.window.pipeline();
-        let event = ConstellationMsg::DOMLoad(pipeline_id);
-        self.window.constellation_chan().send(event).unwrap();
-
+        let load_event = ConstellationMsg::LoadComplete(pipeline_id);
+        self.window.constellation_chan().send(load_event).unwrap();
     }
 
     pub fn set_current_parser(&self, script: Option<ParserRef>) {
@@ -1559,12 +1579,16 @@ impl Document {
     }
 
     /// https://html.spec.whatwg.org/multipage/#cookie-averse-document-object
-    fn is_cookie_averse(&self) -> bool {
+    pub fn is_cookie_averse(&self) -> bool {
         self.browsing_context.is_none() || !url_has_network_scheme(&self.url)
     }
 
-    pub fn nodes_from_point(&self, page_point: &Point2D<f32>) -> Vec<UntrustedNodeAddress> {
-        self.window.layout().nodes_from_point(*page_point)
+    pub fn nodes_from_point(&self, client_point: &Point2D<f32>) -> Vec<UntrustedNodeAddress> {
+        let page_point =
+            Point2D::new(client_point.x + self.window.PageXOffset() as f32,
+                         client_point.y + self.window.PageYOffset() as f32);
+
+        self.window.layout().nodes_from_point(page_point, *client_point)
     }
 }
 
@@ -1612,7 +1636,9 @@ impl Document {
                          content_type: Option<DOMString>,
                          last_modified: Option<String>,
                          source: DocumentSource,
-                         doc_loader: DocumentLoader)
+                         doc_loader: DocumentLoader,
+                         referrer: Option<String>,
+                         referrer_policy: Option<ReferrerPolicy>)
                          -> Document {
         let url = url.unwrap_or_else(|| Url::parse("about:blank").unwrap());
 
@@ -1630,6 +1656,17 @@ impl Document {
             // Default to DOM standard behaviour
             Origin::opaque_identifier()
         };
+
+        // TODO: we currently default to Some(NoReferrer) instead of None (i.e. unset)
+        // for an important reason. Many of the methods by which a referrer policy is communicated
+        // are currently unimplemented, and so in such cases we may be ignoring the desired policy.
+        // If the default were left unset, then in Step 7 of the Fetch algorithm we adopt
+        // no-referrer-when-downgrade. However, since we are potentially ignoring a stricter
+        // referrer policy, this might be passing too much info. Hence, we default to the
+        // strictest policy, which is no-referrer.
+        // Once other delivery methods are implemented, make the unset case really
+        // unset (i.e. None).
+        let referrer_policy = referrer_policy.or(Some(ReferrerPolicy::NoReferrer));
 
         Document {
             node: Node::new_document_node(),
@@ -1697,8 +1734,9 @@ impl Document {
             https_state: Cell::new(HttpsState::None),
             touchpad_pressure_phase: Cell::new(TouchpadPressurePhase::BeforeClick),
             origin: origin,
-            //TODO - setting this for now so no Referer header set
-            referrer_policy: Cell::new(Some(ReferrerPolicy::NoReferrer)),
+            referrer: referrer,
+            referrer_policy: Cell::new(referrer_policy),
+            target_element: MutNullableHeap::new(None),
         }
     }
 
@@ -1715,7 +1753,9 @@ impl Document {
                          None,
                          None,
                          DocumentSource::NotFromParser,
-                         docloader))
+                         docloader,
+                         None,
+                         None))
     }
 
     pub fn new(window: &Window,
@@ -1725,7 +1765,9 @@ impl Document {
                content_type: Option<DOMString>,
                last_modified: Option<String>,
                source: DocumentSource,
-               doc_loader: DocumentLoader)
+               doc_loader: DocumentLoader,
+               referrer: Option<String>,
+               referrer_policy: Option<ReferrerPolicy>)
                -> Root<Document> {
         let document = reflect_dom_object(box Document::new_inherited(window,
                                                                       browsing_context,
@@ -1734,7 +1776,9 @@ impl Document {
                                                                       content_type,
                                                                       last_modified,
                                                                       source,
-                                                                      doc_loader),
+                                                                      doc_loader,
+                                                                      referrer,
+                                                                      referrer_policy),
                                           GlobalRef::Window(window),
                                           DocumentBinding::Wrap);
         {
@@ -1798,7 +1842,9 @@ impl Document {
                                         None,
                                         None,
                                         DocumentSource::NotFromParser,
-                                        DocumentLoader::new(&self.loader()));
+                                        DocumentLoader::new(&self.loader()),
+                                        None,
+                                        None);
             new_doc.appropriate_template_contents_owner_document.set(Some(&new_doc));
             new_doc
         })
@@ -1810,7 +1856,10 @@ impl Document {
 
     pub fn element_state_will_change(&self, el: &Element) {
         let mut map = self.modified_elements.borrow_mut();
-        let snapshot = map.entry(JS::from_ref(el)).or_insert(ElementSnapshot::new());
+        let snapshot = map.entry(JS::from_ref(el))
+                          .or_insert_with(|| {
+                              ElementSnapshot::new(el.html_element_in_html_document())
+                          });
         if snapshot.state.is_none() {
             snapshot.state = Some(el.state());
         }
@@ -1818,7 +1867,10 @@ impl Document {
 
     pub fn element_attr_will_change(&self, el: &Element) {
         let mut map = self.modified_elements.borrow_mut();
-        let mut snapshot = map.entry(JS::from_ref(el)).or_insert(ElementSnapshot::new());
+        let mut snapshot = map.entry(JS::from_ref(el))
+                              .or_insert_with(|| {
+                                  ElementSnapshot::new(el.html_element_in_html_document())
+                              });
         if snapshot.attrs.is_none() {
             let attrs = el.attrs()
                           .iter()
@@ -1835,6 +1887,22 @@ impl Document {
     //TODO - default still at no-referrer
     pub fn get_referrer_policy(&self) -> Option<ReferrerPolicy> {
         return self.referrer_policy.get();
+    }
+
+    pub fn set_target_element(&self, node: Option<&Element>) {
+        if let Some(ref element) = self.target_element.get() {
+            element.set_target_state(false);
+        }
+
+        self.target_element.set(node);
+
+        if let Some(ref element) = self.target_element.get() {
+            element.set_target_state(true);
+        }
+
+        self.window.reflow(ReflowGoal::ForDisplay,
+                           ReflowQueryType::NoQuery,
+                           ReflowReason::ElementStateChanged);
     }
 }
 
@@ -1914,6 +1982,14 @@ impl DocumentMethods for Document {
         } else {
             // Step 3.
             DOMString::new()
+        }
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-document-referrer
+    fn Referrer(&self) -> DOMString {
+        match self.referrer {
+            Some(ref referrer) => DOMString::from(referrer.to_string()),
+            None => DOMString::new()
         }
     }
 
@@ -2731,7 +2807,7 @@ impl DocumentMethods for Document {
     fn ElementFromPoint(&self, x: Finite<f64>, y: Finite<f64>) -> Option<Root<Element>> {
         let x = *x as f32;
         let y = *y as f32;
-        let point = &Point2D { x: x, y: y };
+        let point = &Point2D::new(x, y);
         let window = window_from_node(self);
         let viewport = window.window_size().unwrap().visible_viewport;
 
@@ -2739,14 +2815,14 @@ impl DocumentMethods for Document {
             return None;
         }
 
-        if x < 0.0 || y < 0.0 || x > viewport.width.get() || y > viewport.height.get() {
+        if x < 0.0 || y < 0.0 || x > viewport.width || y > viewport.height {
             return None;
         }
 
-        let js_runtime = unsafe { JS_GetRuntime(window.get_cx()) };
-
         match self.window.hit_test_query(*point, false) {
             Some(untrusted_node_address) => {
+                let js_runtime = unsafe { JS_GetRuntime(window.get_cx()) };
+
                 let node = node::from_untrusted_node_address(js_runtime, untrusted_node_address);
                 let parent_node = node.GetParentNode().unwrap();
                 let element_ref = node.downcast::<Element>().unwrap_or_else(|| {
@@ -2764,7 +2840,7 @@ impl DocumentMethods for Document {
     fn ElementsFromPoint(&self, x: Finite<f64>, y: Finite<f64>) -> Vec<Root<Element>> {
         let x = *x as f32;
         let y = *y as f32;
-        let point = &Point2D { x: x, y: y };
+        let point = &Point2D::new(x, y);
         let window = window_from_node(self);
         let viewport = window.window_size().unwrap().visible_viewport;
 
@@ -2773,7 +2849,7 @@ impl DocumentMethods for Document {
         }
 
         // Step 2
-        if x < 0.0 || y < 0.0 || x > viewport.width.get() || y > viewport.height.get() {
+        if x < 0.0 || y < 0.0 || x > viewport.width || y > viewport.height {
             return vec!();
         }
 
@@ -2814,8 +2890,9 @@ pub fn determine_policy_for_token(token: &str) -> Option<ReferrerPolicy> {
     let lower = token.to_lowercase();
     return match lower.as_ref() {
         "never" | "no-referrer" => Some(ReferrerPolicy::NoReferrer),
-        "default" | "no-referrer-when-downgrade" => Some(ReferrerPolicy::NoRefWhenDowngrade),
-        "origin" => Some(ReferrerPolicy::OriginOnly),
+        "default" | "no-referrer-when-downgrade" => Some(ReferrerPolicy::NoReferrerWhenDowngrade),
+        "origin" => Some(ReferrerPolicy::Origin),
+        "same-origin" => Some(ReferrerPolicy::SameOrigin),
         "origin-when-cross-origin" => Some(ReferrerPolicy::OriginWhenCrossOrigin),
         "always" | "unsafe-url" => Some(ReferrerPolicy::UnsafeUrl),
         "" => Some(ReferrerPolicy::NoReferrer),
@@ -2852,20 +2929,24 @@ impl DocumentProgressHandler {
         // http://w3c.github.io/navigation-timing/#widl-PerformanceNavigationTiming-loadEventStart
         update_with_current_time_ms(&document.load_event_start);
 
+        debug!("About to dispatch load for {:?}", document.url());
         let _ = wintarget.dispatch_event_with_target(document.upcast(), &event);
 
         // http://w3c.github.io/navigation-timing/#widl-PerformanceNavigationTiming-loadEventEnd
         update_with_current_time_ms(&document.load_event_end);
 
-        document.notify_constellation_load();
 
         window.reflow(ReflowGoal::ForDisplay,
                       ReflowQueryType::NoQuery,
                       ReflowReason::DocumentLoaded);
+
+        document.notify_constellation_load();
     }
 }
 
 impl Runnable for DocumentProgressHandler {
+    fn name(&self) -> &'static str { "DocumentProgressHandler" }
+
     fn handler(self: Box<DocumentProgressHandler>) {
         let document = self.addr.root();
         let window = document.window();

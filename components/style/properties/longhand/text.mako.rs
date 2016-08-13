@@ -12,19 +12,26 @@
                                              Method("has_overline", "bool"),
                                              Method("has_line_through", "bool")]) %>
 
-${helpers.single_keyword("text-overflow", "clip ellipsis")}
+${helpers.single_keyword("text-overflow", "clip ellipsis", animatable=False)}
 
-${helpers.single_keyword("unicode-bidi", "normal embed isolate bidi-override isolate-override plaintext")}
+${helpers.single_keyword("unicode-bidi",
+                         "normal embed isolate bidi-override isolate-override plaintext",
+                         animatable=False)}
 
+// FIXME: This prop should be animatable.
 <%helpers:longhand name="${'text-decoration' if product == 'servo' else 'text-decoration-line'}"
-                   custom_cascade="${product == 'servo'}">
+                   custom_cascade="${product == 'servo'}"
+                   animatable="False">
     use cssparser::ToCss;
     use std::fmt;
     use values::computed::ComputedValueAsSpecified;
+    use values::NoViewportPercentage;
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
 
-    #[derive(PartialEq, Eq, Copy, Clone, Debug, HeapSizeOf)]
+    #[derive(PartialEq, Eq, Copy, Clone, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
     pub struct SpecifiedValue {
         pub underline: bool,
         pub overline: bool,
@@ -101,10 +108,9 @@ ${helpers.single_keyword("unicode-bidi", "normal embed isolate bidi-override iso
     }
 
     % if product == "servo":
-        fn cascade_property_custom<C: ComputedValues>(
-                                   _declaration: &PropertyDeclaration,
-                                   _inherited_style: &C,
-                                   context: &mut computed::Context<C>,
+        fn cascade_property_custom(_declaration: &PropertyDeclaration,
+                                   _inherited_style: &ComputedValues,
+                                   context: &mut computed::Context,
                                    _seen: &mut PropertyBitField,
                                    _cacheable: &mut bool,
                                    _error_reporter: &mut StdBox<ParseErrorReporter + Send>) {
@@ -115,9 +121,11 @@ ${helpers.single_keyword("unicode-bidi", "normal embed isolate bidi-override iso
 
 ${helpers.single_keyword("text-decoration-style",
                          "solid double dotted dashed wavy -moz-none",
-                         products="gecko")}
+                         products="gecko",
+                         animatable=False)}
 
 ${helpers.predefined_type(
     "text-decoration-color", "CSSColor",
     "CSSParserColor::RGBA(RGBA { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 })",
-    products="gecko")}
+    products="gecko",
+    animatable=True)}

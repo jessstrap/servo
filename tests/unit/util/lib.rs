@@ -6,8 +6,7 @@
 
 extern crate util;
 
-mod cache;
 mod opts;
 mod prefs;
-mod str;
+mod remutex;
 mod thread;
