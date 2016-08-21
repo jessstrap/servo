@@ -26,7 +26,7 @@ msg = {path = "../msg"}
 net_traits = {path = "../net_traits"}
 plugins = {path = "../plugins"}
 profile_traits = {path = "../profile_traits"}
-script = {path = "../script"}
+script_pluggable = {path = "../script_pluggable"}
 script_layout_interface = {path = "../script_layout_interface"}
 script_traits = {path = "../script_traits"}
 serde_json = "0.8"

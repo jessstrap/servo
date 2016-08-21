@@ -120,6 +120,162 @@ def notify(title, text):
 
 @CommandProvider
 class MachCommands(CommandBase):
+    @Command('build-tk',
+             description='Build ServoTK',
+             category='build')
+    @CommandArgument('--target', '-t',
+                     default=None,
+                     help='Cross compile for given target platform')
+    @CommandArgument('--release', '-r',
+                     action='store_true',
+                     help='Build in release mode')
+    @CommandArgument('--dev', '-d',
+                     action='store_true',
+                     help='Build in development mode')
+    @CommandArgument('--jobs', '-j',
+                     default=None,
+                     help='Number of jobs to run in parallel')
+    @CommandArgument('--features',
+                     default=None,
+                     help='Space-separated list of features to also build',
+                     nargs='+')
+    @CommandArgument('--android',
+                     default=None,
+                     action='store_true',
+                     help='Build for Android')
+    @CommandArgument('--debug-mozjs',
+                     default=None,
+                     action='store_true',
+                     help='Enable debug assertions in mozjs')
+    @CommandArgument('--verbose', '-v',
+                     action='store_true',
+                     help='Print verbose output')
+    @CommandArgument('params', nargs='...',
+                     help="Command-line arguments to be passed through to Cargo")
+    def build_tk(self, target=None, release=False, dev=False, jobs=None,
+              features=None, android=None, verbose=False, debug_mozjs=False, params=None):
+        if android is None:
+            android = self.config["build"]["android"]
+        features = features or self.servo_features()
+
+        opts = params or []
+
+        base_path = self.get_target_dir()
+        release_path = path.join(base_path, "release", "servo")
+        dev_path = path.join(base_path, "debug", "servo")
+
+        release_exists = path.exists(release_path)
+        dev_exists = path.exists(dev_path)
+
+        if not (release or dev):
+            if self.config["build"]["mode"] == "dev":
+                dev = True
+            elif self.config["build"]["mode"] == "release":
+                release = True
+            elif release_exists and not dev_exists:
+                release = True
+            elif dev_exists and not release_exists:
+                dev = True
+            else:
+                print("Please specify either --dev (-d) for a development")
+                print("  build, or --release (-r) for an optimized build.")
+                sys.exit(1)
+
+        if release and dev:
+            print("Please specify either --dev or --release.")
+            sys.exit(1)
+
+        if target and android:
+            print("Please specify either --target or --android.")
+            sys.exit(1)
+
+        if release:
+            opts += ["--release"]
+            servo_path = release_path
+        else:
+            servo_path = dev_path
+
+        if jobs is not None:
+            opts += ["-j", jobs]
+        if verbose:
+            opts += ["-v"]
+        if android:
+            target = self.config["android"]["target"]
+
+        if target:
+            opts += ["--target", target]
+
+        self.ensure_bootstrapped(target=target)
+
+        if debug_mozjs:
+            features += ["script/debugmozjs"]
+
+        if features:
+            opts += ["--features", "%s" % ' '.join(features)]
+
+        build_start = time()
+        env = self.build_env(target=target, is_build=True)
+
+        if android:
+            # Build OpenSSL for android
+            make_cmd = ["make"]
+            if jobs is not None:
+                make_cmd += ["-j" + jobs]
+            android_dir = self.android_build_dir(dev)
+            openssl_dir = path.join(android_dir, "native", "openssl")
+            if not path.exists(openssl_dir):
+                os.makedirs(openssl_dir)
+            shutil.copy(path.join(self.android_support_dir(), "openssl.makefile"), openssl_dir)
+            shutil.copy(path.join(self.android_support_dir(), "openssl.sh"), openssl_dir)
+            with cd(openssl_dir):
+                status = call(
+                    make_cmd + ["-f", "openssl.makefile"],
+                    env=env,
+                    verbose=verbose)
+                if status:
+                    return status
+            openssl_dir = path.join(openssl_dir, "openssl-1.0.1t")
+            env['OPENSSL_LIB_DIR'] = openssl_dir
+            env['OPENSSL_INCLUDE_DIR'] = path.join(openssl_dir, "include")
+            env['OPENSSL_STATIC'] = 'TRUE'
+
+        cargo_binary = "cargo" + BIN_SUFFIX
+
+        if sys.platform == "win32" or sys.platform == "msys":
+            env["RUSTFLAGS"] = "-C link-args=-Wl,--subsystem,windows"
+
+        status = call(
+            [cargo_binary, "build"] + opts,
+            env=env, cwd=path.join(self.context.topdir, "ports", "servotk_sample"), verbose=verbose)
+        elapsed = time() - build_start
+
+        if sys.platform == "win32" or sys.platform == "msys":
+            shutil.copy(path.join(self.get_top_dir(), "components", "servo", "servo.exe.manifest"),
+                        path.join(base_path, "debug" if dev else "release"))
+
+        # On the Mac, set a lovely icon. This makes it easier to pick out the Servo binary in tools
+        # like Instruments.app.
+        if sys.platform == "darwin":
+            try:
+                import Cocoa
+                icon_path = path.join(self.get_top_dir(), "resources", "servo.png")
+                icon = Cocoa.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon is not None:
+                    Cocoa.NSWorkspace.sharedWorkspace().setIcon_forFile_options_(icon,
+                                                                                 servo_path,
+                                                                                 0)
+            except ImportError:
+                pass
+
+        # Generate Desktop Notification if elapsed-time > some threshold value
+        notify_build_done(elapsed)
+
+        print("Build completed in %s" % format_duration(elapsed))
+        return status
+
+
+@CommandProvider
+class MachCommands(CommandBase):
     @Command('build',
              description='Build Servo',
              category='build')

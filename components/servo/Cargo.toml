@@ -66,13 +66,17 @@ net = {path = "../net"}
 net_traits = {path = "../net_traits"}
 profile = {path = "../profile"}
 profile_traits = {path = "../profile_traits"}
-script = {path = "../script"}
 script_layout_interface = {path = "../script_layout_interface"}
 script_traits = {path = "../script_traits"}
 style = {path = "../style", features = ["servo"]}
 url = "1.2"
 util = {path = "../util"}
 webdriver_server = {path = "../webdriver_server", optional = true}
+
+[dependencies.script_pluggable]
+path = "../../components/script_pluggable"
+default-features = false
+features = ["default_script"]
 
 [dependencies.webrender]
 git = "https://github.com/servo/webrender"

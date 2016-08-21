@@ -47,6 +47,126 @@ def find_dep_path_newest(package, bin_path):
 
 @CommandProvider
 class PostBuildCommands(CommandBase):
+    @Command('run-tk',
+             description='Run Servo',
+             category='post-build')
+    @CommandArgument('--release', '-r', action='store_true',
+                     help='Run the release build')
+    @CommandArgument('--dev', '-d', action='store_true',
+                     help='Run the dev build')
+    @CommandArgument('--android', action='store_true', default=None,
+                     help='Run on an Android device through `adb shell`')
+    @CommandArgument('--debug', action='store_true',
+                     help='Enable the debugger. Not specifying a '
+                          '--debugger option will result in the default '
+                          'debugger being used. The following arguments '
+                          'have no effect without this.')
+    @CommandArgument('--debugger', default=None, type=str,
+                     help='Name of debugger to use.')
+    @CommandArgument('--browserhtml', '-b', action='store_true',
+                     help='Launch with Browser.html')
+    @CommandArgument(
+        'params', nargs='...',
+        help="Command-line arguments to be passed through to Servo")
+    def run_tk(self, params, release=False, dev=False, android=None, debug=False, debugger=None, browserhtml=False):
+        env = self.build_env()
+        env["RUST_BACKTRACE"] = "1"
+
+        if android is None:
+            android = self.config["build"]["android"]
+
+        if android:
+            if debug:
+                print("Android on-device debugging is not supported by mach yet. See")
+                print("https://github.com/servo/servo/wiki/Building-for-Android#debugging-on-device")
+                return
+            script = [
+                "am force-stop com.mozilla.servo",
+                "echo servo >/sdcard/servo/android_params"
+            ]
+            for param in params:
+                script += [
+                    "echo '%s' >>/sdcard/servo/android_params" % param.replace("'", "\\'")
+                ]
+            script += [
+                "am start com.mozilla.servo/com.mozilla.servo.MainActivity",
+                "exit"
+            ]
+            shell = subprocess.Popen(["adb", "shell"], stdin=subprocess.PIPE)
+            shell.communicate("\n".join(script) + "\n")
+            return shell.wait()
+
+        args = [self.get_binary_path(release, dev, servotk=True)]
+
+        if browserhtml:
+            browserhtml_path = find_dep_path_newest('browserhtml', args[0])
+            if browserhtml_path is None:
+                print("Could not find browserhtml package; perhaps you haven't built Servo.")
+                return 1
+
+            if is_macosx():
+                # Enable borderless on OSX
+                args = args + ['-b']
+            elif is_windows():
+                # Convert to a relative path to avoid mingw -> Windows path conversions
+                browserhtml_path = path.relpath(browserhtml_path, os.getcwd())
+
+            if not is_windows():
+                # multiprocess + sandbox
+                args = args + ['-M', '-S']
+
+            args = args + ['-w',
+                           '--pref', 'dom.mozbrowser.enabled',
+                           '--pref', 'dom.forcetouch.enabled',
+                           '--pref', 'shell.builtin-key-shortcuts.enabled=false',
+                           path.join(browserhtml_path, 'out', 'index.html')]
+
+        # Borrowed and modified from:
+        # http://hg.mozilla.org/mozilla-central/file/c9cfa9b91dea/python/mozbuild/mozbuild/mach_commands.py#l883
+        if debug:
+            import mozdebug
+            if not debugger:
+                # No debugger name was provided. Look for the default ones on
+                # current OS.
+                debugger = mozdebug.get_default_debugger_name(
+                    mozdebug.DebuggerSearch.KeepLooking)
+
+            self.debuggerInfo = mozdebug.get_debugger_info(debugger)
+            if not self.debuggerInfo:
+                print("Could not find a suitable debugger in your PATH.")
+                return 1
+
+            command = self.debuggerInfo.path
+            if debugger == 'gdb' or debugger == 'lldb':
+                rustCommand = 'rust-' + debugger
+                try:
+                    subprocess.check_call([rustCommand, '--version'], env=env, stdout=open(os.devnull, 'w'))
+                except (OSError, subprocess.CalledProcessError):
+                    pass
+                else:
+                    command = rustCommand
+
+            # Prepend the debugger args.
+            args = ([command] + self.debuggerInfo.args +
+                    args + params)
+        else:
+            args = args + params
+
+        try:
+            check_call(args, env=env)
+        except subprocess.CalledProcessError as e:
+            print("Servo exited with return value %d" % e.returncode)
+            return e.returncode
+        except OSError as e:
+            if e.errno == 2:
+                print("Servo Binary can't be found! Run './mach build'"
+                      " and try again!")
+            else:
+                raise e
+
+
+@CommandProvider
+class PostBuildCommands(CommandBase):
     @Command('run',
              description='Run Servo',
              category='post-build')

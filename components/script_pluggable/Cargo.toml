@@ -1,0 +1,21 @@
+[package]
+
+name = "script_pluggable"
+version = "0.0.1"
+authors = ["The Servo Project Developers"]
+license = "MPL-2.0"
+publish = false
+
+[lib]
+name = "script_pluggable"
+path = "lib.rs"
+crate-type = ["rlib"]
+
+[features]
+# default = ["default_script"]
+default_script = ["script"]
+servotk = ["script_servotk"]
+
+[dependencies]
+script = { path = "../../components/script", optional = true }
+script_servotk = { path = "../../components/script_servotk", optional = true }

@@ -31,7 +31,7 @@ extern crate msg;
 extern crate net_traits;
 #[macro_use]
 extern crate profile_traits;
-extern crate script;
+extern crate script_pluggable as script;
 extern crate script_layout_interface;
 extern crate script_traits;
 extern crate serde_json;

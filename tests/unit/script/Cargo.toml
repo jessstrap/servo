@@ -12,5 +12,5 @@ doctest = false
 [dependencies]
 msg = {path = "../../../components/msg"}
 plugins = {path = "../../../components/plugins"}
-script = {path = "../../../components/script"}
+script_pluggable = {path = "../../../components/script_pluggable"}
 url = {version = "1.2", features = ["heap_size"]}

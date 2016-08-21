@@ -12,4 +12,4 @@ doctest = false
 [dependencies]
 compiletest_helper = {path = "../helper"}
 plugins = {path = "../../../components/plugins"}
-script = {path = "../../../components/script"}
+script_pluggable = {path = "../../../components/script_pluggable"}
