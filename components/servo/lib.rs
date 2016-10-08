@@ -39,7 +39,7 @@ pub extern crate net;
 pub extern crate net_traits;
 pub extern crate profile;
 pub extern crate profile_traits;
-pub extern crate script_pluggable as script;
+pub extern crate script as script;
 pub extern crate script_traits;
 pub extern crate script_layout_interface;
 pub extern crate style;

@@ -5,7 +5,7 @@
 #![feature(plugin)]
 #![plugin(plugins)]
 
-extern crate script_pluggable as script;
+extern crate script as script;
 
 use script::dom::bindings::cell::DOMRefCell;
 use script::dom::bindings::js::JS;

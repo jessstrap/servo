@@ -6,7 +6,7 @@
 #![plugin(plugins)]
 
 extern crate msg;
-extern crate script_pluggable as script;
+extern crate script as script;
 extern crate url;
 
 #[cfg(test)] mod origin;

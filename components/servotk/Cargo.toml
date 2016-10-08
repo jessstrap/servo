@@ -31,7 +31,7 @@ net_tests = {path = "../../tests/unit/net"}
 net_traits_tests = {path = "../../tests/unit/net_traits"}
 plugin_compiletest = {path = "../../tests/compiletest/plugin"}
 profile_tests = {path = "../../tests/unit/profile"}
-script_tests = {path = "../../tests/unit/servotk_script"}
+script_tests = {path = "../../tests/unit/script"}
 style_tests = {path = "../../tests/unit/style"}
 util_tests = {path = "../../tests/unit/util"}
 
@@ -74,10 +74,9 @@ git = "https://github.com/servo/webrender"
 default_features = false
 features = ["serde_macros"]
 
-[dependencies.script_pluggable]
-path = "../../components/script_pluggable"
-default-features = false
-features = ["servotk"]
+[dependencies.script]
+path = "../../components/script"
+features = ["rust_as_script_engine", "servotk_components"]
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 sig = "0.1"

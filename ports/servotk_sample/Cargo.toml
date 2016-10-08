@@ -61,7 +61,7 @@ net = {path = "../../components/net"}
 net_traits = {path = "../../components/net_traits"}
 profile = {path = "../../components/profile"}
 profile_traits = {path = "../../components/profile_traits"}
-script_pluggable = {path = "../../components/script_pluggable"}
+script = {path = "../../components/script"}
 script_layout_interface = {path = "../../components/script_layout_interface"}
 script_traits = {path = "../../components/script_traits"}
 style = {path = "../../components/style", features = ["servo"]}

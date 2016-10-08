@@ -73,10 +73,9 @@ url = "1.2"
 util = {path = "../util"}
 webdriver_server = {path = "../webdriver_server", optional = true}
 
-[dependencies.script_pluggable]
-path = "../../components/script_pluggable"
-default-features = false
-features = ["default_script"]
+[dependencies.script]
+path = "../../components/script"
+features = ['default_script_engine']
 
 [dependencies.webrender]
 git = "https://github.com/servo/webrender"
