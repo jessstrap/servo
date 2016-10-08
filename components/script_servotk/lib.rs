@@ -53,7 +53,7 @@ extern crate hyper_serde;
 extern crate image;
 extern crate ipc_channel;
 #[macro_use]
-extern crate js;
+extern crate rust_as_script as js;
 extern crate libc;
 #[macro_use]
 extern crate log;

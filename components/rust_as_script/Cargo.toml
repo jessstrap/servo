@@ -1,0 +1,16 @@
+[package]
+
+name = "rust_as_script"
+version = "0.1.3"
+authors = ["The Servo Project Developers"]
+
+[lib]
+name = "rust_as_script"
+type = "rlib"
+
+[dependencies]
+lazy_static = "0.2.1"
+libc = "0.2"
+log = "0.3"
+heapsize = ">=0.2, <0.4"
+num-traits = "0.1.32"

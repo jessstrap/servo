@@ -40,28 +40,15 @@ use std::os::raw::c_void;
 use std::ptr;
 use std::slice;
 
-/// Proxy handler for a WindowProxy.
-pub struct WindowProxyHandler(pub *const libc::c_void);
-
-impl HeapSizeOf for WindowProxyHandler {
-    fn heap_size_of_children(&self) -> usize {
-        // FIXME(#6907) this is a pointer to memory allocated by `new` in NewProxyHandler in rust-mozjs.
-        0
-    }
-}
-
 #[derive(JSTraceable, HeapSizeOf)]
 /// Static data associated with a global object.
 pub struct GlobalStaticData {
-    /// The WindowProxy proxy handler for this global.
-    pub windowproxy_handler: WindowProxyHandler,
 }
 
 impl GlobalStaticData {
     /// Creates a new GlobalStaticData.
     pub fn new() -> GlobalStaticData {
         GlobalStaticData {
-            windowproxy_handler: browsingcontext::new_window_proxy_handler(),
         }
     }
 }

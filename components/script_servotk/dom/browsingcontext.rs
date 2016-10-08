@@ -10,13 +10,12 @@ use dom::bindings::proxyhandler::{fill_property_descriptor, get_property_descrip
 use dom::bindings::reflector::{Reflectable, Reflector};
 use dom::bindings::str::DOMString;
 use dom::bindings::trace::JSTraceable;
-use dom::bindings::utils::WindowProxyHandler;
 use dom::bindings::utils::get_array_index_from_id;
 use dom::document::Document;
 use dom::element::Element;
 use dom::window::Window;
 use js::JSCLASS_IS_GLOBAL;
-use js::glue::{CreateWrapperProxyHandler, ProxyTraps, NewWindowProxy};
+use js::glue::{NewWindowProxy};
 use js::glue::{GetProxyPrivate, SetProxyExtra, GetProxyExtra};
 use js::jsapi::{Handle, HandleId, HandleObject, HandleValue, JSAutoCompartment};
 use js::jsapi::{JSContext, JSPROP_READONLY, JSErrNum, JSObject, PropertyDescriptor, JS_DefinePropertyById};
@@ -66,15 +65,13 @@ impl BrowsingContext {
     #[allow(unsafe_code)]
     pub fn new(window: &Window, frame_element: Option<&Element>, id: PipelineId) -> Root<BrowsingContext> {
         unsafe {
-            let WindowProxyHandler(handler) = window.windowproxy_handler();
-            assert!(!handler.is_null());
 
             let cx = window.get_cx();
             let parent = window.reflector().get_jsobject();
             assert!(!parent.get().is_null());
             assert!(((*JS_GetClass(parent.get())).flags & JSCLASS_IS_GLOBAL) != 0);
             let _ac = JSAutoCompartment::new(cx, parent.get());
-            rooted!(in(cx) let window_proxy = NewWindowProxy(cx, parent, handler));
+            rooted!(in(cx) let window_proxy = NewWindowProxy(cx, parent));
             assert!(!window_proxy.is_null());
 
             let object = box BrowsingContext::new_inherited(frame_element, id);
@@ -376,38 +373,6 @@ unsafe extern "C" fn get_prototype_if_ordinary(_: *mut JSContext,
     return true;
 }
 
-static PROXY_HANDLER: ProxyTraps = ProxyTraps {
-    enter: None,
-    getOwnPropertyDescriptor: Some(getOwnPropertyDescriptor),
-    defineProperty: Some(defineProperty),
-    ownPropertyKeys: None,
-    delete_: None,
-    enumerate: None,
-    getPrototypeIfOrdinary: Some(get_prototype_if_ordinary),
-    preventExtensions: None,
-    isExtensible: None,
-    has: Some(has),
-    get: Some(get),
-    set: Some(set),
-    call: None,
-    construct: None,
-    getPropertyDescriptor: Some(get_property_descriptor),
-    hasOwn: None,
-    getOwnEnumerablePropertyKeys: None,
-    nativeCall: None,
-    hasInstance: None,
-    objectClassIs: None,
-    className: None,
-    fun_toString: None,
-    boxedValue_unbox: None,
-    defaultValue: None,
-    trace: Some(trace),
-    finalize: Some(finalize),
-    objectMoved: None,
-    isCallable: None,
-    isConstructor: None,
-};
-
 #[allow(unsafe_code)]
 unsafe extern fn finalize(_fop: *mut FreeOp, obj: *mut JSObject) {
     let this = GetProxyExtra(obj, 0).to_private() as *mut BrowsingContext;
@@ -424,11 +389,4 @@ unsafe extern fn trace(trc: *mut JSTracer, obj: *mut JSObject) {
         return;
     }
     (*this).trace(trc);
-}
-
-#[allow(unsafe_code)]
-pub fn new_window_proxy_handler() -> WindowProxyHandler {
-    unsafe {
-        WindowProxyHandler(CreateWrapperProxyHandler(&PROXY_HANDLER))
-    }
 }

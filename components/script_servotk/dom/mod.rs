@@ -206,12 +206,13 @@
 pub mod macros;
 
 pub mod types {
-    #[cfg(not(target_env = "msvc"))]
-    include!(concat!(env!("OUT_DIR"), "/InterfaceTypes.rs"));
-    #[cfg(target_env = "msvc")]
-    include!(concat!(env!("OUT_DIR"), "/build/InterfaceTypes.rs"));
+  //  #[cfg(not(target_env = "msvc"))]
+  //  include!(concat!(env!("OUT_DIR"), "/InterfaceTypes.rs"));
+  //  #[cfg(target_env = "msvc")]
+  //  include!(concat!(env!("OUT_DIR"), "/build/InterfaceTypes.rs"));
 }
 
+/*
 pub mod abstractworker;
 pub mod abstractworkerglobalscope;
 pub mod activation;
@@ -245,7 +246,9 @@ pub mod css;
 pub mod cssstyledeclaration;
 pub mod customevent;
 pub mod dedicatedworkerglobalscope;
+*/
 pub mod document;
+/*
 pub mod documentfragment;
 pub mod documenttype;
 pub mod domexception;
@@ -424,3 +427,4 @@ pub mod xmldocument;
 pub mod xmlhttprequest;
 pub mod xmlhttprequesteventtarget;
 pub mod xmlhttprequestupload;
+*/

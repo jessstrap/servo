@@ -23,7 +23,7 @@ use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::Reflectable;
 use dom::bindings::str::DOMString;
 use dom::bindings::structuredclone::StructuredCloneData;
-use dom::bindings::utils::{GlobalStaticData, WindowProxyHandler};
+use dom::bindings::utils::{GlobalStaticData};
 use dom::browsingcontext::BrowsingContext;
 use dom::console::Console;
 use dom::crypto::Crypto;
@@ -1483,10 +1483,6 @@ impl Window {
 
     pub fn unschedule_callback(&self, handle: OneshotTimerHandle) {
         self.timers.unschedule_callback(handle);
-    }
-
-    pub fn windowproxy_handler(&self) -> WindowProxyHandler {
-        WindowProxyHandler(self.dom_static.windowproxy_handler.0)
     }
 
     pub fn get_next_subpage_id(&self) -> SubpageId {
