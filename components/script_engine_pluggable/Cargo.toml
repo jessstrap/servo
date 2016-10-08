@@ -1,0 +1,21 @@
+[package]
+
+name = "script_engine_pluggable"
+version = "0.0.1"
+authors = ["The Servo Project Developers"]
+license = "MPL-2.0"
+publish = false
+
+[lib]
+name = "script_engine_pluggable"
+path = "lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default_script_engine = ["js"]
+nojs = ["rust_as_script_engine"]
+debugmozjs = ['js/debugmozjs']
+
+[dependencies]
+js = { git = "https://github.com/servo/rust-mozjs", optional = true }
+rust_as_script_engine = { path = "../../components/rust_as_script_engine", optional = true }
