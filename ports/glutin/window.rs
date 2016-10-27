@@ -38,6 +38,7 @@ use util::opts;
 use util::opts::RenderApi;
 use util::prefs::PREFS;
 use util::resource_files;
+use msg::constellation_msg::{LoadData, LoadDataSource};
 #[cfg(target_os = "windows")] use winapi;
 
 static mut g_nested_event_loop_listener: Option<*mut (NestedEventLoopListener + 'static)> = None;
@@ -749,8 +750,12 @@ impl WindowMethods for Window {
         self.window.set_title(&title);
     }
 
-    fn set_page_url(&self, url: Url) {
-        *self.current_url.borrow_mut() = Some(url);
+    fn set_page_url(&self, loadData: LoadData) {
+        if let LoadDataSource::Url(url) = loadData.source {
+            *self.current_url.borrow_mut() = Some(url);
+        } else {
+            *self.current_url.borrow_mut() = None;
+        }
     }
 
     fn status(&self, _: Option<String>) {

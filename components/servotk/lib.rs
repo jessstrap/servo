@@ -268,7 +268,7 @@ fn create_constellation(opts: opts::Opts,
                         script::script_thread::ScriptThread>::start(initial_state);
 
     if let Some(url) = opts.url {
-        constellation_chan.send(ConstellationMsg::InitLoadUrl(url)).unwrap();
+        constellation_chan.send(ConstellationMsg::InitLoad(LoadData::new(url.clone(), None, None))).unwrap();
     };
 
     // channels to communicate with Service Worker Manager

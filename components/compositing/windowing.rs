@@ -18,6 +18,7 @@ use std::fmt::{Debug, Error, Formatter};
 use style_traits::cursor::Cursor;
 use url::Url;
 use util::geometry::ScreenPx;
+use msg::constellation_msg::LoadData;
 
 #[derive(Clone)]
 pub enum MouseWindowEvent {
@@ -124,7 +125,7 @@ pub trait WindowMethods {
     /// Sets the page title for the current page.
     fn set_page_title(&self, title: Option<String>);
     /// Sets the load data for the current page.
-    fn set_page_url(&self, url: Url);
+    fn set_page_url(&self, loadData: LoadData);
     /// Called when the browser chrome should display a status message.
     fn status(&self, Option<String>);
     /// Called when the browser has started loading a frame.

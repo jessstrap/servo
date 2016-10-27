@@ -129,7 +129,7 @@ pub struct LayoutThread {
     id: PipelineId,
 
     /// The URL of the pipeline that we belong to.
-    url: Url,
+    load_data: LoadData,
 
     /// Is the current reflow of an iframe, as opposed to a root window?
     is_iframe: bool,
@@ -243,7 +243,7 @@ impl LayoutThreadFactory for LayoutThread {
 
     /// Spawns a new layout thread.
     fn create(id: PipelineId,
-              url: Url,
+              load_data: LoadData,
               is_iframe: bool,
               chan: (Sender<Msg>, Receiver<Msg>),
               pipeline_port: IpcReceiver<LayoutControlMsg>,
@@ -264,7 +264,7 @@ impl LayoutThreadFactory for LayoutThread {
             { // Ensures layout thread is destroyed before we send shutdown message
                 let sender = chan.0;
                 let layout = LayoutThread::new(id,
-                                             url,
+                                             load_data,
                                              is_iframe,
                                              chan.1,
                                              pipeline_port,
@@ -376,7 +376,7 @@ fn add_font_face_rules(stylesheet: &Stylesheet,
 impl LayoutThread {
     /// Creates a new `LayoutThread` structure.
     fn new(id: PipelineId,
-           url: Url,
+           load_data: LoadData,
            is_iframe: bool,
            port: Receiver<Msg>,
            pipeline_port: IpcReceiver<LayoutControlMsg>,
@@ -427,7 +427,7 @@ impl LayoutThread {
 
         LayoutThread {
             id: id,
-            url: url,
+            load_data: load_data,
             is_iframe: is_iframe,
             port: port,
             pipeline_port: pipeline_receiver,

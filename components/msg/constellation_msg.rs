@@ -8,8 +8,10 @@
 use hyper::header::Headers;
 use hyper::method::Method;
 use ipc_channel::ipc::IpcSharedMemory;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
 use std::fmt;
+use std::fmt::Debug;
 use url::Url;
 use webrender_traits;
 
@@ -190,7 +192,7 @@ pub struct Image {
 /// parameters or headers
 #[derive(Clone, Deserialize, Serialize)]
 pub struct LoadData {
-    pub url: Url,
+    pub source: LoadDataSource,
     #[serde(deserialize_with = "::hyper_serde::deserialize",
             serialize_with = "::hyper_serde::serialize")]
     pub method: Method,
@@ -205,7 +207,7 @@ pub struct LoadData {
 impl LoadData {
     pub fn new(url: Url, referrer_policy: Option<ReferrerPolicy>, referrer_url: Option<Url>) -> LoadData {
         LoadData {
-            url: url,
+            source: LoadDataSource::Url(url),
             method: Method::Get,
             headers: Headers::new(),
             data: None,
@@ -213,6 +215,45 @@ impl LoadData {
             referrer_url: referrer_url,
         }
     }
+}
+
+#[derive(Clone, Deserialize, Serialize, Debug)]
+pub enum LoadDataSource{
+    Url(Url),
+    ControlRef(ControlRef)
+}
+
+/// A Control Ref.
+pub type ControlRef=Box<Control>;
+
+/// an impl
+impl Deserialize for ControlRef{
+    fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
+        where D: Deserializer {
+            unreachable!();
+        }
+}
+
+/// an impl
+impl Serialize for ControlRef{
+    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
+        where S: Serializer{
+            unreachable!();
+        }
+}
+
+impl Clone for ControlRef{
+    fn clone(&self) -> Self{
+        unimplemented!();
+    }
+
+    fn clone_from(&mut self, source: &Self) { unimplemented!();} 
+}
+
+/// A Control
+pub trait Control:Send + Debug {
+    /// Get a resource from the Control.
+    fn GetResource<'a>(&'a self, name: &'a str) -> Option<&'a [u8]>;
 }
 
 #[derive(Clone, PartialEq, Eq, Copy, Hash, Debug, Deserialize, Serialize)]

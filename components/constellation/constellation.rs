@@ -26,7 +26,7 @@ use ipc_channel::router::ROUTER;
 use layout_traits::LayoutThreadFactory;
 use log::{Log, LogLevel, LogLevelFilter, LogMetadata, LogRecord};
 use msg::constellation_msg::{FrameId, FrameType, PipelineId};
-use msg::constellation_msg::{Key, KeyModifiers, KeyState, LoadData};
+use msg::constellation_msg::{Key, KeyModifiers, KeyState, LoadData, LoadDataSource};
 use msg::constellation_msg::{PipelineNamespace, PipelineNamespaceId, TraversalDirection};
 use msg::constellation_msg::{SubpageId, WindowSizeType};
 use net_traits::bluetooth_thread::BluetoothMethodMsg;
@@ -788,9 +788,9 @@ impl<Message, LTF, STF> Constellation<Message, LTF, STF>
                 }
             }
             // This should only be called once per constellation, and only by the browser
-            FromCompositorMsg::InitLoadUrl(url) => {
+            FromCompositorMsg::InitLoad(loadData) => {
                 debug!("constellation got init load URL message");
-                self.handle_init_load(url);
+                self.handle_init_load(loadData);
             }
             // Handle a forward or back request
             FromCompositorMsg::TraverseHistory(pipeline_id, direction) => {
@@ -1117,7 +1117,7 @@ impl<Message, LTF, STF> Constellation<Message, LTF, STF>
         self.trigger_mozbrowsererror(pipeline_id, reason, backtrace);
 
         if let Some(pipeline_id) = pipeline_id {
-            let pipeline_url = self.pipelines.get(&pipeline_id).map(|pipeline| pipeline.url.clone());
+            let pipeline_load_data = self.pipelines.get(&pipeline_id).map(|pipeline| pipeline.load_data);
             let parent_info = self.pipelines.get(&pipeline_id).and_then(|pipeline| pipeline.parent_info);
             let window_size = self.pipelines.get(&pipeline_id).and_then(|pipeline| pipeline.size);
 
@@ -1133,7 +1133,7 @@ impl<Message, LTF, STF> Constellation<Message, LTF, STF>
 
             let failure_url = Url::parse("about:failure").expect("infallible");
 
-            if let Some(pipeline_url) = pipeline_url {
+            if let Some(LoadDataSource::Url(pipeline_url)) = pipeline_load_data.source {
                 if pipeline_url == failure_url {
                     return error!("about:failure failed");
                 }
@@ -1164,15 +1164,15 @@ impl<Message, LTF, STF> Constellation<Message, LTF, STF>
         }
     }
 
-    fn handle_init_load(&mut self, url: Url) {
+    fn handle_init_load(&mut self, loadData: LoadData) {
         let window_size = self.window_size.visible_viewport;
         let root_pipeline_id = PipelineId::new();
         debug_assert!(PipelineId::fake_root_pipeline_id() == root_pipeline_id);
         self.new_pipeline(root_pipeline_id, None, Some(window_size), None,
-                          LoadData::new(url.clone(), None, None), false);
+                          loadData, false);
         self.handle_load_start_msg(root_pipeline_id);
         self.push_pending_frame(root_pipeline_id, None);
-        self.compositor_proxy.send(ToCompositorMsg::ChangePageUrl(root_pipeline_id, url));
+        self.compositor_proxy.send(ToCompositorMsg::ChangePageUrl(root_pipeline_id, loadData));
     }
 
     fn handle_frame_size_msg(&mut self,
@@ -1245,36 +1245,38 @@ impl<Message, LTF, STF> Constellation<Message, LTF, STF>
 
             // If no url is specified, reload.
             let load_data = load_info.load_data.unwrap_or_else(|| {
-                let url = match old_pipeline {
-                    Some(old_pipeline) => old_pipeline.url.clone(),
-                    None => Url::parse("about:blank").expect("infallible"),
-                };
-
-                // TODO - loaddata here should have referrer info (not None, None)
-                LoadData::new(url, None, None)
+                match old_pipeline {
+                    Some(old_pipeline) => old_pipeline.load_data,
+                    None => LoadData::new(Url::parse("about:blank").expect("infallible"),None,None),
+                }
             });
 
             // Compare the pipeline's url to the new url. If the origin is the same,
             // then reuse the script thread in creating the new pipeline
-            let source_url = &source_pipeline.url;
 
             let is_private = load_info.is_private || source_pipeline.is_private;
 
             // FIXME(#10968): this should probably match the origin check in
             //                HTMLIFrameElement::contentDocument.
-            let same_script = source_url.host() == load_data.url.host() &&
-                              source_url.port() == load_data.url.port() &&
-                              load_info.sandbox == IFrameSandboxState::IFrameUnsandboxed &&
-                              source_pipeline.is_private == is_private;
+            let same_script = match (load_data.source, &source_pipeline.load_data.source)  { 
+                (LoadDataSource::Url(load_data_url), LoadDataSource::Url(source_data_url)) => {
+                    source_data_url.host() == load_data_url.host() &&
+                    source_data_url.port() == load_data_url.port() &&
+                    load_info.sandbox == IFrameSandboxState::IFrameUnsandboxed &&
+                    source_pipeline.is_private == is_private
+                },
+                (LoadDataSource::ControlRef(_), LoadDataSource::ControlRef(_)) => true,
+                _ => false,
+            };
 
             // Reuse the script thread if the URL is same-origin
             let script_chan = if same_script {
                 debug!("Constellation: loading same-origin iframe, \
-                        parent url {:?}, iframe url {:?}", source_url, load_data.url);
+                        parent url {:?}, iframe url {:?}", &source_pipeline.load_data.source, load_data.source);
                 Some(source_pipeline.script_chan.clone())
             } else {
                 debug!("Constellation: loading cross-origin iframe, \
-                        parent url {:?}, iframe url {:?}", source_url, load_data.url);
+                        parent url {:?}, iframe url {:?}", &source_pipeline.load_data.source, load_data.source);
                 None
             };
 

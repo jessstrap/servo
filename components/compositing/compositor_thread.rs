@@ -23,6 +23,7 @@ use style_traits::viewport::ViewportConstraints;
 use url::Url;
 use webrender;
 use webrender_traits;
+use msg::constellation_msg::LoadData;
 
 /// Sends messages to the compositor. This is a trait supplied by the port because the method used
 /// to communicate with the compositor may have to kick OS event loops awake, communicate cross-
@@ -137,7 +138,7 @@ pub enum Msg {
     /// Alerts the compositor that the current page has changed its title.
     ChangePageTitle(PipelineId, Option<String>),
     /// Alerts the compositor that the current page has changed its URL.
-    ChangePageUrl(PipelineId, Url),
+    ChangePageUrl(PipelineId, LoadData),
     /// Alerts the compositor that the given pipeline has changed whether it is running animations.
     ChangeRunningAnimationsState(PipelineId, AnimationState),
     /// Replaces the current frame tree, typically called during main frame navigation.

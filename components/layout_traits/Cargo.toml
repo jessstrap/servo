@@ -17,7 +17,6 @@ net_traits = {path = "../net_traits"}
 profile_traits = {path = "../profile_traits"}
 util = {path = "../util"}
 ipc-channel = "0.5"
-url = {version = "1.2", features = ["heap_size"]}
 
 [dependencies.webrender_traits]
 git = "https://github.com/servo/webrender"

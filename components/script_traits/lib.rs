@@ -617,7 +617,7 @@ pub enum ConstellationMsg {
     /// immediately.
     GetPipelineTitle(PipelineId),
     /// Request to load the initial page.
-    InitLoadUrl(Url),
+    InitLoad(LoadData),
     /// Query the constellation to see if the current compositor output is stable
     IsReadyToSaveImage(HashMap<PipelineId, Epoch>),
     /// Inform the constellation of a key event.

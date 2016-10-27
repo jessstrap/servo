@@ -10,7 +10,6 @@ extern crate msg;
 extern crate net_traits;
 extern crate profile_traits;
 extern crate script_traits;
-extern crate url;
 extern crate util;
 extern crate webrender_traits;
 
@@ -22,13 +21,12 @@ extern crate webrender_traits;
 use gfx::font_cache_thread::FontCacheThread;
 use gfx::paint_thread::LayoutToPaintMsg;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
-use msg::constellation_msg::PipelineId;
+use msg::constellation_msg::{PipelineId, LoadData};
 use net_traits::image_cache_thread::ImageCacheThread;
 use profile_traits::{mem, time};
 use script_traits::LayoutMsg as ConstellationMsg;
 use script_traits::{LayoutControlMsg, ConstellationControlMsg};
 use std::sync::mpsc::{Sender, Receiver};
-use url::Url;
 use util::ipc::OptionalIpcSender;
 
 // A static method creating a layout thread
@@ -36,7 +34,7 @@ use util::ipc::OptionalIpcSender;
 pub trait LayoutThreadFactory {
     type Message;
     fn create(id: PipelineId,
-              url: Url,
+              load_data: LoadData,
               is_iframe: bool,
               chan: (Sender<Self::Message>, Receiver<Self::Message>),
               pipeline_port: IpcReceiver<LayoutControlMsg>,

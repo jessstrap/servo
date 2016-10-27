@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use std::mem as std_mem;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use url::Url;
 use util::geometry::ExpandToPixelBoundaries;
 use util::opts;
 use util::thread;
@@ -337,7 +336,6 @@ pub enum LayoutToPaintMsg {
 
 pub struct PaintThread<C> {
     id: PipelineId,
-    _url: Url,
     layout_to_paint_port: Receiver<LayoutToPaintMsg>,
     chrome_to_paint_port: Receiver<ChromeToPaintMsg>,
     compositor: C,
@@ -371,7 +369,6 @@ macro_rules! native_display(
 
 impl<C> PaintThread<C> where C: PaintListener + Send + 'static {
     pub fn create(id: PipelineId,
-                  url: Url,
                   chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
                   layout_to_paint_port: Receiver<LayoutToPaintMsg>,
                   chrome_to_paint_port: Receiver<ChromeToPaintMsg>,
@@ -390,7 +387,6 @@ impl<C> PaintThread<C> where C: PaintListener + Send + 'static {
 
             let mut paint_thread = PaintThread {
                 id: id,
-                _url: url,
                 layout_to_paint_port: layout_to_paint_port,
                 chrome_to_paint_port: chrome_to_paint_port,
                 compositor: compositor,

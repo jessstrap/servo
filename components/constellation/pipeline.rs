@@ -17,7 +17,7 @@ use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
 use layers::geometry::DevicePixel;
 use layout_traits::LayoutThreadFactory;
-use msg::constellation_msg::{FrameId, FrameType, LoadData, PipelineId};
+use msg::constellation_msg::{FrameId, FrameType, LoadData, LoadDataSource, PipelineId};
 use msg::constellation_msg::{PipelineNamespaceId, SubpageId};
 use net_traits::bluetooth_thread::BluetoothMethodMsg;
 use net_traits::image_cache_thread::ImageCacheThread;
@@ -58,8 +58,8 @@ pub struct Pipeline {
     /// A channel to the compositor.
     pub compositor_proxy: Box<CompositorProxy + 'static + Send>,
     pub chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
-    /// URL corresponding to the most recently-loaded page.
-    pub url: Url,
+    /// LoadData corresponding to the most recently-loaded page.
+    pub load_data: LoadData,
     /// The title of the most recently-loaded page.
     pub title: Option<String>,
     pub size: Option<TypedSize2D<f32, PagePx>>,
@@ -177,7 +177,6 @@ impl Pipeline {
         };
 
         PaintThread::create(state.id,
-                            state.load_data.url.clone(),
                             chrome_to_paint_chan.clone(),
                             layout_to_paint_port,
                             chrome_to_paint_port,
@@ -263,7 +262,7 @@ impl Pipeline {
                                      state.compositor_proxy,
                                      chrome_to_paint_chan,
                                      state.is_private,
-                                     state.load_data.url,
+                                     state.load_data,
                                      state.window_size,
                                      state.parent_visibility.unwrap_or(true));
 
@@ -279,7 +278,7 @@ impl Pipeline {
            compositor_proxy: Box<CompositorProxy + 'static + Send>,
            chrome_to_paint_chan: Sender<ChromeToPaintMsg>,
            is_private: bool,
-           url: Url,
+           load_data: LoadData,
            size: Option<TypedSize2D<f32, PagePx>>,
            visible: bool)
            -> Pipeline {
@@ -290,7 +289,7 @@ impl Pipeline {
             layout_chan: layout_chan,
             compositor_proxy: compositor_proxy,
             chrome_to_paint_chan: chrome_to_paint_chan,
-            url: url,
+            load_data: load_data,
             title: None,
             children: vec!(),
             size: size,
@@ -461,7 +460,7 @@ impl UnprivilegedPipelineContent {
         }, self.load_data.clone());
 
         LTF::create(self.id,
-                    self.load_data.url,
+                    self.load_data,
                     self.parent_info.is_some(),
                     layout_pair,
                     self.pipeline_port,

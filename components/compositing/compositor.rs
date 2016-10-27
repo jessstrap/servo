@@ -584,8 +584,8 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 self.change_page_title(pipeline_id, title);
             }
 
-            (Msg::ChangePageUrl(pipeline_id, url), ShutdownState::NotShuttingDown) => {
-                self.change_page_url(pipeline_id, url);
+            (Msg::ChangePageUrl(pipeline_id, loadData), ShutdownState::NotShuttingDown) => {
+                self.change_page_url(pipeline_id, loadData);
             }
 
             (Msg::SetFrameTree(frame_tree, response_chan),
@@ -869,7 +869,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         }
     }
 
-    fn change_page_url(&mut self, _: PipelineId, url: Url) {
+    fn change_page_url(&mut self, _: PipelineId, url: LoadData) {
         self.window.set_page_url(url);
     }
 
@@ -1392,10 +1392,10 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         self.got_load_complete_message = false;
         match Url::parse(&url_string) {
             Ok(url) => {
-                self.window.set_page_url(url.clone());
+                self.window.set_page_url(LoadData::new(url.clone(),None,None));
                 let msg = match self.scene.root {
                     Some(ref layer) => ConstellationMsg::LoadUrl(layer.pipeline_id(), LoadData::new(url, None, None)),
-                    None => ConstellationMsg::InitLoadUrl(url)
+                    None => ConstellationMsg::InitLoad(LoadData::new(url.clone(),None,None))
                 };
                 if let Err(e) = self.constellation_chan.send(msg) {
                     warn!("Sending load url to constellation failed ({}).", e);
