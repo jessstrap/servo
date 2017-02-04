@@ -14,7 +14,7 @@ use dom::htmlmetaelement::HTMLMetaElement;
 use dom::node::{Node, document_from_node};
 use dom::userscripts::load_script;
 use dom::virtualmethods::VirtualMethods;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 
 #[dom_struct]
 pub struct HTMLHeadElement {
@@ -22,19 +22,19 @@ pub struct HTMLHeadElement {
 }
 
 impl HTMLHeadElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLHeadElement {
         HTMLHeadElement {
-            htmlelement: HTMLElement::new_inherited(localName, prefix, document)
+            htmlelement: HTMLElement::new_inherited(local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLHeadElement> {
-        Node::reflect_node(box HTMLHeadElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLHeadElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLHeadElementBinding::Wrap)
     }
@@ -51,11 +51,11 @@ impl HTMLHeadElement {
         let candidates = node.traverse_preorder()
                              .filter_map(Root::downcast::<Element>)
                              .filter(|elem| elem.is::<HTMLMetaElement>())
-                             .filter(|elem| elem.get_string_attribute(&atom!("name")) == "referrer")
-                             .filter(|elem| elem.get_attribute(&ns!(), &atom!("content")).is_some());
+                             .filter(|elem| elem.get_string_attribute(&local_name!("name")) == "referrer")
+                             .filter(|elem| elem.get_attribute(&ns!(), &local_name!("content")).is_some());
 
         for meta in candidates {
-            if let Some(content) = meta.get_attribute(&ns!(), &atom!("content")).r() {
+            if let Some(content) = meta.get_attribute(&ns!(), &local_name!("content")).r() {
                 let content = content.value();
                 let content_val = content.trim();
                 if !content_val.is_empty() {
@@ -71,7 +71,10 @@ impl VirtualMethods for HTMLHeadElement {
     fn super_type(&self) -> Option<&VirtualMethods> {
         Some(self.upcast::<HTMLElement>() as &VirtualMethods)
     }
-    fn bind_to_tree(&self, _tree_in_doc: bool) {
+    fn bind_to_tree(&self, tree_in_doc: bool) {
+        if let Some(ref s) = self.super_type() {
+            s.bind_to_tree(tree_in_doc);
+        }
         load_script(self);
     }
 }

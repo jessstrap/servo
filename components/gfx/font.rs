@@ -112,7 +112,7 @@ pub struct Font {
     shaper: Option<Shaper>,
     shape_cache: RefCell<HashMap<ShapeCacheEntry, Arc<GlyphStore>>>,
     glyph_advance_cache: RefCell<HashMap<u32, FractionalPixel>>,
-    pub font_key: Option<webrender_traits::FontKey>,
+    pub font_key: webrender_traits::FontKey,
 }
 
 impl Font {
@@ -121,7 +121,7 @@ impl Font {
                descriptor: FontTemplateDescriptor,
                requested_pt_size: Au,
                actual_pt_size: Au,
-               font_key: Option<webrender_traits::FontKey>) -> Font {
+               font_key: webrender_traits::FontKey) -> Font {
         let metrics = handle.metrics();
         Font {
             handle: handle,
@@ -148,6 +148,8 @@ bitflags! {
         const DISABLE_KERNING_SHAPING_FLAG = 0x04,
         #[doc = "Text direction is right-to-left."]
         const RTL_FLAG = 0x08,
+        #[doc = "Set if word-break is set to keep-all."]
+        const KEEP_ALL_FLAG = 0x10,
     }
 }
 

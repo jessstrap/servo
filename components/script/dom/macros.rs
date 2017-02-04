@@ -9,7 +9,7 @@ macro_rules! make_getter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.get_string_attribute(&atom!($htmlname))
+            element.get_string_attribute(&local_name!($htmlname))
         }
     );
 );
@@ -21,7 +21,7 @@ macro_rules! make_bool_getter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.has_attribute(&atom!($htmlname))
+            element.has_attribute(&local_name!($htmlname))
         }
     );
 );
@@ -40,7 +40,7 @@ macro_rules! make_limited_int_setter(
             };
 
             let element = self.upcast::<Element>();
-            element.set_int_attribute(&atom!($htmlname), value);
+            element.set_int_attribute(&local_name!($htmlname), value);
             Ok(())
         }
     );
@@ -54,7 +54,7 @@ macro_rules! make_int_setter(
             use dom::element::Element;
 
             let element = self.upcast::<Element>();
-            element.set_int_attribute(&atom!($htmlname), value)
+            element.set_int_attribute(&local_name!($htmlname), value)
         }
     );
     ($attr:ident, $htmlname:tt) => {
@@ -69,7 +69,7 @@ macro_rules! make_int_getter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.get_int_attribute(&atom!($htmlname), $default)
+            element.get_int_attribute(&local_name!($htmlname), $default)
         }
     );
 
@@ -85,7 +85,7 @@ macro_rules! make_uint_getter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.get_uint_attribute(&atom!($htmlname), $default)
+            element.get_uint_attribute(&local_name!($htmlname), $default)
         }
     );
     ($attr:ident, $htmlname:tt) => {
@@ -100,7 +100,7 @@ macro_rules! make_url_getter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.get_url_attribute(&atom!($htmlname))
+            element.get_url_attribute(&local_name!($htmlname))
         }
     );
 );
@@ -112,7 +112,7 @@ macro_rules! make_url_or_base_getter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            let url = element.get_url_attribute(&atom!($htmlname));
+            let url = element.get_url_attribute(&local_name!($htmlname));
             if url.is_empty() {
                 let window = window_from_node(self);
                 DOMString::from(window.get_url().into_string())
@@ -124,14 +124,34 @@ macro_rules! make_url_or_base_getter(
 );
 
 #[macro_export]
+macro_rules! make_string_or_document_url_getter(
+    ( $attr:ident, $htmlname:tt ) => (
+        fn $attr(&self) -> DOMString {
+            use dom::bindings::inheritance::Castable;
+            use dom::element::Element;
+            use dom::node::document_from_node;
+            let element = self.upcast::<Element>();
+            let val = element.get_string_attribute(&local_name!($htmlname));
+
+            if val.is_empty() {
+                let doc = document_from_node(self);
+                DOMString::from(doc.url().into_string())
+            } else {
+                val
+            }
+        }
+    );
+);
+
+#[macro_export]
 macro_rules! make_enumerated_getter(
-    ( $attr:ident, $htmlname:tt, $default:expr, $(($choices: pat))|+) => (
+    ( $attr:ident, $htmlname:tt, $default:expr, $($choices: pat)|+) => (
         fn $attr(&self) -> DOMString {
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             use std::ascii::AsciiExt;
             let element = self.upcast::<Element>();
-            let mut val = element.get_string_attribute(&atom!($htmlname));
+            let mut val = element.get_string_attribute(&local_name!($htmlname));
             val.make_ascii_lowercase();
             // https://html.spec.whatwg.org/multipage/#attr-fs-method
             match &*val {
@@ -151,7 +171,7 @@ macro_rules! make_setter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.set_string_attribute(&atom!($htmlname), value)
+            element.set_string_attribute(&local_name!($htmlname), value)
         }
     );
 );
@@ -163,7 +183,7 @@ macro_rules! make_bool_setter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.set_bool_attribute(&atom!($htmlname), value)
+            element.set_bool_attribute(&local_name!($htmlname), value)
         }
     );
 );
@@ -178,7 +198,7 @@ macro_rules! make_url_setter(
             let value = AttrValue::from_url(document_from_node(self).url(),
                                             value.into());
             let element = self.upcast::<Element>();
-            element.set_attribute(&atom!($htmlname), value);
+            element.set_attribute(&local_name!($htmlname), value);
         }
     );
 );
@@ -196,7 +216,7 @@ macro_rules! make_uint_setter(
                 value
             };
             let element = self.upcast::<Element>();
-            element.set_uint_attribute(&atom!($htmlname), value)
+            element.set_uint_attribute(&local_name!($htmlname), value)
         }
     );
     ($attr:ident, $htmlname:tt) => {
@@ -219,7 +239,7 @@ macro_rules! make_limited_uint_setter(
                 value
             };
             let element = self.upcast::<Element>();
-            element.set_uint_attribute(&atom!($htmlname), value);
+            element.set_uint_attribute(&local_name!($htmlname), value);
             Ok(())
         }
     );
@@ -235,7 +255,7 @@ macro_rules! make_atomic_setter(
             use dom::bindings::inheritance::Castable;
             use dom::element::Element;
             let element = self.upcast::<Element>();
-            element.set_atomic_attribute(&atom!($htmlname), value)
+            element.set_atomic_attribute(&local_name!($htmlname), value)
         }
     );
 );
@@ -249,7 +269,7 @@ macro_rules! make_legacy_color_setter(
             use style::attr::AttrValue;
             let element = self.upcast::<Element>();
             let value = AttrValue::from_legacy_color(value.into());
-            element.set_attribute(&atom!($htmlname), value)
+            element.set_attribute(&local_name!($htmlname), value)
         }
     );
 );
@@ -262,7 +282,7 @@ macro_rules! make_dimension_setter(
             use dom::element::Element;
             let element = self.upcast::<Element>();
             let value = AttrValue::from_dimension(value.into());
-            element.set_attribute(&atom!($htmlname), value)
+            element.set_attribute(&local_name!($htmlname), value)
         }
     );
 );
@@ -275,45 +295,38 @@ macro_rules! make_nonzero_dimension_setter(
             use dom::element::Element;
             let element = self.upcast::<Element>();
             let value = AttrValue::from_nonzero_dimension(value.into());
-            element.set_attribute(&atom!($htmlname), value)
+            element.set_attribute(&local_name!($htmlname), value)
         }
     );
 );
 
 /// For use on non-jsmanaged types
 /// Use #[derive(JSTraceable)] on JS managed types
-macro_rules! no_jsmanaged_fields(
-    ([$ty:ident; $count:expr]) => (
-        impl $crate::dom::bindings::trace::JSTraceable for [$ty; $count] {
-            #[inline]
-            fn trace(&self, _: *mut ::js::jsapi::JSTracer) {
-                // Do nothing
-            }
-        }
-    );
+macro_rules! unsafe_no_jsmanaged_fields(
     ($($ty:ident),+) => (
         $(
-            impl $crate::dom::bindings::trace::JSTraceable for $ty {
+            #[allow(unsafe_code)]
+            unsafe impl $crate::dom::bindings::trace::JSTraceable for $ty {
                 #[inline]
-                fn trace(&self, _: *mut ::js::jsapi::JSTracer) {
+                unsafe fn trace(&self, _: *mut ::js::jsapi::JSTracer) {
                     // Do nothing
                 }
             }
         )+
     );
-    ($ty:ident<$($gen:ident),+>) => (
-        impl<$($gen),+> $crate::dom::bindings::trace::JSTraceable for $ty<$($gen),+> {
+);
+
+macro_rules! jsmanaged_array(
+    ($count:expr) => (
+        #[allow(unsafe_code)]
+        unsafe impl<T> $crate::dom::bindings::trace::JSTraceable for [T; $count]
+            where T: $crate::dom::bindings::trace::JSTraceable
+        {
             #[inline]
-            fn trace(&self, _: *mut ::js::jsapi::JSTracer) {
-                // Do nothing
-            }
-        }
-    );
-    ($ty:ident<$($gen:ident: $bound:ident),+>) => (
-        impl<$($gen: $bound),+> $crate::dom::bindings::trace::JSTraceable for $ty<$($gen),+> {
-            #[inline]
-            fn trace(&self, _: *mut ::js::jsapi::JSTracer) {
-                // Do nothing
+            unsafe fn trace(&self, tracer: *mut ::js::jsapi::JSTracer) {
+                for v in self.iter() {
+                    v.trace(tracer);
+                }
             }
         }
     );
@@ -341,11 +354,19 @@ macro_rules! define_event_handler(
 macro_rules! define_window_owned_event_handler(
     ($handler: ident, $event_type: ident, $getter: ident, $setter: ident) => (
         fn $getter(&self) -> Option<::std::rc::Rc<$handler>> {
-            window_from_node(self).$getter()
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().$getter()
+            } else {
+                None
+            }
         }
 
         fn $setter(&self, listener: Option<::std::rc::Rc<$handler>>) {
-            window_from_node(self).$setter(listener)
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().$setter(listener)
+            }
         }
     )
 );
@@ -452,6 +473,7 @@ macro_rules! global_event_handlers(
         event_handler!(suspend, GetOnsuspend, SetOnsuspend);
         event_handler!(timeupdate, GetOntimeupdate, SetOntimeupdate);
         event_handler!(toggle, GetOntoggle, SetOntoggle);
+        event_handler!(transitionend, GetOntransitionend, SetOntransitionend);
         event_handler!(volumechange, GetOnvolumechange, SetOnvolumechange);
         event_handler!(waiting, GetOnwaiting, SetOnwaiting);
     )
@@ -523,14 +545,15 @@ macro_rules! document_and_element_event_handlers(
 #[macro_export]
 macro_rules! rooted_vec {
     (let mut $name:ident) => {
-        rooted_vec!(let mut $name <- ::std::iter::empty())
+        let mut root = $crate::dom::bindings::trace::RootableVec::new_unrooted();
+        let mut $name = $crate::dom::bindings::trace::RootedVec::new(&mut root);
     };
     (let $name:ident <- $iter:expr) => {
-        let mut __root = $crate::dom::bindings::trace::RootableVec::new_unrooted();
-        let $name = $crate::dom::bindings::trace::RootedVec::new(&mut __root, $iter);
+        let mut root = $crate::dom::bindings::trace::RootableVec::new_unrooted();
+        let $name = $crate::dom::bindings::trace::RootedVec::from_iter(&mut root, $iter);
     };
     (let mut $name:ident <- $iter:expr) => {
-        let mut __root = $crate::dom::bindings::trace::RootableVec::new_unrooted();
-        let mut $name = $crate::dom::bindings::trace::RootedVec::new(&mut __root, $iter);
+        let mut root = $crate::dom::bindings::trace::RootableVec::new_unrooted();
+        let mut $name = $crate::dom::bindings::trace::RootedVec::from_iter(&mut root, $iter);
     }
 }

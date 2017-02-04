@@ -6,11 +6,10 @@
  * https://dom.spec.whatwg.org/#interface-nodelist
  */
 
-[Exposed=(Window,Worker)]
 interface NodeList {
   [Pure]
   getter Node? item(unsigned long index);
   [Pure]
   readonly attribute unsigned long length;
-  // iterable<Node>;
+  iterable<Node?>;
 };

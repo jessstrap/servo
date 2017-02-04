@@ -12,54 +12,53 @@ path = "lib.rs"
 
 [dependencies]
 app_units = "0.3"
-azure = {git = "https://github.com/servo/rust-azure", features = ["plugins"]}
 bitflags = "0.7"
-euclid = "0.9"
+euclid = "0.10.1"
 fnv = "1.0"
+fontsan = {git = "https://github.com/servo/fontsan"}
 gfx_traits = {path = "../gfx_traits"}
 harfbuzz-sys = "0.1"
 heapsize = "0.3.0"
-heapsize_plugin = "0.1.2"
+heapsize_derive = "0.1"
 ipc-channel = "0.5"
-layers = {git = "https://github.com/servo/rust-layers", features = ["plugins"]}
 lazy_static = "0.2"
 libc = "0.2"
 log = "0.3.5"
-mime = "0.2"
 msg = {path = "../msg"}
 net_traits = {path = "../net_traits"}
 ordered-float = "0.2.2"
 plugins = {path = "../plugins"}
-profile_traits = {path = "../profile_traits"}
-rand = "0.3"
 range = {path = "../range"}
-rustc-serialize = "0.3"
 serde = "0.8"
-serde_macros = "0.8"
+servo_atoms = {path = "../atoms"}
+servo_geometry = {path = "../geometry"}
+servo_url = {path = "../url"}
+serde_derive = "0.8"
 smallvec = "0.1"
-string_cache = {version = "0.2.23", features = ["heap_size"]}
 style = {path = "../style"}
 style_traits = {path = "../style_traits"}
 time = "0.1.12"
 unicode-script = {version = "0.1", features = ["harfbuzz"]}
-url = {version = "1.2", features = ["heap_size"]}
-util = {path = "../util"}
 xi-unicode = "0.0.1"
 
 [dependencies.webrender_traits]
 git = "https://github.com/servo/webrender"
-default_features = false
-features = ["serde_macros"]
+default-features = false
+features = ["serde_derive", "ipc"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
-byteorder = "0.5"
+byteorder = "1.0"
 core-foundation = "0.2"
-core-graphics = "0.4"
+core-graphics = "0.5"
 core-text = "2.0"
 
-[target.'cfg(any(target_os = "linux", target_os = "android", all(target_os = "windows", target_env = "gnu")))'.dependencies]
-freetype = {git = "https://github.com/servo/rust-freetype"}
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+freetype = "0.2"
 servo-fontconfig = "0.2.1"
 
-[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-simd = {git = "https://github.com/huonw/simd"}
+[target.'cfg(any(target_feature = "sse2", target_feature = "neon"))'.dependencies]
+simd = "0.2.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+dwrote = "0.1.5"
+truetype = "0.24"

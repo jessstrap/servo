@@ -3,16 +3,16 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmlscriptelement
-[Exposed=(Window,Worker)]
 interface HTMLScriptElement : HTMLElement {
            attribute DOMString src;
            attribute DOMString type;
            attribute DOMString charset;
-  //         attribute boolean async;
+           attribute boolean async;
            attribute boolean defer;
-  //         attribute DOMString crossOrigin;
+           attribute DOMString? crossOrigin;
            [Pure]
            attribute DOMString text;
+           attribute DOMString integrity;
 
   // also has obsolete members
 };

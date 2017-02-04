@@ -5,7 +5,6 @@
 use dom::bindings::codegen::Bindings::DOMStringMapBinding;
 use dom::bindings::codegen::Bindings::DOMStringMapBinding::DOMStringMapMethods;
 use dom::bindings::error::ErrorResult;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
@@ -29,7 +28,7 @@ impl DOMStringMap {
     pub fn new(element: &HTMLElement) -> Root<DOMStringMap> {
         let window = window_from_node(element);
         reflect_dom_object(box DOMStringMap::new_inherited(element),
-                           GlobalRef::Window(window.r()),
+                           &*window,
                            DOMStringMapBinding::Wrap)
     }
 }
@@ -47,10 +46,8 @@ impl DOMStringMapMethods for DOMStringMap {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-domstringmap-nameditem
-    fn NamedGetter(&self, name: DOMString, found: &mut bool) -> DOMString {
-        let attr = self.element.get_custom_attr(name);
-        *found = attr.is_some();
-        attr.unwrap_or_default()
+    fn NamedGetter(&self, name: DOMString) -> Option<DOMString> {
+        self.element.get_custom_attr(name)
     }
 
     // https://html.spec.whatwg.org/multipage/#the-domstringmap-interface:supported-property-names

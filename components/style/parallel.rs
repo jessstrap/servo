@@ -4,130 +4,169 @@
 
 //! Implements parallel traversal over the DOM tree.
 //!
-//! This code is highly unsafe. Keep this file small and easy to audit.
+//! This traversal is based on Rayon, and therefore its safety is largely
+//! verified by the type system.
+//!
+//! The primary trickiness and fine print for the above relates to the
+//! thread safety of the DOM nodes themselves. Accessing a DOM element
+//! concurrently on multiple threads is actually mostly "safe", since all
+//! the mutable state is protected by an AtomicRefCell, and so we'll
+//! generally panic if something goes wrong. Still, we try to to enforce our
+//! thread invariants at compile time whenever possible. As such, TNode and
+//! TElement are not Send, so ordinary style system code cannot accidentally
+//! share them with other threads. In the parallel traversal, we explicitly
+//! invoke |unsafe { SendNode::new(n) }| to put nodes in containers that may
+//! be sent to other threads. This occurs in only a handful of places and is
+//! easy to grep for. At the time of this writing, there is no other unsafe
+//! code in the parallel traversal.
 
-#![allow(unsafe_code)]
+#![deny(missing_docs)]
 
-use dom::{OpaqueNode, TNode, UnsafeNode};
-use std::mem;
-use std::sync::atomic::Ordering;
-use traversal::{RestyleResult, DomTraversalContext};
-use traversal::{STYLE_SHARING_CACHE_HITS, STYLE_SHARING_CACHE_MISSES};
-use util::opts;
-use workqueue::{WorkQueue, WorkUnit, WorkerProxy};
+use context::TraversalStatistics;
+use dom::{OpaqueNode, SendNode, TElement, TNode};
+use rayon;
+use scoped_tls::ScopedTLS;
+use servo_config::opts;
+use std::borrow::Borrow;
+use traversal::{DomTraversal, PerLevelTraversalData, PreTraverseToken};
 
-#[allow(dead_code)]
-fn static_assertion(node: UnsafeNode) {
-    unsafe {
-        let _: UnsafeNodeList = mem::transmute(node);
-    }
-}
-
-pub type UnsafeNodeList = (Box<Vec<UnsafeNode>>, OpaqueNode);
-
+/// The chunk size used to split the parallel traversal nodes.
+///
+/// We send each `CHUNK_SIZE` nodes as a different work unit to the work queue.
 pub const CHUNK_SIZE: usize = 64;
 
-pub struct WorkQueueData(usize, usize);
-
-pub fn run_queue_with_custom_work_data_type<To, F, SharedContext: Sync>(
-        queue: &mut WorkQueue<SharedContext, WorkQueueData>,
-        callback: F,
-        shared: &SharedContext)
-        where To: 'static + Send, F: FnOnce(&mut WorkQueue<SharedContext, To>) {
-    let queue: &mut WorkQueue<SharedContext, To> = unsafe {
-        mem::transmute(queue)
-    };
-    callback(queue);
-    queue.run(shared);
-}
-
-pub fn traverse_dom<N, C>(root: N,
-                          queue_data: &C::SharedContext,
-                          queue: &mut WorkQueue<C::SharedContext, WorkQueueData>)
-    where N: TNode,
-          C: DomTraversalContext<N>
+/// A parallel top down traversal, generic over `D`.
+#[allow(unsafe_code)]
+pub fn traverse_dom<E, D>(traversal: &D,
+                          root: E,
+                          known_root_dom_depth: Option<usize>,
+                          token: PreTraverseToken,
+                          queue: &rayon::ThreadPool)
+    where E: TElement,
+          D: DomTraversal<E>,
 {
-    if opts::get().style_sharing_stats {
-        STYLE_SHARING_CACHE_HITS.store(0, Ordering::SeqCst);
-        STYLE_SHARING_CACHE_MISSES.store(0, Ordering::SeqCst);
-    }
-    run_queue_with_custom_work_data_type(queue, |queue| {
-        queue.push(WorkUnit {
-            fun: top_down_dom::<N, C>,
-            data: (Box::new(vec![root.to_unsafe()]), root.opaque()),
+    debug_assert!(traversal.is_parallel());
+    // Handle Gecko's eager initial styling. We don't currently support it
+    // in conjunction with bottom-up traversal. If we did, we'd need to put
+    // it on the context to make it available to the bottom-up phase.
+    let (nodes, depth) = if token.traverse_unstyled_children_only() {
+        debug_assert!(!D::needs_postorder_traversal());
+        let mut children = vec![];
+        for kid in root.as_node().children() {
+            if kid.as_element().map_or(false, |el| el.get_data().is_none()) {
+                children.push(unsafe { SendNode::new(kid) });
+            }
+        }
+        (children, known_root_dom_depth.map(|x| x + 1))
+    } else {
+        (vec![unsafe { SendNode::new(root.as_node()) }], known_root_dom_depth)
+    };
+
+    let traversal_data = PerLevelTraversalData {
+        current_dom_depth: depth,
+    };
+    let tls = ScopedTLS::<D::ThreadLocalContext>::new(queue);
+    let root = root.as_node().opaque();
+
+    queue.install(|| {
+        rayon::scope(|scope| {
+            traverse_nodes(nodes, root, traversal_data, scope, traversal, &tls);
         });
-    }, queue_data);
+    });
 
-    if opts::get().style_sharing_stats {
-        let hits = STYLE_SHARING_CACHE_HITS.load(Ordering::SeqCst);
-        let misses = STYLE_SHARING_CACHE_MISSES.load(Ordering::SeqCst);
-
-        println!("Style sharing stats:");
-        println!(" * Hits: {}", hits);
-        println!(" * Misses: {}", misses);
+    // Dump statistics to stdout if requested.
+    if TraversalStatistics::should_dump() || opts::get().style_sharing_stats {
+        let slots = unsafe { tls.unsafe_get() };
+        let aggregate = slots.iter().fold(TraversalStatistics::default(), |acc, t| {
+            match *t.borrow() {
+                None => acc,
+                Some(ref cx) => &cx.borrow().statistics + &acc,
+            }
+        });
+        println!("{}", aggregate);
     }
 }
 
 /// A parallel top-down DOM traversal.
 #[inline(always)]
-fn top_down_dom<N, C>(unsafe_nodes: UnsafeNodeList,
-                      proxy: &mut WorkerProxy<C::SharedContext, UnsafeNodeList>)
-                      where N: TNode, C: DomTraversalContext<N> {
-    let context = C::new(proxy.user_data(), unsafe_nodes.1);
-
+#[allow(unsafe_code)]
+fn top_down_dom<'a, 'scope, E, D>(nodes: &'a [SendNode<E::ConcreteNode>],
+                                  root: OpaqueNode,
+                                  mut traversal_data: PerLevelTraversalData,
+                                  scope: &'a rayon::Scope<'scope>,
+                                  traversal: &'scope D,
+                                  tls: &'scope ScopedTLS<'scope, D::ThreadLocalContext>)
+    where E: TElement + 'scope,
+          D: DomTraversal<E>,
+{
     let mut discovered_child_nodes = vec![];
-    for unsafe_node in *unsafe_nodes.0 {
-        // Get a real layout node.
-        let node = unsafe { N::from_unsafe(&unsafe_node) };
+    {
+        // Scope the borrow of the TLS so that the borrow is dropped before
+        // potentially traversing a child on this thread.
+        let mut tlc = tls.ensure(|| traversal.create_thread_local_context());
 
-        if !context.should_process(node) {
-            continue;
-        }
-
-        // Possibly enqueue the children.
-        let mut children_to_process = 0isize;
-        // Perform the appropriate traversal.
-        if let RestyleResult::Continue = context.process_preorder(node) {
-            for kid in node.children() {
-                // Trigger the hook pre-adding the kid to the list. This can
-                // (and in fact uses to) change the result of the should_process
-                // operation.
-                //
-                // As of right now, this hook takes care of propagating the
-                // restyle flag down the tree. In the future, more accurate
-                // behavior is probably going to be needed.
-                context.pre_process_child_hook(node, kid);
-                if context.should_process(kid) {
+        for n in nodes {
+            // Perform the appropriate traversal.
+            let node = **n;
+            let mut children_to_process = 0isize;
+            traversal.process_preorder(&mut traversal_data, &mut *tlc, node);
+            if let Some(el) = node.as_element() {
+                traversal.traverse_children(&mut *tlc, el, |_tlc, kid| {
                     children_to_process += 1;
-                    discovered_child_nodes.push(kid.to_unsafe())
-                }
+                    discovered_child_nodes.push(unsafe { SendNode::new(kid) })
+                });
             }
-        }
 
-        // Reset the count of children if we need to do a bottom-up traversal
-        // after the top up.
-        if context.needs_postorder_traversal() {
-            node.mutate_data().unwrap()
-                .parallel.children_to_process
-                         .store(children_to_process,
-                                Ordering::Relaxed);
-
-            // If there were no more children, start walking back up.
-            if children_to_process == 0 {
-                bottom_up_dom::<N, C>(unsafe_nodes.1, unsafe_node, proxy)
+            // Reset the count of children if we need to do a bottom-up traversal
+            // after the top up.
+            if D::needs_postorder_traversal() {
+                if children_to_process == 0 {
+                    // If there were no more children, start walking back up.
+                    bottom_up_dom(traversal, &mut *tlc, root, node)
+                } else {
+                    // Otherwise record the number of children to process when the
+                    // time comes.
+                    node.as_element().unwrap().store_children_to_process(children_to_process);
+                }
             }
         }
     }
 
-    // NB: In parallel traversal mode we have to purge the LRU cache in order to
-    // be able to access it without races.
-    context.local_context().style_sharing_candidate_cache.borrow_mut().clear();
+    if let Some(ref mut depth) = traversal_data.current_dom_depth {
+        *depth += 1;
+    }
 
-    for chunk in discovered_child_nodes.chunks(CHUNK_SIZE) {
-        proxy.push(WorkUnit {
-            fun:  top_down_dom::<N, C>,
-            data: (Box::new(chunk.iter().cloned().collect()), unsafe_nodes.1),
-        });
+    traverse_nodes(discovered_child_nodes, root, traversal_data, scope, traversal, tls);
+}
+
+fn traverse_nodes<'a, 'scope, E, D>(nodes: Vec<SendNode<E::ConcreteNode>>, root: OpaqueNode,
+                                    traversal_data: PerLevelTraversalData,
+                                    scope: &'a rayon::Scope<'scope>,
+                                    traversal: &'scope D,
+                                    tls: &'scope ScopedTLS<'scope, D::ThreadLocalContext>)
+    where E: TElement + 'scope,
+          D: DomTraversal<E>,
+{
+    if nodes.is_empty() {
+        return;
+    }
+
+    // Optimization: traverse directly and avoid a heap-allocating spawn() call if
+    // we're only pushing one work unit.
+    if nodes.len() <= CHUNK_SIZE {
+        let nodes = nodes.into_boxed_slice();
+        top_down_dom(&nodes, root, traversal_data, scope, traversal, tls);
+        return;
+    }
+
+    // General case.
+    for chunk in nodes.chunks(CHUNK_SIZE) {
+        let nodes = chunk.iter().cloned().collect::<Vec<_>>().into_boxed_slice();
+        let traversal_data = traversal_data.clone();
+        scope.spawn(move |scope| {
+            let nodes = nodes;
+            top_down_dom(&nodes, root, traversal_data, scope, traversal, tls)
+        })
     }
 }
 
@@ -142,38 +181,33 @@ fn top_down_dom<N, C>(unsafe_nodes: UnsafeNodeList,
 ///
 /// The only communication between siblings is that they both
 /// fetch-and-subtract the parent's children count.
-fn bottom_up_dom<N, C>(root: OpaqueNode,
-                       unsafe_node: UnsafeNode,
-                       proxy: &mut WorkerProxy<C::SharedContext, UnsafeNodeList>)
-    where N: TNode,
-          C: DomTraversalContext<N>
+fn bottom_up_dom<E, D>(traversal: &D,
+                       thread_local: &mut D::ThreadLocalContext,
+                       root: OpaqueNode,
+                       mut node: E::ConcreteNode)
+    where E: TElement,
+          D: DomTraversal<E>,
 {
-    let context = C::new(proxy.user_data(), root);
-
-    // Get a real layout node.
-    let mut node = unsafe { N::from_unsafe(&unsafe_node) };
     loop {
         // Perform the appropriate operation.
-        context.process_postorder(node);
+        traversal.process_postorder(thread_local, node);
 
-        let parent = match node.layout_parent_node(root) {
-            None => break,
+        if node.opaque() == root {
+            break;
+        }
+
+        let parent = match node.parent_element() {
+            None => unreachable!("How can this happen after the break above?"),
             Some(parent) => parent,
         };
 
-        let parent_data = unsafe {
-            &*parent.borrow_data_unchecked().unwrap()
-        };
-
-        if parent_data
-            .parallel
-            .children_to_process
-            .fetch_sub(1, Ordering::Relaxed) != 1 {
+        let remaining = parent.did_process_child();
+        if remaining != 0 {
             // Get out of here and find another node to work on.
             break
         }
 
         // We were the last child of our parent. Construct flows for our parent.
-        node = parent;
+        node = parent.as_node();
     }
 }

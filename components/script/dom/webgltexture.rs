@@ -7,14 +7,15 @@ use canvas_traits::CanvasMsg;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use dom::bindings::codegen::Bindings::WebGLTextureBinding;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::reflect_dom_object;
 use dom::webgl_validations::types::{TexImageTarget, TexFormat, TexDataType};
 use dom::webglobject::WebGLObject;
-use ipc_channel::ipc::{self, IpcSender};
+use dom::window::Window;
+use ipc_channel::ipc::IpcSender;
 use std::cell::Cell;
 use std::cmp;
+use webrender_traits;
 use webrender_traits::{WebGLCommand, WebGLError, WebGLResult, WebGLTextureId};
 
 pub enum TexParameterValue {
@@ -25,7 +26,7 @@ pub enum TexParameterValue {
 const MAX_LEVEL_COUNT: usize = 31;
 const MAX_FACE_COUNT: usize = 6;
 
-no_jsmanaged_fields!([ImageInfo; MAX_LEVEL_COUNT * MAX_FACE_COUNT]);
+jsmanaged_array!(MAX_LEVEL_COUNT * MAX_FACE_COUNT);
 
 #[dom_struct]
 pub struct WebGLTexture {
@@ -60,21 +61,21 @@ impl WebGLTexture {
         }
     }
 
-    pub fn maybe_new(global: GlobalRef, renderer: IpcSender<CanvasMsg>)
+    pub fn maybe_new(window: &Window, renderer: IpcSender<CanvasMsg>)
                      -> Option<Root<WebGLTexture>> {
-        let (sender, receiver) = ipc::channel().unwrap();
+        let (sender, receiver) = webrender_traits::channel::msg_channel().unwrap();
         renderer.send(CanvasMsg::WebGL(WebGLCommand::CreateTexture(sender))).unwrap();
 
         let result = receiver.recv().unwrap();
-        result.map(|texture_id| WebGLTexture::new(global, renderer, texture_id))
+        result.map(|texture_id| WebGLTexture::new(window, renderer, texture_id))
     }
 
-    pub fn new(global: GlobalRef,
+    pub fn new(window: &Window,
                renderer: IpcSender<CanvasMsg>,
                id: WebGLTextureId)
                -> Root<WebGLTexture> {
         reflect_dom_object(box WebGLTexture::new_inherited(renderer, id),
-                           global,
+                           window,
                            WebGLTextureBinding::Wrap)
     }
 }
@@ -332,7 +333,7 @@ impl WebGLTexture {
         self.image_info_at_face(face_index, level)
     }
 
-    fn image_info_at_face(&self, face: u8, level: u32) -> ImageInfo {
+    pub fn image_info_at_face(&self, face: u8, level: u32) -> ImageInfo {
         let pos = (level * self.face_count.get() as u32) + face as u32;
         self.image_info_array.borrow()[pos as usize]
     }

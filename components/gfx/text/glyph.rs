@@ -5,11 +5,11 @@
 use app_units::Au;
 use euclid::point::Point2D;
 use range::{self, EachIndex, Range, RangeIndex};
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_feature = "sse2", target_feature = "neon"))]
 use simd::u32x4;
+use std::{fmt, mem, u16};
 use std::cmp::{Ordering, PartialOrd};
 use std::vec::Vec;
-use std::{fmt, mem, u16};
 
 pub use gfx_traits::ByteIndex;
 
@@ -74,7 +74,7 @@ pub type GlyphId = u32;
 // TODO: make this more type-safe.
 
 const FLAG_CHAR_IS_SPACE: u32       = 0x40000000;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(target_feature = "sse2", target_feature = "neon"))]
 const FLAG_CHAR_IS_SPACE_SHIFT: u32 = 30;
 const FLAG_IS_SIMPLE_GLYPH: u32     = 0x80000000;
 
@@ -254,10 +254,10 @@ impl<'a> DetailedGlyphStore {
 
         let i = self.detail_lookup.binary_search(&key)
             .expect("Invalid index not found in detailed glyph lookup table!");
-
-        assert!(i + (count as usize) <= self.detail_buffer.len());
+        let main_detail_offset = self.detail_lookup[i].detail_offset;
+        assert!(main_detail_offset + (count as usize) <= self.detail_buffer.len());
         // return a slice into the buffer
-        &self.detail_buffer[i .. i + count as usize]
+        &self.detail_buffer[main_detail_offset .. main_detail_offset + count as usize]
     }
 
     fn detailed_glyph_with_index(&'a self,
@@ -274,9 +274,9 @@ impl<'a> DetailedGlyphStore {
 
         let i = self.detail_lookup.binary_search(&key)
             .expect("Invalid index not found in detailed glyph lookup table!");
-
-        assert!(i + (detail_offset as usize) < self.detail_buffer.len());
-        &self.detail_buffer[i + (detail_offset as usize)]
+        let main_detail_offset = self.detail_lookup[i].detail_offset;
+        assert!(main_detail_offset + (detail_offset as usize) < self.detail_buffer.len());
+        &self.detail_buffer[main_detail_offset + (detail_offset as usize)]
     }
 
     fn ensure_sorted(&mut self) {
@@ -546,6 +546,27 @@ impl<'a> GlyphStore {
         }
     }
 
+    // Scan the glyphs for a given range until we reach a given advance. Returns the index
+    // and advance of the glyph in the range at the given advance, if reached. Otherwise, returns the
+    // the number of glyphs and the advance for the given range.
+    #[inline]
+    pub fn range_index_of_advance(&self, range: &Range<ByteIndex>, advance: Au, extra_word_spacing: Au) -> (usize, Au) {
+        let mut index = 0;
+        let mut current_advance = Au(0);
+        for glyph in self.iter_glyphs_for_byte_range(range) {
+            if glyph.char_is_space() {
+                current_advance += glyph.advance() + extra_word_spacing
+            } else {
+                current_advance += glyph.advance()
+            }
+            if current_advance > advance {
+                break;
+            }
+            index += 1;
+        }
+        (index, current_advance)
+    }
+
     #[inline]
     pub fn advance_for_byte_range(&self, range: &Range<ByteIndex>, extra_word_spacing: Au) -> Au {
         if range.begin() == ByteIndex(0) && range.end() == self.len() {
@@ -570,7 +591,7 @@ impl<'a> GlyphStore {
     }
 
     #[inline]
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(target_feature = "sse2", target_feature = "neon"))]
     fn advance_for_byte_range_simple_glyphs(&self, range: &Range<ByteIndex>, extra_word_spacing: Au) -> Au {
         let advance_mask = u32x4::splat(GLYPH_ADVANCE_MASK);
         let space_flag_mask = u32x4::splat(FLAG_CHAR_IS_SPACE);
@@ -611,16 +632,16 @@ impl<'a> GlyphStore {
         Au(advance) + leftover_advance + extra_word_spacing * (spaces + leftover_spaces)
     }
 
-    /// When SIMD isn't available (non-x86_x64/aarch64), fallback to the slow path.
+    /// When SIMD isn't available, fallback to the slow path.
     #[inline]
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(target_feature = "sse2", target_feature = "neon")))]
     fn advance_for_byte_range_simple_glyphs(&self, range: &Range<ByteIndex>, extra_word_spacing: Au) -> Au {
         self.advance_for_byte_range_slow_path(range, extra_word_spacing)
     }
 
     /// Used for SIMD.
     #[inline]
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(target_feature = "sse2", target_feature = "neon"))]
     #[allow(unsafe_code)]
     fn transmute_entry_buffer_to_u32_buffer(&self) -> &[u32] {
         unsafe { mem::transmute(self.entry_buffer.as_slice()) }

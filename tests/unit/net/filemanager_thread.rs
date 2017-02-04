@@ -10,9 +10,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-const TEST_PROVIDER: &'static TestProvider = &TestProvider;
+pub const TEST_PROVIDER: &'static TestProvider = &TestProvider;
 
-struct TestProvider;
+pub struct TestProvider;
 
 impl UIProvider for TestProvider {
     fn open_file_dialog(&self, _path: &str, _patterns: Vec<FilterPattern>) -> Option<String> {
@@ -26,7 +26,7 @@ impl UIProvider for TestProvider {
 
 #[test]
 fn test_filemanager() {
-    let filemanager = FileManager::new(TEST_PROVIDER);
+    let filemanager = FileManager::new();
 
     // Try to open a dummy file "tests/unit/net/test.jpeg" in tree
     let mut handler = File::open("test.jpeg").expect("test.jpeg is stolen");
@@ -41,7 +41,8 @@ fn test_filemanager() {
     {
         // Try to select a dummy file "tests/unit/net/test.jpeg"
         let (tx, rx) = ipc::channel().unwrap();
-        filemanager.handle(FileManagerThreadMsg::SelectFile(patterns.clone(), tx, origin.clone(), None), None);
+        filemanager.handle(FileManagerThreadMsg::SelectFile(patterns.clone(), tx, origin.clone(), None),
+                           TEST_PROVIDER);
         let selected = rx.recv().expect("Broken channel")
                                 .expect("The file manager failed to find test.jpeg");
 
@@ -52,7 +53,8 @@ fn test_filemanager() {
         // Test by reading, expecting same content
         {
             let (tx2, rx2) = ipc::channel().unwrap();
-            filemanager.handle(FileManagerThreadMsg::ReadFile(tx2, selected.id.clone(), false, origin.clone()), None);
+            filemanager.handle(FileManagerThreadMsg::ReadFile(tx2, selected.id.clone(), false, origin.clone()),
+                               TEST_PROVIDER);
 
             let msg = rx2.recv().expect("Broken channel");
 
@@ -82,7 +84,8 @@ fn test_filemanager() {
         // Delete the id
         {
             let (tx2, rx2) = ipc::channel().unwrap();
-            filemanager.handle(FileManagerThreadMsg::DecRef(selected.id.clone(), origin.clone(), tx2), None);
+            filemanager.handle(FileManagerThreadMsg::DecRef(selected.id.clone(), origin.clone(), tx2),
+                               TEST_PROVIDER);
 
             let ret = rx2.recv().expect("Broken channel");
             assert!(ret.is_ok(), "DecRef is not okay");
@@ -91,7 +94,8 @@ fn test_filemanager() {
         // Test by reading again, expecting read error because we invalidated the id
         {
             let (tx2, rx2) = ipc::channel().unwrap();
-            filemanager.handle(FileManagerThreadMsg::ReadFile(tx2, selected.id.clone(), false, origin.clone()), None);
+            filemanager.handle(FileManagerThreadMsg::ReadFile(tx2, selected.id.clone(), false, origin.clone()),
+                               TEST_PROVIDER);
 
             let msg = rx2.recv().expect("Broken channel");
 

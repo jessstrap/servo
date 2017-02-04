@@ -6,8 +6,6 @@
 #![feature(box_syntax)]
 #![feature(plugin)]
 #![plugin(plugins)]
-#![feature(custom_derive)]
-#![plugin(serde_macros)]
 
 #![deny(unsafe_code)]
 
@@ -24,12 +22,13 @@ extern crate log;
 extern crate profile_traits;
 #[cfg(target_os = "linux")]
 extern crate regex;
-extern crate serde;
+#[macro_use]
+extern crate serde_derive;
 extern crate serde_json;
+extern crate servo_config;
 #[cfg(target_os = "macos")]
 extern crate task_info;
 extern crate time as std_time;
-extern crate util;
 
 #[allow(unsafe_code)]
 mod heartbeats;

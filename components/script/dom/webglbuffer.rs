@@ -5,12 +5,13 @@
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
 use canvas_traits::CanvasMsg;
 use dom::bindings::codegen::Bindings::WebGLBufferBinding;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::reflect_dom_object;
 use dom::webglobject::WebGLObject;
-use ipc_channel::ipc::{self, IpcSender};
+use dom::window::Window;
+use ipc_channel::ipc::IpcSender;
 use std::cell::Cell;
+use webrender_traits;
 use webrender_traits::{WebGLBufferId, WebGLCommand, WebGLError, WebGLResult};
 
 #[dom_struct]
@@ -39,21 +40,21 @@ impl WebGLBuffer {
         }
     }
 
-    pub fn maybe_new(global: GlobalRef, renderer: IpcSender<CanvasMsg>)
+    pub fn maybe_new(window: &Window, renderer: IpcSender<CanvasMsg>)
                      -> Option<Root<WebGLBuffer>> {
-        let (sender, receiver) = ipc::channel().unwrap();
+        let (sender, receiver) = webrender_traits::channel::msg_channel().unwrap();
         renderer.send(CanvasMsg::WebGL(WebGLCommand::CreateBuffer(sender))).unwrap();
 
         let result = receiver.recv().unwrap();
-        result.map(|buffer_id| WebGLBuffer::new(global, renderer, buffer_id))
+        result.map(|buffer_id| WebGLBuffer::new(window, renderer, buffer_id))
     }
 
-    pub fn new(global: GlobalRef,
+    pub fn new(window: &Window,
                renderer: IpcSender<CanvasMsg>,
                id: WebGLBufferId)
               -> Root<WebGLBuffer> {
         reflect_dom_object(box WebGLBuffer::new_inherited(renderer, id),
-                           global, WebGLBufferBinding::Wrap)
+                           window, WebGLBufferBinding::Wrap)
     }
 }
 

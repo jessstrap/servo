@@ -4,16 +4,17 @@
 
 use dom::bindings::codegen::Bindings::ServiceWorkerBinding::ServiceWorkerState;
 use dom::bindings::codegen::Bindings::ServiceWorkerRegistrationBinding::{ServiceWorkerRegistrationMethods, Wrap};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::reflect_dom_object;
 use dom::bindings::str::USVString;
 use dom::eventtarget::EventTarget;
+use dom::globalscope::GlobalScope;
 use dom::serviceworker::ServiceWorker;
-use dom::serviceworkercontainer::Controllable;
 use dom::workerglobalscope::prepare_workerscope_init;
 use script_traits::{WorkerScriptLoadOrigin, ScopeThings};
-use url::Url;
+use servo_url::ServoUrl;
+use std::cell::Cell;
+
 
 #[dom_struct]
 pub struct ServiceWorkerRegistration {
@@ -21,27 +22,27 @@ pub struct ServiceWorkerRegistration {
     active: Option<JS<ServiceWorker>>,
     installing: Option<JS<ServiceWorker>>,
     waiting: Option<JS<ServiceWorker>>,
-    scope: String
+    scope: ServoUrl,
+    uninstalling: Cell<bool>
 }
 
 impl ServiceWorkerRegistration {
-    fn new_inherited(active_sw: &ServiceWorker, scope: String) -> ServiceWorkerRegistration {
+    fn new_inherited(active_sw: &ServiceWorker, scope: ServoUrl) -> ServiceWorkerRegistration {
         ServiceWorkerRegistration {
             eventtarget: EventTarget::new_inherited(),
             active: Some(JS::from_ref(active_sw)),
             installing: None,
             waiting: None,
             scope: scope,
+            uninstalling: Cell::new(false)
         }
     }
     #[allow(unrooted_must_root)]
-    pub fn new(global: GlobalRef,
-               script_url: Url,
-               scope: String,
-               container: &Controllable) -> Root<ServiceWorkerRegistration> {
-        let active_worker = ServiceWorker::install_serviceworker(global, script_url.clone(), true);
+    pub fn new(global: &GlobalScope,
+               script_url: &ServoUrl,
+               scope: ServoUrl) -> Root<ServiceWorkerRegistration> {
+        let active_worker = ServiceWorker::install_serviceworker(global, script_url.clone(), scope.clone(), true);
         active_worker.set_transition_state(ServiceWorkerState::Installed);
-        container.set_controller(&*active_worker.clone());
         reflect_dom_object(box ServiceWorkerRegistration::new_inherited(&*active_worker, scope), global, Wrap)
     }
 
@@ -49,27 +50,46 @@ impl ServiceWorkerRegistration {
         self.active.as_ref().unwrap()
     }
 
-    pub fn create_scope_things(global: GlobalRef, script_url: Url) -> ScopeThings {
+    pub fn get_uninstalling(&self) -> bool {
+        self.uninstalling.get()
+    }
+
+    pub fn set_uninstalling(&self, flag: bool) {
+        self.uninstalling.set(flag)
+    }
+
+    pub fn create_scope_things(global: &GlobalScope, script_url: ServoUrl) -> ScopeThings {
         let worker_load_origin = WorkerScriptLoadOrigin {
             referrer_url: None,
             referrer_policy: None,
-            pipeline_id: Some(global.pipeline())
+            pipeline_id: Some(global.pipeline_id())
         };
 
         let worker_id = global.get_next_worker_id();
-        let init = prepare_workerscope_init(global, None);
+        let devtools_chan = global.devtools_chan().cloned();
+        let init = prepare_workerscope_init(&global, None);
         ScopeThings {
             script_url: script_url,
-            pipeline_id: global.pipeline(),
             init: init,
             worker_load_origin: worker_load_origin,
-            devtools_chan: global.devtools_chan(),
+            devtools_chan: devtools_chan,
             worker_id: worker_id
+        }
+    }
+
+    // https://w3c.github.io/ServiceWorker/#get-newest-worker-algorithm
+    pub fn get_newest_worker(&self) -> Option<Root<ServiceWorker>> {
+        if self.installing.as_ref().is_some() {
+            self.installing.as_ref().map(|sw| Root::from_ref(&**sw))
+        } else if self.waiting.as_ref().is_some() {
+            self.waiting.as_ref().map(|sw| Root::from_ref(&**sw))
+        } else {
+            self.active.as_ref().map(|sw| Root::from_ref(&**sw))
         }
     }
 }
 
-pub fn longest_prefix_match(stored_scope: &Url, potential_match: &Url) -> bool {
+pub fn longest_prefix_match(stored_scope: &ServoUrl, potential_match: &ServoUrl) -> bool {
     if stored_scope.origin() != potential_match.origin() {
         return false;
     }
@@ -83,23 +103,23 @@ pub fn longest_prefix_match(stored_scope: &Url, potential_match: &Url) -> bool {
 }
 
 impl ServiceWorkerRegistrationMethods for ServiceWorkerRegistration {
-    // https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#service-worker-registration-installing-attribute
+    // https://w3c.github.io/ServiceWorker/#service-worker-registration-installing-attribute
     fn GetInstalling(&self) -> Option<Root<ServiceWorker>> {
         self.installing.as_ref().map(|sw| Root::from_ref(&**sw))
     }
 
-    // https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#service-worker-registration-active-attribute
+    // https://w3c.github.io/ServiceWorker/#service-worker-registration-active-attribute
     fn GetActive(&self) -> Option<Root<ServiceWorker>> {
         self.active.as_ref().map(|sw| Root::from_ref(&**sw))
     }
 
-    // https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#service-worker-registration-waiting-attribute
+    // https://w3c.github.io/ServiceWorker/#service-worker-registration-waiting-attribute
     fn GetWaiting(&self) -> Option<Root<ServiceWorker>> {
         self.waiting.as_ref().map(|sw| Root::from_ref(&**sw))
     }
 
-    // https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#service-worker-registration-scope-attribute
+    // https://w3c.github.io/ServiceWorker/#service-worker-registration-scope-attribute
     fn Scope(&self) -> USVString {
-        USVString(self.scope.clone())
+        USVString(self.scope.as_str().to_owned())
     }
 }

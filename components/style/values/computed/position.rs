@@ -7,12 +7,13 @@
 //!
 //! [position]: https://drafts.csswg.org/css-backgrounds-3/#position
 
-use cssparser::ToCss;
 use std::fmt;
+use style_traits::ToCss;
 use values::computed::LengthOrPercentage;
 
 #[derive(Debug, Clone, PartialEq, Copy)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub struct Position {
     pub horizontal: LengthOrPercentage,
     pub vertical: LengthOrPercentage,
@@ -24,5 +25,27 @@ impl ToCss for Position {
         try!(dest.write_str(" "));
         try!(self.vertical.to_css(dest));
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Copy)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
+pub struct HorizontalPosition(pub LengthOrPercentage);
+
+impl ToCss for HorizontalPosition {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+        self.0.to_css(dest)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Copy)]
+#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
+pub struct VerticalPosition(pub LengthOrPercentage);
+
+impl ToCss for VerticalPosition {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+        self.0.to_css(dest)
     }
 }

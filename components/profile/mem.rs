@@ -6,14 +6,13 @@
 
 use ipc_channel::ipc::{self, IpcReceiver};
 use ipc_channel::router::ROUTER;
-use profile_traits::mem::ReportsChan;
 use profile_traits::mem::{ProfilerChan, ProfilerMsg, ReportKind, Reporter, ReporterRequest};
+use profile_traits::mem::ReportsChan;
 use std::borrow::ToOwned;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::thread;
 use time::duration_from_seconds;
-use util::thread::spawn_named;
 
 pub struct Profiler {
     /// The port through which messages are received.
@@ -33,22 +32,22 @@ impl Profiler {
         // Create the timer thread if a period was provided.
         if let Some(period) = period {
             let chan = chan.clone();
-            spawn_named("Memory profiler timer".to_owned(), move || {
+            thread::Builder::new().name("Memory profiler timer".to_owned()).spawn(move || {
                 loop {
                     thread::sleep(duration_from_seconds(period));
                     if chan.send(ProfilerMsg::Print).is_err() {
                         break;
                     }
                 }
-            });
+            }).expect("Thread spawning failed");
         }
 
         // Always spawn the memory profiler. If there is no timer thread it won't receive regular
         // `Print` events, but it will still receive the other events.
-        spawn_named("Memory profiler".to_owned(), move || {
+        thread::Builder::new().name("Memory profiler".to_owned()).spawn(move || {
             let mut mem_profiler = Profiler::new(port);
             mem_profiler.start();
-        });
+        }).expect("Thread spawning failed");
 
         let mem_profiler_chan = ProfilerChan(chan);
 
@@ -611,8 +610,8 @@ mod system_reporter {
                     Some(cap) => cap,
                     None => continue,
                 };
-                let perms = cap.at(1).unwrap();
-                let pathname = cap.at(2).unwrap();
+                let perms = cap.get(1).unwrap().as_str();
+                let pathname = cap.get(2).unwrap().as_str();
 
                 // Construct the segment name from its pathname and permissions.
                 curr_seg_name.clear();
@@ -636,7 +635,7 @@ mod system_reporter {
                     Some(cap) => cap,
                     None => continue,
                 };
-                let rss = cap.at(1).unwrap().parse::<usize>().unwrap() * 1024;
+                let rss = cap.get(1).unwrap().as_str().parse::<usize>().unwrap() * 1024;
 
                 if rss > 0 {
                     // Aggregate small segments into "other".

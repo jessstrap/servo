@@ -8,43 +8,50 @@ use dom::bindings::codegen::Bindings::HTMLMetaElementBinding;
 use dom::bindings::codegen::Bindings::HTMLMetaElementBinding::HTMLMetaElementMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{Root, RootedReference};
+use dom::bindings::js::{MutNullableJS, Root, RootedReference};
 use dom::bindings::str::DOMString;
+use dom::cssstylesheet::CSSStyleSheet;
 use dom::document::Document;
 use dom::element::{AttributeMutation, Element};
 use dom::htmlelement::HTMLElement;
 use dom::htmlheadelement::HTMLHeadElement;
-use dom::node::{Node, UnbindContext, document_from_node};
+use dom::node::{Node, UnbindContext, document_from_node, window_from_node};
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
+use parking_lot::RwLock;
+use servo_config::prefs::PREFS;
 use std::ascii::AsciiExt;
 use std::sync::Arc;
-use string_cache::Atom;
+use std::sync::atomic::AtomicBool;
 use style::attr::AttrValue;
 use style::str::HTML_SPACE_CHARACTERS;
-use style::stylesheets::{Stylesheet, CSSRule, Origin};
+use style::stylesheets::{Stylesheet, CssRule, CssRules, Origin};
 use style::viewport::ViewportRule;
 
 #[dom_struct]
 pub struct HTMLMetaElement {
     htmlelement: HTMLElement,
+    #[ignore_heap_size_of = "Arc"]
     stylesheet: DOMRefCell<Option<Arc<Stylesheet>>>,
+    cssom_stylesheet: MutNullableJS<CSSStyleSheet>,
 }
 
 impl HTMLMetaElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLMetaElement {
         HTMLMetaElement {
-            htmlelement: HTMLElement::new_inherited(localName, prefix, document),
+            htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             stylesheet: DOMRefCell::new(None),
+            cssom_stylesheet: MutNullableJS::new(None),
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLMetaElement> {
-        Node::reflect_node(box HTMLMetaElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLMetaElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLMetaElementBinding::Wrap)
     }
@@ -53,9 +60,22 @@ impl HTMLMetaElement {
         self.stylesheet.borrow().clone()
     }
 
+    pub fn get_cssom_stylesheet(&self) -> Option<Root<CSSStyleSheet>> {
+        self.get_stylesheet().map(|sheet| {
+            self.cssom_stylesheet.or_init(|| {
+                CSSStyleSheet::new(&window_from_node(self),
+                                   self.upcast::<Element>(),
+                                   "text/css".into(),
+                                   None, // todo handle location
+                                   None, // todo handle title
+                                   sheet)
+            })
+        })
+    }
+
     fn process_attributes(&self) {
         let element = self.upcast::<Element>();
-        if let Some(name) = element.get_attribute(&ns!(), &atom!("name")).r() {
+        if let Some(name) = element.get_attribute(&ns!(), &local_name!("name")).r() {
             let name = name.value().to_ascii_lowercase();
             let name = name.trim_matches(HTML_SPACE_CHARACTERS);
 
@@ -70,21 +90,24 @@ impl HTMLMetaElement {
     }
 
     fn apply_viewport(&self) {
-        if !::util::prefs::PREFS.get("layout.viewport.enabled").as_boolean().unwrap_or(false) {
+        if !PREFS.get("layout.viewport.enabled").as_boolean().unwrap_or(false) {
             return;
         }
         let element = self.upcast::<Element>();
-        if let Some(content) = element.get_attribute(&ns!(), &atom!("content")).r() {
+        if let Some(content) = element.get_attribute(&ns!(), &local_name!("content")).r() {
             let content = content.value();
             if !content.is_empty() {
                 if let Some(translated_rule) = ViewportRule::from_meta(&**content) {
                     *self.stylesheet.borrow_mut() = Some(Arc::new(Stylesheet {
-                        rules: vec![CSSRule::Viewport(translated_rule)],
+                        rules: CssRules::new(vec![CssRule::Viewport(Arc::new(RwLock::new(translated_rule)))]),
                         origin: Origin::Author,
-                        media: None,
+                        base_url: window_from_node(self).get_url(),
+                        namespaces: Default::default(),
+                        media: Default::default(),
                         // Viewport constraints are always recomputed on resize; they don't need to
                         // force all styles to be recomputed.
-                        dirty_on_viewport_size_change: false,
+                        dirty_on_viewport_size_change: AtomicBool::new(false),
+                        disabled: AtomicBool::new(false),
                     }));
                     let doc = document_from_node(self);
                     doc.invalidate_stylesheets();
@@ -95,7 +118,7 @@ impl HTMLMetaElement {
 
     fn process_referrer_attribute(&self) {
         let element = self.upcast::<Element>();
-        if let Some(name) = element.get_attribute(&ns!(), &atom!("name")).r() {
+        if let Some(name) = element.get_attribute(&ns!(), &local_name!("name")).r() {
             let name = name.value().to_ascii_lowercase();
             let name = name.trim_matches(HTML_SPACE_CHARACTERS);
 
@@ -144,9 +167,9 @@ impl VirtualMethods for HTMLMetaElement {
         }
     }
 
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &atom!("name") => AttrValue::from_atomic(value.into()),
+            &local_name!("name") => AttrValue::from_atomic(value.into()),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }

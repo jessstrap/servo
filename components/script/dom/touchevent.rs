@@ -5,9 +5,8 @@
 use dom::bindings::codegen::Bindings::TouchEventBinding;
 use dom::bindings::codegen::Bindings::TouchEventBinding::TouchEventMethods;
 use dom::bindings::codegen::Bindings::UIEventBinding::UIEventMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, MutHeap, Root};
+use dom::bindings::js::{MutJS, Root};
 use dom::bindings::reflector::reflect_dom_object;
 use dom::bindings::str::DOMString;
 use dom::event::{EventBubbles, EventCancelable};
@@ -19,9 +18,9 @@ use std::cell::Cell;
 #[dom_struct]
 pub struct TouchEvent {
     uievent: UIEvent,
-    touches: MutHeap<JS<TouchList>>,
-    target_touches: MutHeap<JS<TouchList>>,
-    changed_touches: MutHeap<JS<TouchList>>,
+    touches: MutJS<TouchList>,
+    target_touches: MutJS<TouchList>,
+    changed_touches: MutJS<TouchList>,
     alt_key: Cell<bool>,
     meta_key: Cell<bool>,
     ctrl_key: Cell<bool>,
@@ -34,9 +33,9 @@ impl TouchEvent {
                      target_touches: &TouchList) -> TouchEvent {
         TouchEvent {
             uievent: UIEvent::new_inherited(),
-            touches: MutHeap::new(touches),
-            target_touches: MutHeap::new(target_touches),
-            changed_touches: MutHeap::new(changed_touches),
+            touches: MutJS::new(touches),
+            target_touches: MutJS::new(target_touches),
+            changed_touches: MutJS::new(changed_touches),
             ctrl_key: Cell::new(false),
             shift_key: Cell::new(false),
             alt_key: Cell::new(false),
@@ -49,32 +48,32 @@ impl TouchEvent {
                      changed_touches: &TouchList,
                      target_touches: &TouchList) -> Root<TouchEvent> {
         reflect_dom_object(box TouchEvent::new_inherited(touches, changed_touches, target_touches),
-                           GlobalRef::Window(window),
+                           window,
                            TouchEventBinding::Wrap)
     }
 
     pub fn new(window: &Window,
                type_: DOMString,
-               canBubble: EventBubbles,
+               can_bubble: EventBubbles,
                cancelable: EventCancelable,
                view: Option<&Window>,
                detail: i32,
                touches: &TouchList,
                changed_touches: &TouchList,
                target_touches: &TouchList,
-               ctrlKey: bool,
-               altKey: bool,
-               shiftKey: bool,
-               metaKey: bool) -> Root<TouchEvent> {
+               ctrl_key: bool,
+               alt_key: bool,
+               shift_key: bool,
+               meta_key: bool) -> Root<TouchEvent> {
         let ev = TouchEvent::new_uninitialized(window, touches, changed_touches, target_touches);
         ev.upcast::<UIEvent>().InitUIEvent(type_,
-                                           bool::from(canBubble),
+                                           bool::from(can_bubble),
                                            bool::from(cancelable),
                                            view, detail);
-        ev.ctrl_key.set(ctrlKey);
-        ev.alt_key.set(altKey);
-        ev.shift_key.set(shiftKey);
-        ev.meta_key.set(metaKey);
+        ev.ctrl_key.set(ctrl_key);
+        ev.alt_key.set(alt_key);
+        ev.shift_key.set(shift_key);
+        ev.meta_key.set(meta_key);
         ev
     }
 }

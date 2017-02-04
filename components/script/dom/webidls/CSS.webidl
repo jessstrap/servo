@@ -6,8 +6,14 @@
  * http://dev.w3.org/csswg/cssom/#the-css-interface
  */
 
-[Abstract, Exposed=(Window,Worker)]
+[Abstract, Exposed=Window]
 interface CSS {
   [Throws]
   static DOMString escape(DOMString ident);
+};
+
+// https://drafts.csswg.org/css-conditional-3/#the-css-interface
+partial interface CSS {
+  static boolean supports(DOMString property, DOMString value);
+  static boolean supports(DOMString conditionText);
 };

@@ -2,13 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#service-worker-container
+// https://w3c.github.io/ServiceWorker/#service-worker-container
 [Pref="dom.serviceworker.enabled", Exposed=(Window,Worker)]
 interface ServiceWorkerContainer : EventTarget {
   [Unforgeable] readonly attribute ServiceWorker? controller;
   //[SameObject] readonly attribute Promise<ServiceWorkerRegistration> ready;
 
-  [NewObject, Throws] ServiceWorkerRegistration register(USVString scriptURL, optional RegistrationOptions options);
+  [NewObject] Promise<ServiceWorkerRegistration> register(USVString scriptURL, optional RegistrationOptions options);
 
   //[NewObject] /*Promise<any>*/ any getRegistration(optional USVString clientURL = "");
   //[NewObject] /* Promise */<sequence<ServiceWorkerRegistration>> getRegistrations();

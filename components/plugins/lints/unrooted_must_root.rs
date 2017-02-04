@@ -7,7 +7,6 @@ use rustc::hir::intravisit as visit;
 use rustc::hir::map as ast_map;
 use rustc::lint::{LateContext, LintPass, LintArray, LateLintPass, LintContext};
 use rustc::ty;
-use syntax::attr::AttrMetaMethods;
 use syntax::{ast, codemap};
 use utils::{match_def_path, in_derive_expn};
 
@@ -44,8 +43,7 @@ fn is_unrooted_ty(cx: &LateContext, ty: &ty::TyS, in_new_function: bool) -> bool
     let mut ret = false;
     ty.maybe_walk(|t| {
         match t.sty {
-            ty::TyStruct(did, _) |
-            ty::TyEnum(did, _) => {
+            ty::TyAdt(did, _) => {
                 if cx.tcx.has_attr(did.did, "must_root") {
                     ret = true;
                     false
@@ -78,7 +76,7 @@ impl LintPass for UnrootedPass {
     }
 }
 
-impl LateLintPass for UnrootedPass {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnrootedPass {
     /// All structs containing #[must_root] types must be #[must_root] themselves
     fn check_struct_def(&mut self,
                         cx: &LateContext,
@@ -92,7 +90,8 @@ impl LateLintPass for UnrootedPass {
         };
         if item.attrs.iter().all(|a| !a.check_name("must_root")) {
             for ref field in def.fields() {
-                if is_unrooted_ty(cx, cx.tcx.node_id_to_type(field.id), false) {
+                let def_id = cx.tcx.map.local_def_id(field.id);
+                if is_unrooted_ty(cx, cx.tcx.item_type(def_id), false) {
                     cx.span_lint(UNROOTED_MUST_ROOT, field.span,
                                  "Type must be rooted, use #[must_root] on the struct definition to propagate")
                 }
@@ -107,7 +106,8 @@ impl LateLintPass for UnrootedPass {
             match var.node.data {
                 hir::VariantData::Tuple(ref fields, _) => {
                     for ref field in fields {
-                        if is_unrooted_ty(cx, cx.tcx.node_id_to_type(field.id), false) {
+                        let def_id = cx.tcx.map.local_def_id(field.id);
+                        if is_unrooted_ty(cx, cx.tcx.item_type(def_id), false) {
                             cx.span_lint(UNROOTED_MUST_ROOT, field.ty.span,
                                          "Type must be rooted, use #[must_root] on \
                                           the enum definition to propagate")
@@ -119,30 +119,34 @@ impl LateLintPass for UnrootedPass {
         }
     }
     /// Function arguments that are #[must_root] types are not allowed
-    fn check_fn(&mut self, cx: &LateContext, kind: visit::FnKind, decl: &hir::FnDecl,
-                block: &hir::Block, span: codemap::Span, id: ast::NodeId) {
+    fn check_fn(&mut self,
+                cx: &LateContext<'a, 'tcx>,
+                kind: visit::FnKind,
+                decl: &'tcx hir::FnDecl,
+                body: &'tcx hir::Body,
+                span: codemap::Span,
+                id: ast::NodeId) {
         let in_new_function = match kind {
             visit::FnKind::ItemFn(n, _, _, _, _, _, _) |
             visit::FnKind::Method(n, _, _, _) => {
-                n.as_str() == "new" || n.as_str().starts_with("new_")
+                &*n.as_str() == "new" || n.as_str().starts_with("new_")
             }
             visit::FnKind::Closure(_) => return,
         };
 
         if !in_derive_expn(cx, span) {
-            let ty = cx.tcx.node_id_to_type(id);
+            let def_id = cx.tcx.map.local_def_id(id);
+            let ty = cx.tcx.item_type(def_id);
 
             for (arg, ty) in decl.inputs.iter().zip(ty.fn_args().0.iter()) {
                 if is_unrooted_ty(cx, ty, false) {
-                    cx.span_lint(UNROOTED_MUST_ROOT, arg.ty.span, "Type must be rooted")
+                    cx.span_lint(UNROOTED_MUST_ROOT, arg.span, "Type must be rooted")
                 }
             }
 
             if !in_new_function {
-                if let ty::FnOutput::FnConverging(ret) = ty.fn_ret().0 {
-                    if is_unrooted_ty(cx, ret, false) {
-                        cx.span_lint(UNROOTED_MUST_ROOT, decl.output.span(), "Type must be rooted")
-                    }
+                if is_unrooted_ty(cx, ty.fn_ret().0, false) {
+                    cx.span_lint(UNROOTED_MUST_ROOT, decl.output.span(), "Type must be rooted")
                 }
             }
         }
@@ -151,7 +155,7 @@ impl LateLintPass for UnrootedPass {
             cx: cx,
             in_new_function: in_new_function,
         };
-        visit::walk_block(&mut visitor, block);
+        visit::walk_expr(&mut visitor, &body.value);
     }
 }
 
@@ -160,12 +164,12 @@ struct FnDefVisitor<'a, 'b: 'a, 'tcx: 'a+'b> {
     in_new_function: bool,
 }
 
-impl<'a, 'b: 'a, 'tcx: 'a+'b> visit::Visitor<'a> for FnDefVisitor<'a, 'b, 'tcx> {
-    fn visit_expr(&mut self, expr: &'a hir::Expr) {
+impl<'a, 'b, 'tcx> visit::Visitor<'tcx> for FnDefVisitor<'a, 'b, 'tcx> {
+    fn visit_expr(&mut self, expr: &'tcx hir::Expr) {
         let cx = self.cx;
 
         fn require_rooted(cx: &LateContext, in_new_function: bool, subexpr: &hir::Expr) {
-            let ty = cx.tcx.expr_ty(&*subexpr);
+            let ty = cx.tables.expr_ty(&subexpr);
             if is_unrooted_ty(cx, ty, in_new_function) {
                 cx.span_lint(UNROOTED_MUST_ROOT,
                              subexpr.span,
@@ -195,11 +199,11 @@ impl<'a, 'b: 'a, 'tcx: 'a+'b> visit::Visitor<'a> for FnDefVisitor<'a, 'b, 'tcx> 
         visit::walk_expr(self, expr);
     }
 
-    fn visit_pat(&mut self, pat: &'a hir::Pat) {
+    fn visit_pat(&mut self, pat: &'tcx hir::Pat) {
         let cx = self.cx;
 
-        if let hir::PatKind::Binding(hir::BindingMode::BindByValue(_), _, _) = pat.node {
-            let ty = cx.tcx.pat_ty(pat);
+        if let hir::PatKind::Binding(hir::BindingMode::BindByValue(_), _, _, _) = pat.node {
+            let ty = cx.tables.pat_ty(pat);
             if is_unrooted_ty(cx, ty, self.in_new_function) {
                 cx.span_lint(UNROOTED_MUST_ROOT,
                             pat.span,
@@ -210,13 +214,16 @@ impl<'a, 'b: 'a, 'tcx: 'a+'b> visit::Visitor<'a> for FnDefVisitor<'a, 'b, 'tcx> 
         visit::walk_pat(self, pat);
     }
 
-    fn visit_fn(&mut self, kind: visit::FnKind<'a>, decl: &'a hir::FnDecl,
-                block: &'a hir::Block, span: codemap::Span, id: ast::NodeId) {
+    fn visit_fn(&mut self, kind: visit::FnKind<'tcx>, decl: &'tcx hir::FnDecl,
+                body: hir::BodyId, span: codemap::Span, id: ast::NodeId) {
         if let visit::FnKind::Closure(_) = kind {
-            visit::walk_fn(self, kind, decl, block, span, id);
+            visit::walk_fn(self, kind, decl, body, span, id);
         }
     }
 
-    fn visit_foreign_item(&mut self, _: &'a hir::ForeignItem) {}
-    fn visit_ty(&mut self, _: &'a hir::Ty) { }
+    fn visit_foreign_item(&mut self, _: &'tcx hir::ForeignItem) {}
+    fn visit_ty(&mut self, _: &'tcx hir::Ty) { }
+    fn nested_visit_map<'this>(&'this mut self) -> hir::intravisit::NestedVisitorMap<'this, 'tcx> {
+        hir::intravisit::NestedVisitorMap::OnlyBodies(&self.cx.tcx.map)
+    }
 }

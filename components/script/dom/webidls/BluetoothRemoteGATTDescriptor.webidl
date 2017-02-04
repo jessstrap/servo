@@ -4,15 +4,14 @@
 
 // http://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattdescriptor
 
-[Pref="dom.bluetooth.enabled", Exposed=(Window,Worker)]
+[Pref="dom.bluetooth.enabled"]
 interface BluetoothRemoteGATTDescriptor {
+  [SameObject]
   readonly attribute BluetoothRemoteGATTCharacteristic characteristic;
   readonly attribute DOMString uuid;
   readonly attribute ByteString? value;
-  [Throws]
-  ByteString readValue();
+  Promise<ByteString> readValue();
   //Promise<DataView> readValue();
-  [Throws]
-  void writeValue(sequence<octet> value);
+  Promise<void> writeValue(sequence<octet> value);
   //Promise<void> writeValue(BufferSource value);
 };

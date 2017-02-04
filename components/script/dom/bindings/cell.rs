@@ -4,17 +4,14 @@
 
 //! A shareable mutable container for the DOM.
 
-use dom::bindings::trace::JSTraceable;
-use js::jsapi::JSTracer;
-use std::cell::{BorrowState, Ref, RefCell, RefMut};
-use util::thread_state;
-use util::thread_state::SCRIPT;
+use std::cell::{BorrowError, BorrowMutError, Ref, RefCell, RefMut};
+use style::thread_state;
 
 /// A mutable field in the DOM.
 ///
 /// This extends the API of `core::cell::RefCell` to allow unsafe access in
 /// certain situations, with dynamic checking in debug builds.
-#[derive(Clone, HeapSizeOf)]
+#[derive(Clone, Debug, Default, HeapSizeOf, PartialEq)]
 pub struct DOMRefCell<T> {
     value: RefCell<T>,
 }
@@ -29,7 +26,7 @@ impl<T> DOMRefCell<T> {
     #[allow(unsafe_code)]
     pub unsafe fn borrow_for_layout(&self) -> &T {
         debug_assert!(thread_state::get().is_layout());
-        &*self.value.as_unsafe_cell().get()
+        &*self.value.as_ptr()
     }
 
     /// Borrow the contents for the purpose of GC tracing.
@@ -41,58 +38,15 @@ impl<T> DOMRefCell<T> {
         // FIXME: IN_GC isn't reliable enough - doesn't catch minor GCs
         // https://github.com/servo/servo/issues/6389
         // debug_assert!(thread_state::get().contains(SCRIPT | IN_GC));
-        &*self.value.as_unsafe_cell().get()
+        &*self.value.as_ptr()
     }
 
     /// Borrow the contents for the purpose of script deallocation.
     ///
     #[allow(unsafe_code)]
     pub unsafe fn borrow_for_script_deallocation(&self) -> &mut T {
-        debug_assert!(thread_state::get().contains(SCRIPT));
-        &mut *self.value.as_unsafe_cell().get()
-    }
-
-    /// Is the cell mutably borrowed?
-    ///
-    /// For safety checks in debug builds only.
-    pub fn is_mutably_borrowed(&self) -> bool {
-        self.value.borrow_state() == BorrowState::Writing
-    }
-
-    /// Attempts to immutably borrow the wrapped value.
-    ///
-    /// The borrow lasts until the returned `Ref` exits scope. Multiple
-    /// immutable borrows can be taken out at the same time.
-    ///
-    /// Returns `None` if the value is currently mutably borrowed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this is called off the script thread.
-    pub fn try_borrow(&self) -> Option<Ref<T>> {
-        debug_assert!(thread_state::get().is_script());
-        match self.value.borrow_state() {
-            BorrowState::Writing => None,
-            _ => Some(self.value.borrow()),
-        }
-    }
-
-    /// Mutably borrows the wrapped value.
-    ///
-    /// The borrow lasts until the returned `RefMut` exits scope. The value
-    /// cannot be borrowed while this borrow is active.
-    ///
-    /// Returns `None` if the value is currently borrowed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this is called off the script thread.
-    pub fn try_borrow_mut(&self) -> Option<RefMut<T>> {
-        debug_assert!(thread_state::get().is_script());
-        match self.value.borrow_state() {
-            BorrowState::Unused => Some(self.value.borrow_mut()),
-            _ => None,
-        }
+        debug_assert!(thread_state::get().contains(thread_state::SCRIPT));
+        &mut *self.value.as_ptr()
     }
 
     /// Version of the above that we use during restyle while the script thread
@@ -100,14 +54,6 @@ impl<T> DOMRefCell<T> {
     pub fn borrow_mut_for_layout(&self) -> RefMut<T> {
         debug_assert!(thread_state::get().is_layout());
         self.value.borrow_mut()
-    }
-}
-
-impl<T: JSTraceable> JSTraceable for DOMRefCell<T> {
-    fn trace(&self, trc: *mut JSTracer) {
-        unsafe {
-            (*self).borrow_for_gc_trace().trace(trc)
-        }
     }
 }
 
@@ -148,5 +94,35 @@ impl<T> DOMRefCell<T> {
     /// Panics if the value is currently borrowed.
     pub fn borrow_mut(&self) -> RefMut<T> {
         self.try_borrow_mut().expect("DOMRefCell<T> already borrowed")
+    }
+
+    /// Attempts to immutably borrow the wrapped value.
+    ///
+    /// The borrow lasts until the returned `Ref` exits scope. Multiple
+    /// immutable borrows can be taken out at the same time.
+    ///
+    /// Returns `None` if the value is currently mutably borrowed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is called off the script thread.
+    pub fn try_borrow(&self) -> Result<Ref<T>, BorrowError> {
+        debug_assert!(thread_state::get().is_script());
+        self.value.try_borrow()
+    }
+
+    /// Mutably borrows the wrapped value.
+    ///
+    /// The borrow lasts until the returned `RefMut` exits scope. The value
+    /// cannot be borrowed while this borrow is active.
+    ///
+    /// Returns `None` if the value is currently borrowed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is called off the script thread.
+    pub fn try_borrow_mut(&self) -> Result<RefMut<T>, BorrowMutError> {
+        debug_assert!(thread_state::get().is_script());
+        self.value.try_borrow_mut()
     }
 }

@@ -2,25 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use script::dom::characterdata::CharacterData;
-use script::dom::element::Element;
-use script::dom::eventtarget::EventTarget;
-use script::dom::htmldivelement::HTMLDivElement;
-use script::dom::htmlelement::HTMLElement;
-use script::dom::htmlspanelement::HTMLSpanElement;
-use script::dom::node::Node;
-use script::dom::text::Text;
-use script::layout_wrapper::ServoThreadSafeLayoutNode;
-use std::mem::size_of;
+use script::test::size_of;
 
 // Macro so that we can stringify type names
 // I'd really prefer the tests themselves to be run at plugin time,
 // however rustc::middle doesn't have access to the full type data
 macro_rules! sizeof_checker (
-    ($testname: ident, $t:ty, $known_size:expr) => (
+    ($testname: ident, $t: ident, $known_size: expr) => (
         #[test]
         fn $testname() {
-            let new = size_of::<$t>();
+            let new = size_of::$t();
             let old = $known_size;
             if new < old {
                 panic!("Your changes have decreased the stack size of commonly used DOM struct {} from {} to {}. \
@@ -39,11 +30,15 @@ macro_rules! sizeof_checker (
 
 // Update the sizes here
 sizeof_checker!(size_event_target, EventTarget, 40);
-sizeof_checker!(size_node, Node, 160);
-sizeof_checker!(size_element, Element, 336);
-sizeof_checker!(size_htmlelement, HTMLElement, 352);
-sizeof_checker!(size_div, HTMLDivElement, 352);
-sizeof_checker!(size_span, HTMLSpanElement, 352);
-sizeof_checker!(size_text, Text, 192);
-sizeof_checker!(size_characterdata, CharacterData, 192);
+sizeof_checker!(size_node, Node, 152);
+sizeof_checker!(size_element, Element, 320);
+sizeof_checker!(size_htmlelement, HTMLElement, 336);
+sizeof_checker!(size_div, HTMLDivElement, 336);
+sizeof_checker!(size_span, HTMLSpanElement, 336);
+sizeof_checker!(size_text, Text, 184);
+sizeof_checker!(size_characterdata, CharacterData, 184);
 sizeof_checker!(size_servothreadsafelayoutnode, ServoThreadSafeLayoutNode, 16);
+
+// We use these types in the parallel traversal. They should stay pointer-sized.
+sizeof_checker!(size_sendelement, SendElement, 8);
+sizeof_checker!(size_sendnode, SendNode, 8);

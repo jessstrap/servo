@@ -9,7 +9,6 @@ input {
   color: black;
   font-family: sans-serif;
   font-size: 0.8333em;
-  white-space: pre;
   text-align: left;
   line-height: 1.8;
 }
@@ -43,7 +42,6 @@ input[type="reset"] {
   border-right: solid 1px #999999;
   border-bottom: solid 1px #999999;
   text-align: center;
-  vertical-align: middle;
   color: black;
 }
 
@@ -132,6 +130,10 @@ textarea {
   -servo-overflow-clip-box: content-box;
 }
 
+input:not([type=radio i]):not([type=checkbox i]):not([type=reset i]):not([type=button i]):not([type=submit i]) {
+  white-space: pre;
+}
+
 textarea {
   overflow: auto;
 }
@@ -165,3 +167,51 @@ details[open]::-servo-details-summary {
 svg > * {
   display: none;
 }
+
+*|*::-servo-input-text {
+    margin: 0;
+}
+
+*|*::-servo-table-wrapper {
+    display: table;
+    border: none;
+}
+
+*|*::-servo-anonymous-table-wrapper {
+    position: static;
+    margin: 0;
+    counter-increment: none;
+}
+
+*|*::-servo-anonymous-table {
+    display: table;
+    position: static;
+    border: none;
+    padding: 0;
+    counter-increment: none;
+}
+
+*|*::-servo-anonymous-table-row {
+    display: table-row;
+    position: static;
+    border: none;
+    counter-increment: none;
+}
+
+*|*::-servo-anonymous-table-cell {
+    display: table-cell;
+    position: static;
+    border: none;
+    counter-increment: none;
+}
+
+*|*::-servo-anonymous-block {
+    display: block;
+    position: static;
+    border: none;
+    padding: 0;
+    margin: 0;
+    width: auto;
+    height: auto;
+}
+

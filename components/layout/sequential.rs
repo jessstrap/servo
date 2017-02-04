@@ -9,21 +9,18 @@ use context::{LayoutContext, SharedLayoutContext};
 use display_list_builder::DisplayListBuildState;
 use euclid::point::Point2D;
 use floats::SpeculatedFloatPlacement;
-use flow::IS_ABSOLUTELY_POSITIONED;
-use flow::{PostorderFlowTraversal, PreorderFlowTraversal};
 use flow::{self, Flow, ImmutableFlowUtils, InorderFlowTraversal, MutableFlowUtils};
-use flow_ref::{self, FlowRef};
+use flow::{PostorderFlowTraversal, PreorderFlowTraversal};
+use flow::IS_ABSOLUTELY_POSITIONED;
 use fragment::FragmentBorderBoxIterator;
 use generated_content::ResolveGeneratedContent;
-use gfx::display_list::{DisplayItem, StackingContext};
-use script_layout_interface::restyle_damage::{REFLOW, STORE_OVERFLOW};
-use style::context::StyleContext;
-use traversal::{AssignBSizes, AssignISizes, BubbleISizes, BuildDisplayList, ComputeAbsolutePositions};
-use util::opts;
+use servo_config::opts;
+use style::servo::restyle_damage::{REFLOW, STORE_OVERFLOW};
+use traversal::{AssignBSizes, AssignISizes, BubbleISizes, BuildDisplayList};
 
 pub use style::sequential::traverse_dom;
 
-pub fn resolve_generated_content(root: &mut FlowRef, shared_layout_context: &SharedLayoutContext) {
+pub fn resolve_generated_content(root: &mut Flow, shared: &SharedLayoutContext) {
     fn doit(flow: &mut Flow, level: u32, traversal: &mut ResolveGeneratedContent) {
         if !traversal.should_process(flow) {
             return
@@ -36,13 +33,13 @@ pub fn resolve_generated_content(root: &mut FlowRef, shared_layout_context: &Sha
         }
     }
 
-    let layout_context = LayoutContext::new(shared_layout_context);
+    let layout_context = LayoutContext::new(shared);
     let mut traversal = ResolveGeneratedContent::new(&layout_context);
-    doit(flow_ref::deref_mut(root), 0, &mut traversal)
+    doit(root, 0, &mut traversal)
 }
 
-pub fn traverse_flow_tree_preorder(root: &mut FlowRef,
-                                   shared_layout_context: &SharedLayoutContext) {
+pub fn traverse_flow_tree_preorder(root: &mut Flow,
+                                   shared: &SharedLayoutContext) {
     fn doit(flow: &mut Flow,
             assign_inline_sizes: AssignISizes,
             assign_block_sizes: AssignBSizes) {
@@ -59,9 +56,7 @@ pub fn traverse_flow_tree_preorder(root: &mut FlowRef,
         }
     }
 
-    let layout_context = LayoutContext::new(shared_layout_context);
-
-    let root = flow_ref::deref_mut(root);
+    let layout_context = LayoutContext::new(shared);
 
     if opts::get().bubble_inline_sizes_separately {
         let bubble_inline_sizes = BubbleISizes { layout_context: &layout_context };
@@ -77,26 +72,18 @@ pub fn traverse_flow_tree_preorder(root: &mut FlowRef,
     doit(root, assign_inline_sizes, assign_block_sizes);
 }
 
-pub fn build_display_list_for_subtree(root: &mut FlowRef,
-                                      root_stacking_context: &mut StackingContext,
-                                      shared_layout_context: &SharedLayoutContext)
-                                      -> Vec<DisplayItem> {
-    let flow_root = flow_ref::deref_mut(root);
-    let layout_context = LayoutContext::new(shared_layout_context);
-    flow_root.traverse_preorder(&ComputeAbsolutePositions { layout_context: &layout_context });
-    let mut children = vec![];
-    flow_root.collect_stacking_contexts(root_stacking_context.id,
-                                        &mut children);
-    root_stacking_context.add_children(children);
-    let mut build_display_list = BuildDisplayList {
-        state: DisplayListBuildState::new(&layout_context,
-                                          flow::base(&*flow_root).stacking_context_id),
-    };
-    build_display_list.traverse(&mut *flow_root);
-    build_display_list.state.items
+pub fn build_display_list_for_subtree<'a>(flow_root: &mut Flow,
+                                          shared_layout_context: &'a SharedLayoutContext)
+                                          -> DisplayListBuildState<'a> {
+    let mut state = DisplayListBuildState::new(shared_layout_context);
+    flow_root.collect_stacking_contexts(&mut state);
+
+    let mut build_display_list = BuildDisplayList { state: state };
+    build_display_list.traverse(flow_root);
+    build_display_list.state
 }
 
-pub fn iterate_through_flow_tree_fragment_border_boxes(root: &mut FlowRef,
+pub fn iterate_through_flow_tree_fragment_border_boxes(root: &mut Flow,
                                                        iterator: &mut FragmentBorderBoxIterator) {
     fn doit(flow: &mut Flow,
             level: i32,
@@ -118,7 +105,7 @@ pub fn iterate_through_flow_tree_fragment_border_boxes(root: &mut FlowRef,
         }
     }
 
-    doit(flow_ref::deref_mut(root), 0, iterator, &Point2D::zero());
+    doit(root, 0, iterator, &Point2D::zero());
 }
 
 pub fn store_overflow(layout_context: &LayoutContext, flow: &mut Flow) {

@@ -8,25 +8,22 @@
 
 use app_units::Au;
 use block::{BlockFlow, ISizeAndMarginsComputer};
-use context::LayoutContext;
+use context::{LayoutContext, SharedLayoutContext};
 use display_list_builder::DisplayListBuildState;
 use euclid::Point2D;
 use flow::{Flow, FlowClass, OpaqueFlow};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
-use gfx::display_list::StackingContext;
-use gfx_traits::StackingContextId;
 use gfx_traits::print_tree::PrintTree;
 use layout_debug;
-use rustc_serialize::{Encodable, Encoder};
+use serde::{Serialize, Serializer};
 use std::fmt;
 use std::iter::{IntoIterator, Iterator, Peekable};
 use std::sync::Arc;
 use style::computed_values::{border_collapse, border_spacing};
 use style::context::SharedStyleContext;
-use style::logical_geometry::{LogicalSize, WritingMode};
+use style::logical_geometry::LogicalSize;
 use style::properties::ServoComputedValues;
-use table::{ColumnComputedInlineSize, ColumnIntrinsicInlineSize, InternalTable, TableLikeFlow};
-use table_row;
+use table::{ColumnIntrinsicInlineSize, InternalTable, TableLikeFlow};
 
 /// A table formatting context.
 pub struct TableRowGroupFlow {
@@ -36,15 +33,8 @@ pub struct TableRowGroupFlow {
     /// Information about the intrinsic inline-sizes of each column.
     pub column_intrinsic_inline_sizes: Vec<ColumnIntrinsicInlineSize>,
 
-    /// Information about the actual inline sizes of each column.
-    pub column_computed_inline_sizes: Vec<ColumnComputedInlineSize>,
-
     /// The spacing for this rowgroup.
     pub spacing: border_spacing::T,
-
-    /// The direction of the columns, propagated down from the table during the inline-size
-    /// assignment phase.
-    pub table_writing_mode: WritingMode,
 
     /// The final width of the borders in the inline direction for each cell, computed by the
     /// entire table and pushed down into each row during inline size computation.
@@ -55,24 +45,21 @@ pub struct TableRowGroupFlow {
     pub collapsed_block_direction_border_widths_for_table: Vec<Au>,
 }
 
-impl Encodable for TableRowGroupFlow {
-    fn encode<S: Encoder>(&self, e: &mut S) -> Result<(), S::Error> {
-        self.block_flow.encode(e)
+impl Serialize for TableRowGroupFlow {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), S::Error> {
+        self.block_flow.serialize(serializer)
     }
 }
 
 impl TableRowGroupFlow {
     pub fn from_fragment(fragment: Fragment) -> TableRowGroupFlow {
-        let writing_mode = fragment.style().writing_mode;
         TableRowGroupFlow {
-            block_flow: BlockFlow::from_fragment(fragment, None),
+            block_flow: BlockFlow::from_fragment(fragment),
             column_intrinsic_inline_sizes: Vec::new(),
-            column_computed_inline_sizes: Vec::new(),
             spacing: border_spacing::T {
                 horizontal: Au(0),
                 vertical: Au(0),
             },
-            table_writing_mode: writing_mode,
             collapsed_inline_direction_border_widths_for_table: Vec::new(),
             collapsed_block_direction_border_widths_for_table: Vec::new(),
         }
@@ -123,14 +110,6 @@ impl Flow for TableRowGroupFlow {
         &self.block_flow
     }
 
-    fn column_intrinsic_inline_sizes(&mut self) -> &mut Vec<ColumnIntrinsicInlineSize> {
-        &mut self.column_intrinsic_inline_sizes
-    }
-
-    fn column_computed_inline_sizes(&mut self) -> &mut Vec<ColumnComputedInlineSize> {
-        &mut self.column_computed_inline_sizes
-    }
-
     fn bubble_inline_sizes(&mut self) {
         let _scope = layout_debug_scope!("table_rowgroup::bubble_inline_sizes {:x}",
                                          self.block_flow.base.debug_id());
@@ -158,9 +137,6 @@ impl Flow for TableRowGroupFlow {
                                                       shared_context,
                                                       containing_block_inline_size);
 
-        let column_computed_inline_sizes = &self.column_computed_inline_sizes;
-        let border_spacing = self.spacing;
-        let table_writing_mode = self.table_writing_mode;
         let collapsed_inline_direction_border_widths_for_table =
             &self.collapsed_inline_direction_border_widths_for_table;
         let mut collapsed_block_direction_border_widths_for_table =
@@ -175,12 +151,6 @@ impl Flow for TableRowGroupFlow {
                                                                     _writing_mode,
                                                                     _inline_start_margin_edge,
                                                                     _inline_end_margin_edge| {
-            table_row::propagate_column_inline_sizes_to_child(
-                child_flow,
-                table_writing_mode,
-                column_computed_inline_sizes,
-                &border_spacing);
-
             if border_collapse == border_collapse::T::collapse {
                 let child_table_row = child_flow.as_mut_table_row();
                 child_table_row.populate_collapsed_border_spacing(
@@ -195,7 +165,7 @@ impl Flow for TableRowGroupFlow {
         self.block_flow.assign_block_size_for_table_like_flow(self.spacing.vertical)
     }
 
-    fn compute_absolute_position(&mut self, layout_context: &LayoutContext) {
+    fn compute_absolute_position(&mut self, layout_context: &SharedLayoutContext) {
         self.block_flow.compute_absolute_position(layout_context)
     }
 
@@ -212,11 +182,8 @@ impl Flow for TableRowGroupFlow {
         self.block_flow.build_display_list(state);
     }
 
-    fn collect_stacking_contexts(&mut self,
-                                 parent_id: StackingContextId,
-                                 contexts: &mut Vec<Box<StackingContext>>)
-                                 -> StackingContextId {
-        self.block_flow.collect_stacking_contexts(parent_id, contexts)
+    fn collect_stacking_contexts(&mut self, state: &mut DisplayListBuildState) {
+        self.block_flow.collect_stacking_contexts(state);
     }
 
     fn repair_style(&mut self, new_style: &Arc<ServoComputedValues>) {

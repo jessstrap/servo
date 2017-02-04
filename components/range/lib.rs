@@ -2,19 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#![feature(custom_derive)]
-#![feature(plugin)]
 #![feature(step_trait)]
-
-#![plugin(heapsize_plugin)]
-#![plugin(serde_macros)]
 
 #![deny(unsafe_code)]
 
 extern crate heapsize;
+#[macro_use] extern crate heapsize_derive;
 extern crate num_traits;
 extern crate rustc_serialize;
-extern crate serde;
+#[macro_use]
+extern crate serde_derive;
 
 use std::cmp::{self, max, min};
 use std::fmt;

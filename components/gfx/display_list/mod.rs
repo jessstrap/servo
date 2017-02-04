@@ -15,246 +15,193 @@
 //! low-level drawing primitives.
 
 use app_units::Au;
-use azure::azure::AzFloat;
-use azure::azure_hl::Color;
-use euclid::approxeq::ApproxEq;
+use euclid::{Matrix4D, Point2D, Rect, Size2D};
 use euclid::num::{One, Zero};
 use euclid::rect::TypedRect;
 use euclid::side_offsets::SideOffsets2D;
-use euclid::{Matrix2D, Matrix4D, Point2D, Rect, Size2D};
-use fnv::FnvHasher;
+use gfx_traits::{ScrollRootId, StackingContextId};
 use gfx_traits::print_tree::PrintTree;
-use gfx_traits::{LayerId, ScrollPolicy, StackingContextId};
 use ipc_channel::ipc::IpcSharedMemory;
 use msg::constellation_msg::PipelineId;
 use net_traits::image::base::{Image, PixelFormat};
-use paint_context::PaintContext;
 use range::Range;
-use serde::de::{self, Deserialize, Deserializer, MapVisitor, Visitor};
-use serde::ser::{Serialize, Serializer};
+use servo_geometry::max_rect;
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::fmt;
-use std::hash::{BuildHasherDefault, Hash};
-use std::marker::PhantomData;
-use std::mem;
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use style::computed_values::{border_style, filter, image_rendering, mix_blend_mode};
 use style_traits::cursor::Cursor;
 use text::TextRun;
 use text::glyph::ByteIndex;
-use util::geometry::{self, max_rect, ScreenPx};
-use webrender_traits::{self, WebGLContextId};
+use webrender_traits::{self, ColorF, GradientStop, ScrollPolicy, WebGLContextId};
 
 pub use style::dom::OpaqueNode;
-
-// It seems cleaner to have layout code not mention Azure directly, so let's just reexport this for
-// layout to use.
-pub use azure::azure_hl::GradientStop;
 
 /// The factor that we multiply the blur radius by in order to inflate the boundaries of display
 /// items that involve a blur. This ensures that the display item boundaries include all the ink.
 pub static BLUR_INFLATION_FACTOR: i32 = 3;
 
-/// LayerInfo is used to store PaintLayer metadata during DisplayList construction.
-/// It is also used for tracking LayerIds when creating layers to preserve ordering when
-/// layered DisplayItems should render underneath unlayered DisplayItems.
-#[derive(Clone, Copy, HeapSizeOf, Deserialize, Serialize, Debug)]
-pub struct LayerInfo {
-    /// The base LayerId of this layer.
-    pub layer_id: LayerId,
-
-    /// The scroll policy of this layer.
-    pub scroll_policy: ScrollPolicy,
-
-    /// The subpage that this layer represents, if there is one.
-    pub subpage_pipeline_id: Option<PipelineId>,
-
-    /// The id for the next layer in the sequence. This is used for synthesizing
-    /// layers for content that needs to be displayed on top of this layer.
-    pub next_layer_id: LayerId,
-
-    /// The color of the background in this layer. Used for unpainted content.
-    pub background_color: Color,
-}
-
-impl LayerInfo {
-    pub fn new(id: LayerId,
-               scroll_policy: ScrollPolicy,
-               subpage_pipeline_id: Option<PipelineId>,
-               background_color: Color)
-               -> LayerInfo {
-        LayerInfo {
-            layer_id: id,
-            scroll_policy: scroll_policy,
-            subpage_pipeline_id: subpage_pipeline_id,
-            next_layer_id: id.companion_layer_id(),
-            background_color: background_color,
-        }
-    }
-}
-
-pub struct DisplayListTraversal<'a> {
-    pub display_list: &'a DisplayList,
-    pub current_item_index: usize,
-    pub last_item_index: usize,
-}
-
-impl<'a> DisplayListTraversal<'a> {
-    fn can_draw_item_at_index(&self, index: usize) -> bool {
-       index <= self.last_item_index && index < self.display_list.list.len()
-    }
-
-    pub fn advance(&mut self, context: &StackingContext) -> Option<&'a DisplayItem> {
-        if !self.can_draw_item_at_index(self.current_item_index) {
-            return None
-        }
-        if self.display_list.list[self.current_item_index].base().stacking_context_id != context.id {
-            return None
-        }
-
-        self.current_item_index += 1;
-        Some(&self.display_list.list[self.current_item_index - 1])
-    }
-
-    fn current_item_offset(&self) -> u32 {
-        self.display_list.get_offset_for_item(&self.display_list.list[self.current_item_index])
-    }
-
-    pub fn skip_past_stacking_context(&mut self, stacking_context: &StackingContext) {
-        let next_stacking_context_offset =
-            self.display_list.offsets[&stacking_context.id].outlines + 1;
-        while self.can_draw_item_at_index(self.current_item_index + 1) &&
-              self.current_item_offset() < next_stacking_context_offset {
-            self.current_item_index += 1;
-        }
-    }
-}
-
-#[derive(HeapSizeOf, Deserialize, Serialize, Debug)]
-pub struct StackingContextOffsets {
-    pub start: u32,
-    pub block_backgrounds_and_borders: u32,
-    pub content: u32,
-    pub outlines: u32,
-}
-
-/// A FNV-based hash map. This is not serializable by `serde` by default, so we provide an
-/// implementation ourselves.
-pub struct FnvHashMap<K, V>(pub HashMap<K, V, BuildHasherDefault<FnvHasher>>);
-
-impl<K, V> Deref for FnvHashMap<K, V> {
-    type Target = HashMap<K, V, BuildHasherDefault<FnvHasher>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<K, V> DerefMut for FnvHashMap<K, V> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<K, V> Serialize for FnvHashMap<K, V> where K: Eq + Hash + Serialize, V: Serialize {
-    #[inline]
-    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error> where S: Serializer {
-        let mut state = try!(serializer.serialize_map(Some(self.len())));
-        for (key, value) in self.iter() {
-            try!(serializer.serialize_map_key(&mut state, key));
-            try!(serializer.serialize_map_value(&mut state, value));
-        }
-        serializer.serialize_map_end(state)
-    }
-}
-
-impl<K, V> Deserialize for FnvHashMap<K, V> where K: Eq + Hash + Deserialize, V: Deserialize {
-    #[inline]
-    fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error> where D: Deserializer {
-        deserializer.deserialize_map(FnvHashMapVisitor::new())
-    }
-}
-/// A visitor that produces a map.
-pub struct FnvHashMapVisitor<K, V> {
-    marker: PhantomData<FnvHashMap<K, V>>,
-}
-
-impl<K, V> FnvHashMapVisitor<K, V> {
-    /// Construct a `FnvHashMapVisitor<T>`.
-    pub fn new() -> Self {
-        FnvHashMapVisitor {
-            marker: PhantomData,
-        }
-    }
-}
-
-impl<K, V> Visitor for FnvHashMapVisitor<K, V> where K: Eq + Hash + Deserialize, V: Deserialize {
-    type Value = FnvHashMap<K, V>;
-
-    #[inline]
-    fn visit_unit<E>(&mut self) -> Result<FnvHashMap<K, V>, E> where E: de::Error {
-        Ok(FnvHashMap(HashMap::with_hasher(Default::default())))
-    }
-
-    #[inline]
-    fn visit_map<Visitor>(&mut self, mut visitor: Visitor)
-                          -> Result<FnvHashMap<K, V>, Visitor::Error>
-                          where Visitor: MapVisitor {
-        let mut values = FnvHashMap(HashMap::with_hasher(Default::default()));
-        while let Some((key, value)) = try!(visitor.visit()) {
-            HashMap::insert(&mut values, key, value);
-        }
-        try!(visitor.end());
-        Ok(values)
-    }
-}
-
 #[derive(HeapSizeOf, Deserialize, Serialize)]
 pub struct DisplayList {
     pub list: Vec<DisplayItem>,
-    pub offsets: FnvHashMap<StackingContextId, StackingContextOffsets>,
-    pub root_stacking_context: StackingContext,
 }
 
 impl DisplayList {
-    pub fn new(mut root_stacking_context: StackingContext,
-               items: Vec<DisplayItem>)
-               -> DisplayList {
-        let mut offsets = FnvHashMap(HashMap::with_hasher(Default::default()));
-        DisplayList::sort_and_count_stacking_contexts(&mut root_stacking_context, &mut offsets, 0);
-
-        let mut display_list = DisplayList {
-            list: items,
-            offsets: offsets,
-            root_stacking_context: root_stacking_context,
-        };
-        display_list.sort();
-        display_list
+    // Returns the text index within a node for the point of interest.
+    pub fn text_index(&self,
+                      node: OpaqueNode,
+                      client_point: &Point2D<Au>,
+                      scroll_offsets: &ScrollOffsetMap)
+                      -> Option<usize> {
+        let mut result = Vec::new();
+        let mut traversal = DisplayListTraversal::new(self);
+        self.text_index_contents(node,
+                                 &mut traversal,
+                                 client_point,
+                                 client_point,
+                                 scroll_offsets,
+                                 &mut result);
+        result.pop()
     }
 
-    pub fn get_offset_for_item(&self, item: &DisplayItem) -> u32 {
-        let offsets = &self.offsets[&item.base().stacking_context_id];
-        match item.base().section {
-            DisplayListSection::BackgroundAndBorders => offsets.start,
-            DisplayListSection::BlockBackgroundsAndBorders =>
-                offsets.block_backgrounds_and_borders,
-            DisplayListSection::Content => offsets.content,
-            DisplayListSection::Outlines => offsets.outlines,
+    pub fn text_index_contents<'a>(&self,
+                                   node: OpaqueNode,
+                                   traversal: &mut DisplayListTraversal<'a>,
+                                   translated_point: &Point2D<Au>,
+                                   client_point: &Point2D<Au>,
+                                   scroll_offsets: &ScrollOffsetMap,
+                                   result: &mut Vec<usize>) {
+        while let Some(item) = traversal.next() {
+            match item {
+                &DisplayItem::PushStackingContext(ref stacking_context_item) => {
+                    let mut point = *translated_point;
+                    DisplayList::translate_point(&stacking_context_item.stacking_context,
+                                                 &mut point,
+                                                 client_point);
+                    self.text_index_contents(node,
+                                             traversal,
+                                             &point,
+                                             client_point,
+                                             scroll_offsets,
+                                             result);
+                }
+                &DisplayItem::PushScrollRoot(ref item) => {
+                    let mut point = *translated_point;
+                    DisplayList::scroll_root(&item.scroll_root,
+                                             &mut point,
+                                             scroll_offsets);
+                    self.text_index_contents(node,
+                                             traversal,
+                                             &point,
+                                             client_point,
+                                             scroll_offsets,
+                                             result);
+
+                },
+                &DisplayItem::PopStackingContext(_) => return,
+                &DisplayItem::Text(ref text) => {
+                    let base = item.base();
+                    if base.metadata.node == node {
+                        let offset = *translated_point - text.baseline_origin;
+                        let index = text.text_run.range_index_of_advance(&text.range, offset.x);
+                        result.push(index);
+                    }
+                },
+                _ => {},
+            }
         }
     }
 
-    fn sort(&mut self) {
-        let mut list = mem::replace(&mut self.list, Vec::new());
+    // Return all nodes containing the point of interest, bottommost first, and
+    // respecting the `pointer-events` CSS property.
+    pub fn hit_test(&self,
+                    translated_point: &Point2D<Au>,
+                    client_point: &Point2D<Au>,
+                    scroll_offsets: &ScrollOffsetMap)
+                    -> Vec<DisplayItemMetadata> {
+        let mut result = Vec::new();
+        let mut traversal = DisplayListTraversal::new(self);
+        self.hit_test_contents(&mut traversal,
+                               translated_point,
+                               client_point,
+                               scroll_offsets,
+                               &mut result);
+        result
+    }
 
-        list.sort_by(|a, b| {
-            if a.base().stacking_context_id == b.base().stacking_context_id {
-                return a.base().section.cmp(&b.base().section);
+    pub fn hit_test_contents<'a>(&self,
+                                 traversal: &mut DisplayListTraversal<'a>,
+                                 translated_point: &Point2D<Au>,
+                                 client_point: &Point2D<Au>,
+                                 scroll_offsets: &ScrollOffsetMap,
+                                 result: &mut Vec<DisplayItemMetadata>) {
+        while let Some(item) = traversal.next() {
+            match item {
+                &DisplayItem::PushStackingContext(ref stacking_context_item) => {
+                    let mut point = *translated_point;
+                    DisplayList::translate_point(&stacking_context_item.stacking_context,
+                                                 &mut point,
+                                                 client_point);
+                    self.hit_test_contents(traversal,
+                                           &point,
+                                           client_point,
+                                           scroll_offsets,
+                                           result);
+                }
+                &DisplayItem::PushScrollRoot(ref item) => {
+                    let mut point = *translated_point;
+                    DisplayList::scroll_root(&item.scroll_root,
+                                             &mut point,
+                                             scroll_offsets);
+                    self.hit_test_contents(traversal,
+                                           &point,
+                                           client_point,
+                                           scroll_offsets,
+                                           result);
+                }
+                &DisplayItem::PopStackingContext(_) | &DisplayItem::PopScrollRoot(_) => return,
+                _ => {
+                    if let Some(meta) = item.hit_test(*translated_point) {
+                        result.push(meta);
+                    }
+                }
             }
-            self.get_offset_for_item(a).cmp(&self.get_offset_for_item(b))
-        });
+        }
+    }
 
-        mem::replace(&mut self.list, list);
+    #[inline]
+    fn translate_point<'a>(stacking_context: &StackingContext,
+                           translated_point: &mut Point2D<Au>,
+                           client_point: &Point2D<Au>) {
+        // Convert the parent translated point into stacking context local transform space if the
+        // stacking context isn't fixed.  If it's fixed, we need to use the client point anyway.
+        debug_assert!(stacking_context.context_type == StackingContextType::Real);
+        let is_fixed = stacking_context.scroll_policy == ScrollPolicy::Fixed;
+        *translated_point = if is_fixed {
+            *client_point
+        } else {
+            let point = *translated_point - stacking_context.bounds.origin;
+            let inv_transform = stacking_context.transform.inverse().unwrap();
+            let frac_point = inv_transform.transform_point(&Point2D::new(point.x.to_f32_px(),
+                                                                         point.y.to_f32_px()));
+            Point2D::new(Au::from_f32_px(frac_point.x), Au::from_f32_px(frac_point.y))
+        };
+    }
+
+    #[inline]
+    fn scroll_root<'a>(scroll_root: &ScrollRoot,
+                       translated_point: &mut Point2D<Au>,
+                       scroll_offsets: &ScrollOffsetMap) {
+        // Adjust the translated point to account for the scroll offset if necessary.
+        //
+        // We don't perform this adjustment on the root stacking context because
+        // the DOM-side code has already translated the point for us (e.g. in
+        // `Window::hit_test_query()`) by now.
+        if let Some(scroll_offset) = scroll_offsets.get(&scroll_root.id) {
+            translated_point.x -= Au::from_f32_px(scroll_offset.x);
+            translated_point.y -= Au::from_f32_px(scroll_offset.y);
+        }
     }
 
     pub fn print(&self) {
@@ -262,297 +209,110 @@ impl DisplayList {
         self.print_with_tree(&mut print_tree);
     }
 
-    fn sort_and_count_stacking_contexts(
-            stacking_context: &mut StackingContext,
-            offsets: &mut HashMap<StackingContextId,
-                                  StackingContextOffsets,
-                                  BuildHasherDefault<FnvHasher>>,
-            mut current_offset: u32)
-            -> u32 {
-        stacking_context.children.sort();
-
-        let start_offset = current_offset;
-        let mut block_backgrounds_and_borders_offset = None;
-        let mut content_offset = None;
-
-        for child in stacking_context.children.iter_mut() {
-            if child.z_index >= 0 {
-                if block_backgrounds_and_borders_offset.is_none() {
-                    current_offset += 1;
-                    block_backgrounds_and_borders_offset = Some(current_offset);
-                }
-
-                if child.context_type != StackingContextType::PseudoFloat &&
-                        content_offset.is_none() {
-                    current_offset += 1;
-                    content_offset = Some(current_offset);
-                }
-            }
-
-            current_offset += 1;
-            current_offset =
-                DisplayList::sort_and_count_stacking_contexts(child, offsets, current_offset);
-        }
-
-        let block_backgrounds_and_borders_offset =
-            block_backgrounds_and_borders_offset.unwrap_or_else(|| {
-                current_offset += 1;
-                current_offset
-        });
-
-        let content_offset = content_offset.unwrap_or_else(|| {
-            current_offset += 1;
-            current_offset
-        });
-
-        current_offset += 1;
-
-        offsets.insert(
-            stacking_context.id,
-            StackingContextOffsets {
-                start: start_offset,
-                block_backgrounds_and_borders: block_backgrounds_and_borders_offset,
-                content: content_offset,
-                outlines: current_offset,
-           });
-
-        current_offset + 1
-    }
-
     pub fn print_with_tree(&self, print_tree: &mut PrintTree) {
         print_tree.new_level("Items".to_owned());
         for item in &self.list {
-            print_tree.add_item(format!("{:?} StackingContext: {:?}",
+            print_tree.add_item(format!("{:?} StackingContext: {:?} ScrollRoot: {:?}",
                                         item,
-                                        item.base().stacking_context_id));
+                                        item.base().stacking_context_id,
+                                        item.scroll_root_id()));
         }
         print_tree.end_level();
-
-        print_tree.new_level("Stacking Contexts".to_owned());
-        self.root_stacking_context.print_with_tree(print_tree);
-        print_tree.end_level();
-    }
-
-    /// Draws a single DisplayItem into the given PaintContext.
-    pub fn draw_item_at_index_into_context(&self,
-                                           paint_context: &mut PaintContext,
-                                           transform: &Matrix4D<f32>,
-                                           index: usize) {
-        let old_transform = paint_context.draw_target.get_transform();
-        paint_context.draw_target.set_transform(
-            &Matrix2D::new(transform.m11, transform.m12,
-                           transform.m21, transform.m22,
-                           transform.m41, transform.m42));
-
-        let item = &self.list[index];
-        item.draw_into_context(paint_context);
-
-        paint_context.draw_target.set_transform(&old_transform);
-    }
-
-    pub fn find_stacking_context<'a>(&'a self,
-                                     stacking_context_id: StackingContextId)
-                                     -> Option<&'a StackingContext> {
-        fn find_stacking_context_in_stacking_context<'a>(stacking_context: &'a StackingContext,
-                                                         stacking_context_id: StackingContextId)
-                                                          -> Option<&'a StackingContext> {
-            if stacking_context.id == stacking_context_id {
-                return Some(stacking_context);
-            }
-
-            for kid in stacking_context.children() {
-                let result = find_stacking_context_in_stacking_context(kid, stacking_context_id);
-                if result.is_some() {
-                    return result;
-                }
-            }
-
-            None
-        }
-        find_stacking_context_in_stacking_context(&self.root_stacking_context,
-                                                  stacking_context_id)
-    }
-
-    /// Draws the DisplayList in order.
-    pub fn draw_into_context<'a>(&self,
-                                 paint_context: &mut PaintContext,
-                                 transform: &Matrix4D<f32>,
-                                 stacking_context_id: StackingContextId,
-                                 start: usize,
-                                 end: usize) {
-        let stacking_context = self.find_stacking_context(stacking_context_id).unwrap();
-        let mut traversal = DisplayListTraversal {
-            display_list: self,
-            current_item_index: start,
-            last_item_index: end,
-        };
-        self.draw_stacking_context(stacking_context,
-                                   &mut traversal,
-                                   paint_context,
-                                   transform,
-                                   &Point2D::zero());
-    }
-
-    fn draw_stacking_context_contents<'a>(&'a self,
-                                          stacking_context: &StackingContext,
-                                          traversal: &mut DisplayListTraversal<'a>,
-                                          paint_context: &mut PaintContext,
-                                          transform: &Matrix4D<f32>,
-                                          subpixel_offset: &Point2D<Au>,
-                                          tile_rect: Option<Rect<Au>>) {
-        for child in stacking_context.children.iter() {
-            while let Some(item) = traversal.advance(stacking_context) {
-                if item.intersects_rect_in_parent_context(tile_rect) {
-                    item.draw_into_context(paint_context);
-                }
-            }
-
-            if child.intersects_rect_in_parent_context(tile_rect) {
-                self.draw_stacking_context(child,
-                                           traversal,
-                                           paint_context,
-                                           &transform,
-                                           subpixel_offset);
-            } else {
-                traversal.skip_past_stacking_context(child);
-            }
-        }
-
-        while let Some(item) = traversal.advance(stacking_context) {
-            if item.intersects_rect_in_parent_context(tile_rect) {
-                item.draw_into_context(paint_context);
-            }
-        }
-    }
-
-
-    fn draw_stacking_context<'a>(&'a self,
-                                 stacking_context: &StackingContext,
-                                 traversal: &mut DisplayListTraversal<'a>,
-                                 paint_context: &mut PaintContext,
-                                 transform: &Matrix4D<f32>,
-                                 subpixel_offset: &Point2D<Au>) {
-        if stacking_context.context_type != StackingContextType::Real {
-            self.draw_stacking_context_contents(stacking_context,
-                                                traversal,
-                                                paint_context,
-                                                transform,
-                                                subpixel_offset,
-                                                None);
-            return;
-        }
-
-        let draw_target = paint_context.get_or_create_temporary_draw_target(
-            &stacking_context.filters,
-            stacking_context.blend_mode);
-
-        let old_transform = paint_context.draw_target.get_transform();
-        let pixels_per_px = paint_context.screen_pixels_per_px();
-        let (transform, subpixel_offset) = match stacking_context.layer_info {
-            // If this stacking context starts a layer, the offset and
-            // transformation are handled by layer position within the
-            // compositor.
-            Some(..) => (*transform, *subpixel_offset),
-            None => {
-                let origin = stacking_context.bounds.origin + *subpixel_offset;
-                let pixel_snapped_origin =
-                    Point2D::new(origin.x.to_nearest_pixel(pixels_per_px.get()),
-                                 origin.y.to_nearest_pixel(pixels_per_px.get()));
-
-                let transform = transform.translate(pixel_snapped_origin.x as AzFloat,
-                                                    pixel_snapped_origin.y as AzFloat,
-                                                    0.0).mul(&stacking_context.transform);
-
-                if transform.is_identity_or_simple_translation() {
-                    let pixel_snapped_origin = Point2D::new(Au::from_f32_px(pixel_snapped_origin.x),
-                                                            Au::from_f32_px(pixel_snapped_origin.y));
-                    (transform, origin - pixel_snapped_origin)
-                } else {
-                    // In the case of a more complicated transformation, don't attempt to
-                    // preserve subpixel offsets. This causes problems with reference tests
-                    // that do scaling and rotation and it's unclear if we even want to be doing
-                    // this.
-                    (transform, Point2D::zero())
-                }
-            }
-        };
-
-        {
-            let mut paint_subcontext = PaintContext {
-                draw_target: draw_target.clone(),
-                font_context: &mut *paint_context.font_context,
-                page_rect: paint_context.page_rect,
-                screen_rect: paint_context.screen_rect,
-                clip_rect: Some(stacking_context.overflow),
-                transient_clip: None,
-                layer_kind: paint_context.layer_kind,
-                subpixel_offset: subpixel_offset,
-            };
-
-            // Set up our clip rect and transform.
-            paint_subcontext.draw_target.set_transform(
-                &Matrix2D::new(transform.m11, transform.m12,
-                               transform.m21, transform.m22,
-                               transform.m41, transform.m42));
-            paint_subcontext.push_clip_if_applicable();
-
-            self.draw_stacking_context_contents(
-                stacking_context,
-                traversal,
-                &mut paint_subcontext,
-                &transform,
-                &subpixel_offset,
-                Some(transformed_tile_rect(paint_context.screen_rect, &transform)));
-
-            paint_subcontext.remove_transient_clip_if_applicable();
-            paint_subcontext.pop_clip_if_applicable();
-        }
-
-        draw_target.set_transform(&old_transform);
-        paint_context.draw_temporary_draw_target_if_necessary(
-            &draw_target, &stacking_context.filters, stacking_context.blend_mode);
-    }
-
-    /// Return all nodes containing the point of interest, bottommost first, and
-    /// respecting the `pointer-events` CSS property.
-    pub fn hit_test(&self,
-                    translated_point: &Point2D<Au>,
-                    client_point: &Point2D<Au>,
-                    scroll_offsets: &ScrollOffsetMap)
-                    -> Vec<DisplayItemMetadata> {
-        let mut traversal = DisplayListTraversal {
-            display_list: self,
-            current_item_index: 0,
-            last_item_index: self.list.len() - 1,
-        };
-        let mut result = Vec::new();
-        self.root_stacking_context.hit_test(&mut traversal,
-                                            translated_point,
-                                            client_point,
-                                            scroll_offsets,
-                                            &mut result);
-        result
     }
 }
 
-fn transformed_tile_rect(tile_rect: TypedRect<usize, ScreenPx>, transform: &Matrix4D<f32>) -> Rect<Au> {
-    // Invert the current transform, then use this to back transform
-    // the tile rect (placed at the origin) into the space of this
-    // stacking context.
-    let inverse_transform = transform.invert();
-    let inverse_transform_2d = Matrix2D::new(inverse_transform.m11, inverse_transform.m12,
-                                             inverse_transform.m21, inverse_transform.m22,
-                                             inverse_transform.m41, inverse_transform.m42);
-    let tile_size = Size2D::new(tile_rect.as_f32().size.width, tile_rect.as_f32().size.height);
-    let tile_rect = Rect::new(Point2D::zero(), tile_size).to_untyped();
-    geometry::f32_rect_to_au_rect(inverse_transform_2d.transform_rect(&tile_rect))
+pub struct DisplayListTraversal<'a> {
+    pub display_list: &'a DisplayList,
+    pub next_item_index: usize,
+    pub first_item_index: usize,
+    pub last_item_index: usize,
 }
 
+impl<'a> DisplayListTraversal<'a> {
+    pub fn new(display_list: &'a DisplayList) -> DisplayListTraversal {
+        DisplayListTraversal {
+            display_list: display_list,
+            next_item_index: 0,
+            first_item_index: 0,
+            last_item_index: display_list.list.len(),
+        }
+    }
+
+    pub fn new_partial(display_list: &'a DisplayList,
+                       stacking_context_id: StackingContextId,
+                       start: usize,
+                       end: usize)
+                       -> DisplayListTraversal {
+        debug_assert!(start <= end);
+        debug_assert!(display_list.list.len() > start);
+        debug_assert!(display_list.list.len() > end);
+
+        let stacking_context_start = display_list.list[0..start].iter().rposition(|item|
+            match item {
+                &DisplayItem::PushStackingContext(ref item) =>
+                    item.stacking_context.id == stacking_context_id,
+                _ => false,
+            }).unwrap_or(start);
+        debug_assert!(stacking_context_start <= start);
+
+        DisplayListTraversal {
+            display_list: display_list,
+            next_item_index: stacking_context_start,
+            first_item_index: start,
+            last_item_index: end + 1,
+        }
+    }
+
+    pub fn previous_item_id(&self) -> usize {
+        self.next_item_index - 1
+    }
+
+    pub fn skip_to_end_of_stacking_context(&mut self, id: StackingContextId) {
+        self.next_item_index = self.display_list.list[self.next_item_index..].iter()
+                                                                             .position(|item| {
+            match item {
+                &DisplayItem::PopStackingContext(ref item) => item.stacking_context_id == id,
+                _ => false
+            }
+        }).unwrap_or(self.display_list.list.len());
+        debug_assert!(self.next_item_index < self.last_item_index);
+    }
+}
+
+impl<'a> Iterator for DisplayListTraversal<'a> {
+    type Item = &'a DisplayItem;
+
+    fn next(&mut self) -> Option<&'a DisplayItem> {
+        while self.next_item_index < self.last_item_index {
+            debug_assert!(self.next_item_index <= self.last_item_index);
+
+            let reached_first_item = self.next_item_index >= self.first_item_index;
+            let item = &self.display_list.list[self.next_item_index];
+
+            self.next_item_index += 1;
+
+            if reached_first_item {
+                return Some(item)
+            }
+
+            // Before we reach the starting item, we only emit stacking context boundaries. This
+            // is to ensure that we properly position items when we are processing a display list
+            // slice that is relative to a certain stacking context.
+            match item {
+                &DisplayItem::PushStackingContext(_) |
+                &DisplayItem::PopStackingContext(_) => return Some(item),
+                _ => {}
+            }
+        }
+
+        None
+    }
+}
 
 /// Display list sections that make up a stacking context. Each section  here refers
 /// to the steps in CSS 2.1 Appendix E.
 ///
-#[derive(Clone, Copy, Debug, Deserialize, Eq, HeapSizeOf, Ord, PartialEq, PartialOrd, RustcEncodable, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, HeapSizeOf, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum DisplayListSection {
     BackgroundAndBorders,
     BlockBackgroundsAndBorders,
@@ -560,14 +320,15 @@ pub enum DisplayListSection {
     Outlines,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, HeapSizeOf, Ord, PartialEq, PartialOrd, RustcEncodable, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, HeapSizeOf, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum StackingContextType {
     Real,
     PseudoPositioned,
     PseudoFloat,
+    PseudoScrollingArea,
 }
 
-#[derive(HeapSizeOf, Deserialize, Serialize)]
+#[derive(Clone, HeapSizeOf, Deserialize, Serialize)]
 /// Represents one CSS stacking context, which may or may not have a hardware layer.
 pub struct StackingContext {
     /// The ID of this StackingContext for uniquely identifying it.
@@ -600,14 +361,11 @@ pub struct StackingContext {
     /// Whether this stacking context creates a new 3d rendering context.
     pub establishes_3d_context: bool,
 
-    /// Whether this stacking context scrolls its overflow area.
-    pub scrolls_overflow_area: bool,
+    /// The scroll policy of this layer.
+    pub scroll_policy: ScrollPolicy,
 
-    /// The layer info for this stacking context, if there is any.
-    pub layer_info: Option<LayerInfo>,
-
-    /// Children of this StackingContext.
-    children: Vec<Box<StackingContext>>,
+    /// The id of the parent scrolling area that contains this StackingContext.
+    pub parent_scroll_id: ScrollRootId,
 }
 
 impl StackingContext {
@@ -623,8 +381,8 @@ impl StackingContext {
                transform: Matrix4D<f32>,
                perspective: Matrix4D<f32>,
                establishes_3d_context: bool,
-               scrolls_overflow_area: bool,
-               layer_info: Option<LayerInfo>)
+               scroll_policy: ScrollPolicy,
+               parent_scroll_id: ScrollRootId)
                -> StackingContext {
         StackingContext {
             id: id,
@@ -637,153 +395,46 @@ impl StackingContext {
             transform: transform,
             perspective: perspective,
             establishes_3d_context: establishes_3d_context,
-            scrolls_overflow_area: scrolls_overflow_area,
-            layer_info: layer_info,
-            children: Vec::new(),
+            scroll_policy: scroll_policy,
+            parent_scroll_id: parent_scroll_id,
         }
     }
 
-    pub fn set_children(&mut self, children: Vec<Box<StackingContext>>) {
-        debug_assert!(self.children.is_empty());
-        // We need to take into account the possible transformations of the
-        // child stacking contexts.
-        for child in &children {
-            self.update_overflow_for_new_child(&child);
-        }
-
-        self.children = children;
+    #[inline]
+    pub fn root() -> StackingContext {
+        StackingContext::new(StackingContextId::new(0),
+                             StackingContextType::Real,
+                             &Rect::zero(),
+                             &Rect::zero(),
+                             0,
+                             filter::T::new(Vec::new()),
+                             mix_blend_mode::T::normal,
+                             Matrix4D::identity(),
+                             Matrix4D::identity(),
+                             true,
+                             ScrollPolicy::Scrollable,
+                             ScrollRootId::root())
     }
 
-    pub fn add_child(&mut self, child: Box<StackingContext>) {
-        self.update_overflow_for_new_child(&child);
-        self.children.push(child);
-    }
+    pub fn to_display_list_items(self) -> (DisplayItem, DisplayItem) {
+        let mut base_item = BaseDisplayItem::empty();
+        base_item.stacking_context_id = self.id;
 
-    pub fn add_children(&mut self, children: Vec<Box<StackingContext>>) {
-        if self.children.is_empty() {
-            return self.set_children(children);
-        }
-
-        for child in children {
-            self.add_child(child);
-        }
-    }
-
-    pub fn child_at_mut(&mut self, index: usize) -> &mut StackingContext {
-        &mut *self.children[index]
-    }
-
-    pub fn children(&self) -> &[Box<StackingContext>] {
-        &self.children
-    }
-
-    fn update_overflow_for_new_child(&mut self, child: &StackingContext) {
-        if self.context_type == StackingContextType::Real &&
-           child.context_type == StackingContextType::Real &&
-           !self.scrolls_overflow_area {
-            // This child might be transformed, so we need to take into account
-            // its transformed overflow rect too, but at the correct position.
-            let overflow =
-                child.overflow_rect_in_parent_space();
-
-            self.overflow = self.overflow.union(&overflow);
-        }
-    }
-
-    fn overflow_rect_in_parent_space(&self) -> Rect<Au> {
-        // Transform this stacking context to get it into the same space as
-        // the parent stacking context.
-        //
-        // TODO: Take into account 3d transforms, even though it's a fairly
-        // uncommon case.
-        let origin_x = self.bounds.origin.x.to_f32_px();
-        let origin_y = self.bounds.origin.y.to_f32_px();
-
-        let transform = Matrix4D::identity().translate(origin_x, origin_y, 0.0)
-                                            .mul(&self.transform);
-        let transform_2d = Matrix2D::new(transform.m11, transform.m12,
-                                         transform.m21, transform.m22,
-                                         transform.m41, transform.m42);
-
-        let overflow = geometry::au_rect_to_f32_rect(self.overflow);
-        let overflow = transform_2d.transform_rect(&overflow);
-        geometry::f32_rect_to_au_rect(overflow)
-    }
-
-    pub fn hit_test<'a>(&self,
-                        traversal: &mut DisplayListTraversal<'a>,
-                        translated_point: &Point2D<Au>,
-                        client_point: &Point2D<Au>,
-                        scroll_offsets: &ScrollOffsetMap,
-                        result: &mut Vec<DisplayItemMetadata>) {
-        let is_fixed = match self.layer_info {
-            Some(ref layer_info) => layer_info.scroll_policy == ScrollPolicy::FixedPosition,
-            None => false,
-        };
-
-        let effective_point = if is_fixed { client_point } else { translated_point };
-
-        // Convert the point into stacking context local transform space.
-        let mut point = if self.context_type == StackingContextType::Real {
-            let point = *effective_point - self.bounds.origin;
-            let inv_transform = self.transform.invert();
-            let frac_point = inv_transform.transform_point(&Point2D::new(point.x.to_f32_px(),
-                                                                         point.y.to_f32_px()));
-            Point2D::new(Au::from_f32_px(frac_point.x), Au::from_f32_px(frac_point.y))
-        } else {
-            *effective_point
-        };
-
-        // Adjust the translated point to account for the scroll offset if
-        // necessary. This can only happen when WebRender is in use.
-        //
-        // We don't perform this adjustment on the root stacking context because
-        // the DOM-side code has already translated the point for us (e.g. in
-        // `Window::hit_test_query()`) by now.
-        if !is_fixed && self.id != StackingContextId::root() {
-            if let Some(scroll_offset) = scroll_offsets.get(&self.id) {
-                point.x -= Au::from_f32_px(scroll_offset.x);
-                point.y -= Au::from_f32_px(scroll_offset.y);
+        let pop_item = DisplayItem::PopStackingContext(Box::new(
+            PopStackingContextItem {
+                base: base_item.clone(),
+                stacking_context_id: self.id,
             }
-        }
+        ));
 
-        for child in self.children() {
-            while let Some(item) = traversal.advance(self) {
-                if let Some(meta) = item.hit_test(point) {
-                    result.push(meta);
-                }
+        let push_item = DisplayItem::PushStackingContext(Box::new(
+            PushStackingContextItem {
+                base: base_item,
+                stacking_context: self,
             }
-            child.hit_test(traversal, translated_point, client_point, scroll_offsets, result);
-        }
+        ));
 
-        while let Some(item) = traversal.advance(self) {
-            if let Some(meta) = item.hit_test(point) {
-                result.push(meta);
-            }
-        }
-    }
-
-    pub fn print_with_tree(&self, print_tree: &mut PrintTree) {
-        print_tree.new_level(format!("{:?}", self));
-        for kid in self.children() {
-            kid.print_with_tree(print_tree);
-        }
-        print_tree.end_level();
-    }
-
-    fn intersects_rect_in_parent_context(&self, rect: Option<Rect<Au>>) -> bool {
-        // We only do intersection checks for real stacking contexts, since
-        // pseudo stacking contexts might not have proper position information.
-        if self.context_type != StackingContextType::Real {
-            return true;
-        }
-
-        let rect = match rect {
-            Some(ref rect) => rect,
-            None => return true,
-        };
-
-        self.overflow_rect_in_parent_space().intersects(rect)
+        (push_item, pop_item)
     }
 }
 
@@ -817,42 +468,62 @@ impl PartialEq for StackingContext {
 
 impl fmt::Debug for StackingContext {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let type_string = if self.layer_info.is_some() {
-            "Layered StackingContext"
-        } else if self.context_type == StackingContextType::Real {
+        let type_string =  if self.context_type == StackingContextType::Real {
             "StackingContext"
         } else {
             "Pseudo-StackingContext"
         };
 
-        let scrollable_string = if self.scrolls_overflow_area {
-            " (scrolls overflow area)"
-        } else {
-            ""
-        };
-
-        write!(f, "{}{} at {:?} with overflow {:?}: {:?}",
+        write!(f, "{} at {:?} with overflow {:?}: {:?}",
                type_string,
-               scrollable_string,
                self.bounds,
                self.overflow,
                self.id)
     }
 }
 
+/// Defines a stacking context.
+#[derive(Clone, Debug, HeapSizeOf, Deserialize, Serialize)]
+pub struct ScrollRoot {
+    /// The unique ID of this ScrollRoot.
+    pub id: ScrollRootId,
+
+    /// The unique ID of the parent of this ScrollRoot.
+    pub parent_id: ScrollRootId,
+
+    /// The position of this scroll root's frame in the parent stacking context.
+    pub clip: Rect<Au>,
+
+    /// The size of the contents that can be scrolled inside of the scroll root.
+    pub size: Size2D<Au>,
+}
+
+impl ScrollRoot {
+    pub fn to_push(&self) -> DisplayItem {
+        DisplayItem::PushScrollRoot(box PushScrollRootItem {
+            base: BaseDisplayItem::empty(),
+            scroll_root: self.clone(),
+        })
+    }
+}
+
+
 /// One drawing command in the list.
 #[derive(Clone, Deserialize, HeapSizeOf, Serialize)]
 pub enum DisplayItem {
-    SolidColorClass(Box<SolidColorDisplayItem>),
-    TextClass(Box<TextDisplayItem>),
-    ImageClass(Box<ImageDisplayItem>),
-    WebGLClass(Box<WebGLDisplayItem>),
-    BorderClass(Box<BorderDisplayItem>),
-    GradientClass(Box<GradientDisplayItem>),
-    LineClass(Box<LineDisplayItem>),
-    BoxShadowClass(Box<BoxShadowDisplayItem>),
-    LayeredItemClass(Box<LayeredItem>),
-    IframeClass(Box<IframeDisplayItem>),
+    SolidColor(Box<SolidColorDisplayItem>),
+    Text(Box<TextDisplayItem>),
+    Image(Box<ImageDisplayItem>),
+    WebGL(Box<WebGLDisplayItem>),
+    Border(Box<BorderDisplayItem>),
+    Gradient(Box<GradientDisplayItem>),
+    Line(Box<LineDisplayItem>),
+    BoxShadow(Box<BoxShadowDisplayItem>),
+    Iframe(Box<IframeDisplayItem>),
+    PushStackingContext(Box<PushStackingContextItem>),
+    PopStackingContext(Box<PopStackingContextItem>),
+    PushScrollRoot(Box<PushScrollRootItem>),
+    PopScrollRoot(Box<BaseDisplayItem>),
 }
 
 /// Information common to all display items.
@@ -872,6 +543,9 @@ pub struct BaseDisplayItem {
 
     /// The id of the stacking context this item belongs to.
     pub stacking_context_id: StackingContextId,
+
+    /// The id of the scroll root this item belongs to.
+    pub scroll_root_id: ScrollRootId,
 }
 
 impl BaseDisplayItem {
@@ -880,7 +554,8 @@ impl BaseDisplayItem {
                metadata: DisplayItemMetadata,
                clip: &ClippingRegion,
                section: DisplayListSection,
-               stacking_context_id: StackingContextId)
+               stacking_context_id: StackingContextId,
+               scroll_root_id: ScrollRootId)
                -> BaseDisplayItem {
         // Detect useless clipping regions here and optimize them to `ClippingRegion::max()`.
         // The painting backend may want to optimize out clipping regions and this makes it easier
@@ -895,6 +570,22 @@ impl BaseDisplayItem {
             },
             section: section,
             stacking_context_id: stacking_context_id,
+            scroll_root_id: scroll_root_id,
+        }
+    }
+
+    #[inline(always)]
+    pub fn empty() -> BaseDisplayItem {
+        BaseDisplayItem {
+            bounds: TypedRect::zero(),
+            metadata: DisplayItemMetadata {
+                node: OpaqueNode(0),
+                pointing: None,
+            },
+            clip: ClippingRegion::max(),
+            section: DisplayListSection::Content,
+            stacking_context_id: StackingContextId::root(),
+            scroll_root_id: ScrollRootId::root(),
         }
     }
 }
@@ -902,7 +593,7 @@ impl BaseDisplayItem {
 /// A clipping region for a display item. Currently, this can describe rectangles, rounded
 /// rectangles (for `border-radius`), or arbitrary intersections of the two. Arbitrary transforms
 /// are not supported because those are handled by the higher-level `StackingContext` abstraction.
-#[derive(Clone, PartialEq, Debug, HeapSizeOf, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, HeapSizeOf, Deserialize, Serialize)]
 pub struct ClippingRegion {
     /// The main rectangular region. This does not include any corners.
     pub main: Rect<Au>,
@@ -1046,6 +737,25 @@ impl ClippingRegion {
             }).collect(),
         }
     }
+
+    #[inline]
+    pub fn is_max(&self) -> bool {
+        self.main == max_rect() && self.complex.is_empty()
+    }
+}
+
+impl fmt::Debug for ClippingRegion {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if *self == ClippingRegion::max() {
+            write!(f, "ClippingRegion::Max")
+        } else if *self == ClippingRegion::empty() {
+            write!(f, "ClippingRegion::Empty")
+        } else if self.main == max_rect() {
+            write!(f, "ClippingRegion(Complex={:?})", self.complex)
+        } else {
+            write!(f, "ClippingRegion(Rect={:?}, Complex={:?})", self.main, self.complex)
+        }
+    }
 }
 
 impl ComplexClippingRegion {
@@ -1083,7 +793,7 @@ pub struct SolidColorDisplayItem {
     pub base: BaseDisplayItem,
 
     /// The color.
-    pub color: Color,
+    pub color: ColorF,
 }
 
 /// Paints text.
@@ -1100,7 +810,7 @@ pub struct TextDisplayItem {
     pub range: Range<ByteIndex>,
 
     /// The color of the text.
-    pub text_color: Color,
+    pub text_color: ColorF,
 
     /// The position of the start of the baseline of this text.
     pub baseline_origin: Point2D<Au>,
@@ -1133,6 +843,10 @@ pub struct ImageDisplayItem {
     /// the bounds of this display item, then the image will be repeated in the appropriate
     /// direction to tile the entire bounds.
     pub stretch_size: Size2D<Au>,
+
+    /// The amount of space to add to the right and bottom part of each tile, when the image
+    /// is tiled.
+    pub tile_spacing: Size2D<Au>,
 
     /// The algorithm we should use to stretch the image. See `image_rendering` in CSS-IMAGES-3 §
     /// 5.3.
@@ -1180,7 +894,7 @@ pub struct BorderDisplayItem {
     pub border_widths: SideOffsets2D<Au>,
 
     /// Border colors.
-    pub color: SideOffsets2D<Color>,
+    pub color: SideOffsets2D<ColorF>,
 
     /// Border styles.
     pub style: SideOffsets2D<border_style::T>,
@@ -1261,7 +975,7 @@ pub struct LineDisplayItem {
     pub base: BaseDisplayItem,
 
     /// The line segment color.
-    pub color: Color,
+    pub color: ColorF,
 
     /// The line segment style.
     pub style: border_style::T
@@ -1280,7 +994,7 @@ pub struct BoxShadowDisplayItem {
     pub offset: Point2D<Au>,
 
     /// The color of this shadow.
-    pub color: Color,
+    pub color: ColorF,
 
     /// The blur radius for this shadow.
     pub blur_radius: Au,
@@ -1297,14 +1011,32 @@ pub struct BoxShadowDisplayItem {
     pub clip_mode: BoxShadowClipMode,
 }
 
-/// Contains an item that should get its own layer during layer creation.
+/// Defines a stacking context.
 #[derive(Clone, HeapSizeOf, Deserialize, Serialize)]
-pub struct LayeredItem {
+pub struct PushStackingContextItem {
     /// Fields common to all display items.
-    pub item: DisplayItem,
+    pub base: BaseDisplayItem,
 
-    /// The id of the layer this item belongs to.
-    pub layer_info: LayerInfo,
+    pub stacking_context: StackingContext,
+}
+
+/// Defines a stacking context.
+#[derive(Clone, HeapSizeOf, Deserialize, Serialize)]
+pub struct PopStackingContextItem {
+    /// Fields common to all display items.
+    pub base: BaseDisplayItem,
+
+    pub stacking_context_id: StackingContextId,
+}
+
+/// Starts a group of items inside a particular scroll root.
+#[derive(Clone, HeapSizeOf, Deserialize, Serialize)]
+pub struct PushScrollRootItem {
+    /// Fields common to all display items.
+    pub base: BaseDisplayItem,
+
+    /// The scroll root that this item starts.
+    pub scroll_root: ScrollRoot,
 }
 
 /// How a box shadow should be clipped.
@@ -1321,102 +1053,34 @@ pub enum BoxShadowClipMode {
 }
 
 impl DisplayItem {
-    /// Paints this display item into the given painting context.
-    fn draw_into_context(&self, paint_context: &mut PaintContext) {
-        let this_clip = &self.base().clip;
-        match paint_context.transient_clip {
-            Some(ref transient_clip) if transient_clip == this_clip => {}
-            Some(_) | None => paint_context.push_transient_clip((*this_clip).clone()),
-        }
-
-        match *self {
-            DisplayItem::SolidColorClass(ref solid_color) => {
-                if !solid_color.color.a.approx_eq(&0.0) {
-                    paint_context.draw_solid_color(&solid_color.base.bounds, solid_color.color)
-                }
-            }
-
-            DisplayItem::TextClass(ref text) => {
-                debug!("Drawing text at {:?}.", text.base.bounds);
-                paint_context.draw_text(&**text);
-            }
-
-            DisplayItem::ImageClass(ref image_item) => {
-                debug!("Drawing image at {:?}.", image_item.base.bounds);
-                paint_context.draw_image(
-                    &image_item.base.bounds,
-                    &image_item.stretch_size,
-                    &image_item.webrender_image,
-                    &image_item.image_data
-                               .as_ref()
-                               .expect("Non-WR painting needs image data!")[..],
-                    image_item.image_rendering.clone());
-            }
-
-            DisplayItem::WebGLClass(_) => {
-                panic!("Shouldn't be here, WebGL display items are created just with webrender");
-            }
-
-            DisplayItem::BorderClass(ref border) => {
-                paint_context.draw_border(&border.base.bounds,
-                                          &border.border_widths,
-                                          &border.radius,
-                                          &border.color,
-                                          &border.style)
-            }
-
-            DisplayItem::GradientClass(ref gradient) => {
-                paint_context.draw_linear_gradient(&gradient.base.bounds,
-                                                   &gradient.start_point,
-                                                   &gradient.end_point,
-                                                   &gradient.stops);
-            }
-
-            DisplayItem::LineClass(ref line) => {
-                paint_context.draw_line(&line.base.bounds, line.color, line.style)
-            }
-
-            DisplayItem::BoxShadowClass(ref box_shadow) => {
-                paint_context.draw_box_shadow(&box_shadow.box_bounds,
-                                              &box_shadow.offset,
-                                              box_shadow.color,
-                                              box_shadow.blur_radius,
-                                              box_shadow.spread_radius,
-                                              box_shadow.clip_mode);
-            }
-
-            DisplayItem::LayeredItemClass(ref item) => item.item.draw_into_context(paint_context),
-
-            DisplayItem::IframeClass(..) => {}
-        }
-    }
-
-    pub fn intersects_rect_in_parent_context(&self, rect: Option<Rect<Au>>) -> bool {
-        let rect = match rect {
-            Some(ref rect) => rect,
-            None => return true,
-        };
-
-        if !rect.intersects(&self.bounds()) {
-            return false;
-        }
-
-        self.base().clip.might_intersect_rect(&rect)
-    }
-
     pub fn base(&self) -> &BaseDisplayItem {
         match *self {
-            DisplayItem::SolidColorClass(ref solid_color) => &solid_color.base,
-            DisplayItem::TextClass(ref text) => &text.base,
-            DisplayItem::ImageClass(ref image_item) => &image_item.base,
-            DisplayItem::WebGLClass(ref webgl_item) => &webgl_item.base,
-            DisplayItem::BorderClass(ref border) => &border.base,
-            DisplayItem::GradientClass(ref gradient) => &gradient.base,
-            DisplayItem::LineClass(ref line) => &line.base,
-            DisplayItem::BoxShadowClass(ref box_shadow) => &box_shadow.base,
-            DisplayItem::LayeredItemClass(ref layered_item) => layered_item.item.base(),
-            DisplayItem::IframeClass(ref iframe) => &iframe.base,
+            DisplayItem::SolidColor(ref solid_color) => &solid_color.base,
+            DisplayItem::Text(ref text) => &text.base,
+            DisplayItem::Image(ref image_item) => &image_item.base,
+            DisplayItem::WebGL(ref webgl_item) => &webgl_item.base,
+            DisplayItem::Border(ref border) => &border.base,
+            DisplayItem::Gradient(ref gradient) => &gradient.base,
+            DisplayItem::Line(ref line) => &line.base,
+            DisplayItem::BoxShadow(ref box_shadow) => &box_shadow.base,
+            DisplayItem::Iframe(ref iframe) => &iframe.base,
+            DisplayItem::PushStackingContext(ref stacking_context) => &stacking_context.base,
+            DisplayItem::PopStackingContext(ref item) => &item.base,
+            DisplayItem::PushScrollRoot(ref item) => &item.base,
+            DisplayItem::PopScrollRoot(ref base) => &base,
         }
+    }
+
+    pub fn scroll_root_id(&self) -> ScrollRootId {
+        self.base().scroll_root_id
+    }
+
+    pub fn stacking_context_id(&self) -> StackingContextId {
+        self.base().stacking_context_id
+    }
+
+    pub fn section(&self) -> DisplayListSection {
+        self.base().section
     }
 
     pub fn bounds(&self) -> Rect<Au> {
@@ -1450,7 +1114,7 @@ impl DisplayItem {
         }
 
         match *self {
-            DisplayItem::BorderClass(ref border) => {
+            DisplayItem::Border(ref border) => {
                 // If the point is inside the border, it didn't hit the border!
                 let interior_rect =
                     Rect::new(
@@ -1468,7 +1132,7 @@ impl DisplayItem {
                     return None;
                 }
             }
-            DisplayItem::BoxShadowClass(_) => {
+            DisplayItem::BoxShadow(_) => {
                 // Box shadows can never be hit.
                 return None;
             }
@@ -1481,24 +1145,42 @@ impl DisplayItem {
 
 impl fmt::Debug for DisplayItem {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let DisplayItem::PushStackingContext(ref item) = *self {
+            return write!(f, "PushStackingContext({:?})", item.stacking_context);
+        }
+
+        if let DisplayItem::PopStackingContext(ref item) = *self {
+            return write!(f, "PopStackingContext({:?}", item.stacking_context_id);
+        }
+
+        if let DisplayItem::PushScrollRoot(ref item) = *self {
+            return write!(f, "PushScrollRoot({:?}", item.scroll_root);
+        }
+
+        if let DisplayItem::PopScrollRoot(_) = *self {
+            return write!(f, "PopScrollRoot");
+        }
+
         write!(f, "{} @ {:?} {:?}",
             match *self {
-                DisplayItem::SolidColorClass(ref solid_color) =>
+                DisplayItem::SolidColor(ref solid_color) =>
                     format!("SolidColor rgba({}, {}, {}, {})",
                             solid_color.color.r,
                             solid_color.color.g,
                             solid_color.color.b,
                             solid_color.color.a),
-                DisplayItem::TextClass(_) => "Text".to_owned(),
-                DisplayItem::ImageClass(_) => "Image".to_owned(),
-                DisplayItem::WebGLClass(_) => "WebGL".to_owned(),
-                DisplayItem::BorderClass(_) => "Border".to_owned(),
-                DisplayItem::GradientClass(_) => "Gradient".to_owned(),
-                DisplayItem::LineClass(_) => "Line".to_owned(),
-                DisplayItem::BoxShadowClass(_) => "BoxShadow".to_owned(),
-                DisplayItem::LayeredItemClass(ref layered_item) =>
-                    format!("LayeredItem({:?})", layered_item.item),
-                DisplayItem::IframeClass(_) => "Iframe".to_owned(),
+                DisplayItem::Text(_) => "Text".to_owned(),
+                DisplayItem::Image(_) => "Image".to_owned(),
+                DisplayItem::WebGL(_) => "WebGL".to_owned(),
+                DisplayItem::Border(_) => "Border".to_owned(),
+                DisplayItem::Gradient(_) => "Gradient".to_owned(),
+                DisplayItem::Line(_) => "Line".to_owned(),
+                DisplayItem::BoxShadow(_) => "BoxShadow".to_owned(),
+                DisplayItem::Iframe(_) => "Iframe".to_owned(),
+                DisplayItem::PushStackingContext(_) |
+                DisplayItem::PopStackingContext(_) |
+                DisplayItem::PushScrollRoot(_) |
+                DisplayItem::PopScrollRoot(_) => "".to_owned(),
             },
             self.bounds(),
             self.base().clip
@@ -1528,7 +1210,7 @@ impl WebRenderImageInfo {
 }
 
 /// The type of the scroll offset list. This is only populated if WebRender is in use.
-pub type ScrollOffsetMap = HashMap<StackingContextId, Point2D<f32>>;
+pub type ScrollOffsetMap = HashMap<ScrollRootId, Point2D<f32>>;
 
 
 pub trait SimpleMatrixDetection {

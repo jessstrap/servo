@@ -5,13 +5,15 @@
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
 use canvas_traits::CanvasMsg;
 use dom::bindings::codegen::Bindings::WebGLRenderbufferBinding;
-use dom::bindings::global::GlobalRef;
+use dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::reflect_dom_object;
 use dom::webglobject::WebGLObject;
-use ipc_channel::ipc::{self, IpcSender};
+use dom::window::Window;
+use ipc_channel::ipc::IpcSender;
 use std::cell::Cell;
-use webrender_traits::{WebGLCommand, WebGLRenderbufferId};
+use webrender_traits;
+use webrender_traits::{WebGLCommand, WebGLRenderbufferId, WebGLResult, WebGLError};
 
 #[dom_struct]
 pub struct WebGLRenderbuffer {
@@ -19,6 +21,8 @@ pub struct WebGLRenderbuffer {
     id: WebGLRenderbufferId,
     ever_bound: Cell<bool>,
     is_deleted: Cell<bool>,
+    size: Cell<Option<(i32, i32)>>,
+    internal_format: Cell<Option<u32>>,
     #[ignore_heap_size_of = "Defined in ipc-channel"]
     renderer: IpcSender<CanvasMsg>,
 }
@@ -33,24 +37,26 @@ impl WebGLRenderbuffer {
             ever_bound: Cell::new(false),
             is_deleted: Cell::new(false),
             renderer: renderer,
+            internal_format: Cell::new(None),
+            size: Cell::new(None),
         }
     }
 
-    pub fn maybe_new(global: GlobalRef, renderer: IpcSender<CanvasMsg>)
+    pub fn maybe_new(window: &Window, renderer: IpcSender<CanvasMsg>)
                      -> Option<Root<WebGLRenderbuffer>> {
-        let (sender, receiver) = ipc::channel().unwrap();
+        let (sender, receiver) = webrender_traits::channel::msg_channel().unwrap();
         renderer.send(CanvasMsg::WebGL(WebGLCommand::CreateRenderbuffer(sender))).unwrap();
 
         let result = receiver.recv().unwrap();
-        result.map(|renderbuffer_id| WebGLRenderbuffer::new(global, renderer, renderbuffer_id))
+        result.map(|renderbuffer_id| WebGLRenderbuffer::new(window, renderer, renderbuffer_id))
     }
 
-    pub fn new(global: GlobalRef,
+    pub fn new(window: &Window,
                renderer: IpcSender<CanvasMsg>,
                id: WebGLRenderbufferId)
                -> Root<WebGLRenderbuffer> {
         reflect_dom_object(box WebGLRenderbuffer::new_inherited(renderer, id),
-                           global,
+                           window,
                            WebGLRenderbufferBinding::Wrap)
     }
 }
@@ -59,6 +65,10 @@ impl WebGLRenderbuffer {
 impl WebGLRenderbuffer {
     pub fn id(&self) -> WebGLRenderbufferId {
         self.id
+    }
+
+    pub fn size(&self) -> Option<(i32, i32)> {
+        self.size.get()
     }
 
     pub fn bind(&self, target: u32) {
@@ -80,5 +90,31 @@ impl WebGLRenderbuffer {
 
     pub fn ever_bound(&self) -> bool {
         self.ever_bound.get()
+    }
+
+    pub fn storage(&self, internal_format: u32, width: i32, height: i32) -> WebGLResult<()> {
+        // Validate the internal_format, and save it for completeness
+        // validation.
+        match internal_format {
+            constants::RGBA4 |
+            constants::DEPTH_STENCIL |
+            constants::DEPTH_COMPONENT16 |
+            constants::STENCIL_INDEX8 =>
+                self.internal_format.set(Some(internal_format)),
+
+            _ => return Err(WebGLError::InvalidEnum),
+        };
+
+        // FIXME: Check that w/h are < MAX_RENDERBUFFER_SIZE
+
+        // FIXME: Invalidate completeness after the call
+
+        let msg = CanvasMsg::WebGL(WebGLCommand::RenderbufferStorage(constants::RENDERBUFFER,
+                                                                     internal_format, width, height));
+        self.renderer.send(msg).unwrap();
+
+        self.size.set(Some((width, height)));
+
+        Ok(())
     }
 }

@@ -6,7 +6,8 @@
 
 <% data.new_style_struct("Color", inherited=True) %>
 
-<%helpers:raw_longhand name="color" need_clone="True" animatable="True">
+<%helpers:raw_longhand name="color" need_clone="True" animatable="True"
+                       spec="https://drafts.csswg.org/css-color/#color">
     use cssparser::Color as CSSParserColor;
     use cssparser::RGBA;
     use values::specified::{CSSColor, CSSRGBA};
@@ -17,6 +18,14 @@
         #[inline]
         fn to_computed_value(&self, _context: &Context) -> computed_value::T {
             self.parsed
+        }
+
+        #[inline]
+        fn from_computed_value(computed: &computed_value::T) -> Self {
+            CSSRGBA {
+                parsed: *computed,
+                authored: None,
+            }
         }
     }
 
@@ -29,9 +38,9 @@
     pub fn get_initial_value() -> computed_value::T {
         RGBA { red: 0., green: 0., blue: 0., alpha: 1. }  /* black */
     }
-    pub fn parse_specified(_context: &ParserContext, input: &mut Parser)
+    pub fn parse_specified(context: &ParserContext, input: &mut Parser)
                            -> Result<DeclaredValue<SpecifiedValue>, ()> {
-        let value = try!(CSSColor::parse(input));
+        let value = try!(CSSColor::parse(context, input));
         let rgba = match value.parsed {
             CSSParserColor::RGBA(rgba) => rgba,
             CSSParserColor::CurrentColor => return Ok(DeclaredValue::Inherit)

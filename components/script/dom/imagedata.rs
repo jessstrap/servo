@@ -2,18 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use core::nonzero::NonZero;
 use dom::bindings::codegen::Bindings::ImageDataBinding;
 use dom::bindings::codegen::Bindings::ImageDataBinding::ImageDataMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
+use dom::globalscope::GlobalScope;
 use euclid::size::Size2D;
 use js::jsapi::{Heap, JSContext, JSObject};
-use js::jsapi::{JS_GetUint8ClampedArrayData, JS_NewUint8ClampedArray};
-use libc::uint8_t;
+use js::rust::Runtime;
+use js::typedarray::Uint8ClampedArray;
 use std::default::Default;
 use std::ptr;
-use std::slice;
 use std::vec::Vec;
 
 #[dom_struct]
@@ -26,8 +26,8 @@ pub struct ImageData {
 
 impl ImageData {
     #[allow(unsafe_code)]
-    pub fn new(global: GlobalRef, width: u32, height: u32, data: Option<Vec<u8>>) -> Root<ImageData> {
-        let mut imagedata = box ImageData {
+    pub fn new(global: &GlobalScope, width: u32, height: u32, data: Option<Vec<u8>>) -> Root<ImageData> {
+        let imagedata = box ImageData {
             reflector_: Reflector::new(),
             width: width,
             height: height,
@@ -36,15 +36,10 @@ impl ImageData {
 
         unsafe {
             let cx = global.get_cx();
-            let js_object: *mut JSObject = JS_NewUint8ClampedArray(cx, width * height * 4);
-
-            if let Some(vec) = data {
-                let mut is_shared = false;
-                let js_object_data: *mut uint8_t = JS_GetUint8ClampedArrayData(js_object, &mut is_shared, ptr::null());
-                assert!(!is_shared);
-                ptr::copy_nonoverlapping(vec.as_ptr(), js_object_data, vec.len())
-            }
-            (*imagedata).data.set(js_object);
+            rooted!(in (cx) let mut js_object = ptr::null_mut());
+            let data = data.as_ref().map(|d| &d[..]);
+            Uint8ClampedArray::create(cx, width * height * 4, data, js_object.handle_mut()).unwrap();
+            (*imagedata).data.set(js_object.get());
         }
 
         reflect_dom_object(imagedata,
@@ -52,15 +47,14 @@ impl ImageData {
     }
 
     #[allow(unsafe_code)]
-    pub fn get_data_array(&self, global: &GlobalRef) -> Vec<u8> {
+    pub fn get_data_array(&self) -> Vec<u8> {
         unsafe {
-            let cx = global.get_cx();
-            let mut is_shared = false;
-            let data: *const uint8_t =
-                JS_GetUint8ClampedArrayData(self.Data(cx), &mut is_shared, ptr::null()) as *const uint8_t;
-            assert!(!is_shared);
-            let len = self.Width() * self.Height() * 4;
-            slice::from_raw_parts(data, len as usize).to_vec()
+            assert!(!self.data.get().is_null());
+            let cx = Runtime::get();
+            assert!(!cx.is_null());
+            typedarray!(in(cx) let array: Uint8ClampedArray = self.data.get());
+            let vec = array.unwrap().as_slice().to_vec();
+            vec
         }
     }
 
@@ -80,8 +74,10 @@ impl ImageDataMethods for ImageData {
         self.height
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-imagedata-data
-    fn Data(&self, _: *mut JSContext) -> *mut JSObject {
-        self.data.get()
+    unsafe fn Data(&self, _: *mut JSContext) -> NonZero<*mut JSObject> {
+        assert!(!self.data.get().is_null());
+        NonZero::new(self.data.get())
     }
 }

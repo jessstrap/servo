@@ -2,8 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use rustc::hir::def_id::DefId;
 use rustc::hir::{self, def};
+use rustc::hir::def_id::DefId;
 use rustc::lint::{LateContext, LintContext};
 use syntax::ast;
 use syntax::attr::mark_used;
@@ -21,12 +21,18 @@ pub fn match_ty_unwrap<'a>(ty: &'a ast::Ty, segments: &[&str]) -> Option<&'a [P<
             // I could muck around with the maps and find the full path
             // however the more efficient way is to simply reverse the iterators and zip them
             // which will compare them in reverse until one of them runs out of segments
-            if seg.iter().rev().zip(segments.iter().rev()).all(|(a, b)| a.identifier.name.as_str() == *b) {
+            if seg.iter().rev().zip(segments.iter().rev()).all(|(a, b)| &*a.identifier.name.as_str() == *b) {
                 match seg.last() {
-                    Some(&ast::PathSegment { parameters: ast::PathParameters::AngleBracketed(ref a), .. }) => {
-                        Some(&a.types)
+                    Some(&ast::PathSegment { parameters: Some(ref params), .. }) => {
+                        match **params {
+                            ast::PathParameters::AngleBracketed(ref a) => Some(&a.types),
+
+                            // `Foo(A,B) -> C`
+                            ast::PathParameters::Parenthesized(_) => None,
+                        }
                     }
-                    _ => None
+                    Some(&ast::PathSegment { parameters: None, .. }) => Some(&[]),
+                    None => None,
                 }
             } else {
                 None
@@ -38,13 +44,8 @@ pub fn match_ty_unwrap<'a>(ty: &'a ast::Ty, segments: &[&str]) -> Option<&'a [P<
 
 /// Checks if a type has a #[servo_lang = "str"] attribute
 pub fn match_lang_ty(cx: &LateContext, ty: &hir::Ty, value: &str) -> bool {
-    match ty.node {
-        hir::TyPath(..) => {},
-        _ => return false,
-    }
-
-    let def = match cx.tcx.def_map.borrow().get(&ty.id) {
-        Some(&def::PathResolution { base_def: def, .. }) => def,
+    let def = match ty.node {
+        hir::TyPath(hir::QPath::Resolved(_, ref path)) => path.def,
         _ => return false,
     };
 
@@ -57,17 +58,11 @@ pub fn match_lang_ty(cx: &LateContext, ty: &hir::Ty, value: &str) -> bool {
 
 pub fn match_lang_did(cx: &LateContext, did: DefId, value: &str) -> bool {
     cx.tcx.get_attrs(did).iter().any(|attr| {
-        match attr.node.value.node {
-            ast::MetaItemKind::NameValue(ref name, ref val) if &**name == "servo_lang" => {
-                match val.node {
-                    ast::LitKind::Str(ref v, _) if &**v == value => {
-                        mark_used(attr);
-                        true
-                    },
-                    _ => false,
-                }
-            }
-            _ => false,
+        if attr.check_name("servo_lang") && attr.value_str().map_or(false, |v| v == value) {
+            mark_used(attr);
+            true
+        } else {
+            false
         }
     })
 }
@@ -91,7 +86,7 @@ pub fn match_def_path(cx: &LateContext, def_id: DefId, path: &[&str]) -> bool {
     other.into_iter()
          .map(|e| e.data)
          .zip(path)
-         .all(|(nm, p)| nm.as_interned_str() == *p)
+         .all(|(nm, p)| &*nm.as_interned_str() == *p)
 }
 
 pub fn in_derive_expn(cx: &LateContext, span: Span) -> bool {

@@ -2,9 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#client
+// https://w3c.github.io/ServiceWorker/#client
 
-[Pref="dom.serviceworker.enabled", Exposed=(Window,Worker)]
+[Pref="dom.serviceworker.enabled", Exposed=ServiceWorker]
 interface Client {
   readonly attribute USVString url;
   readonly attribute FrameType frameType;

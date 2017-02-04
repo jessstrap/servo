@@ -12,15 +12,14 @@ use dom::bindings::codegen::Bindings::DOMParserBinding::SupportedType::Text_xml;
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentReadyState;
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
+use dom::document::{Document, HasBrowsingContext, IsHTMLDocument};
 use dom::document::DocumentSource;
-use dom::document::{Document, IsHTMLDocument};
+use dom::servoparser::ServoParser;
 use dom::window::Window;
-use parse::html::{ParseContext, parse_html};
-use parse::xml::{self, parse_xml};
+use script_traits::DocumentActivity;
 
 #[dom_struct]
 pub struct DOMParser {
@@ -38,17 +37,17 @@ impl DOMParser {
 
     pub fn new(window: &Window) -> Root<DOMParser> {
         reflect_dom_object(box DOMParser::new_inherited(window),
-                           GlobalRef::Window(window),
+                           window,
                            DOMParserBinding::Wrap)
     }
 
-    pub fn Constructor(global: GlobalRef) -> Fallible<Root<DOMParser>> {
-        Ok(DOMParser::new(global.as_window()))
+    pub fn Constructor(window: &Window) -> Fallible<Root<DOMParser>> {
+        Ok(DOMParser::new(window))
     }
 }
 
 impl DOMParserMethods for DOMParser {
-    // https://domparsing.spec.whatwg.org/#the-domparser-interface
+    // https://w3c.github.io/DOM-Parsing/#the-domparser-interface
     fn ParseFromString(&self,
                        s: DOMString,
                        ty: DOMParserBinding::SupportedType)
@@ -57,37 +56,40 @@ impl DOMParserMethods for DOMParser {
         let content_type =
             DOMString::from(DOMParserBinding::SupportedTypeValues::strings[ty as usize]);
         let doc = self.window.Document();
-        let doc = doc.r();
         let loader = DocumentLoader::new(&*doc.loader());
         match ty {
             Text_html => {
                 let document = Document::new(&self.window,
-                                             None,
+                                             HasBrowsingContext::No,
                                              Some(url.clone()),
+                                             doc.origin().alias(),
                                              IsHTMLDocument::HTMLDocument,
                                              Some(content_type),
                                              None,
+                                             DocumentActivity::Inactive,
                                              DocumentSource::FromParser,
                                              loader,
                                              None,
                                              None);
-                parse_html(document.r(), s, url, ParseContext::Owner(None));
+                ServoParser::parse_html_document(&document, s, url);
                 document.set_ready_state(DocumentReadyState::Complete);
                 Ok(document)
             }
             Text_xml | Application_xml | Application_xhtml_xml => {
                 // FIXME: this should probably be FromParser when we actually parse the string (#3756).
                 let document = Document::new(&self.window,
-                                             None,
+                                             HasBrowsingContext::No,
                                              Some(url.clone()),
+                                             doc.origin().alias(),
                                              IsHTMLDocument::NonHTMLDocument,
                                              Some(content_type),
                                              None,
+                                             DocumentActivity::Inactive,
                                              DocumentSource::NotFromParser,
                                              loader,
                                              None,
                                              None);
-                parse_xml(document.r(), s, url, xml::ParseContext::Owner(None));
+                ServoParser::parse_xml_document(&document, s, url);
                 Ok(document)
             }
         }

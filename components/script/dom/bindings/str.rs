@@ -4,15 +4,16 @@
 
 //! The `ByteString` struct.
 
+use html5ever_atoms::{LocalName, Namespace};
+use servo_atoms::Atom;
 use std::ascii::AsciiExt;
-use std::borrow::{ToOwned, Cow};
+use std::borrow::{Borrow, Cow, ToOwned};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops;
 use std::ops::{Deref, DerefMut};
 use std::str;
 use std::str::{Bytes, FromStr};
-use string_cache::Atom;
 
 /// Encapsulates the IDL `ByteString` type.
 #[derive(JSTraceable, Clone, Eq, PartialEq, HeapSizeOf, Debug)]
@@ -169,14 +170,26 @@ impl DOMString {
         self.0.push_str(string)
     }
 
-    /// Truncates this `DOMString`, removing all contents.
+    /// Clears this `DOMString`, removing all contents.
     pub fn clear(&mut self) {
         self.0.clear()
+    }
+
+    /// Shortens this String to the specified length.
+    pub fn truncate(&mut self, new_len: usize) {
+        self.0.truncate(new_len);
     }
 
     /// An iterator over the bytes of this `DOMString`.
     pub fn bytes(&self) -> Bytes {
         self.0.bytes()
+    }
+}
+
+impl Borrow<str> for DOMString {
+    #[inline]
+    fn borrow(&self) -> &str {
+        &self.0
     }
 }
 
@@ -248,6 +261,18 @@ impl<'a> From<Cow<'a, str>> for DOMString {
     }
 }
 
+impl From<DOMString> for LocalName {
+    fn from(contents: DOMString) -> LocalName {
+        LocalName::from(contents.0)
+    }
+}
+
+impl From<DOMString> for Namespace {
+    fn from(contents: DOMString) -> Namespace {
+        Namespace::from(contents.0)
+    }
+}
+
 impl From<DOMString> for Atom {
     fn from(contents: DOMString) -> Atom {
         Atom::from(contents.0)
@@ -262,6 +287,12 @@ impl From<DOMString> for String {
 
 impl Into<Vec<u8>> for DOMString {
     fn into(self) -> Vec<u8> {
+        self.0.into()
+    }
+}
+
+impl<'a> Into<Cow<'a, str>> for DOMString {
+    fn into(self) -> Cow<'a, str> {
         self.0.into()
     }
 }

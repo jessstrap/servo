@@ -2,12 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#![allow(dead_code)]
+
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
 use dom::bindings::codegen::Bindings::WebGLShaderPrecisionFormatBinding;
 use dom::bindings::codegen::Bindings::WebGLShaderPrecisionFormatBinding::WebGLShaderPrecisionFormatMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
+use dom::window::Window;
 
 #[dom_struct]
 pub struct WebGLShaderPrecisionFormat {
@@ -27,13 +29,13 @@ impl WebGLShaderPrecisionFormat {
         }
     }
 
-    pub fn new(global: GlobalRef,
+    pub fn new(window: &Window,
                range_min: i32,
                range_max: i32,
                precision: i32) -> Root<WebGLShaderPrecisionFormat> {
         reflect_dom_object(
             box WebGLShaderPrecisionFormat::new_inherited(range_min, range_max, precision),
-            global,
+            window,
             WebGLShaderPrecisionFormatBinding::Wrap)
     }
 }

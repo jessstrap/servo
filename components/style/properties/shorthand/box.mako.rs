@@ -4,7 +4,8 @@
 
 <%namespace name="helpers" file="/helpers.mako.rs" />
 
-<%helpers:shorthand name="overflow" sub_properties="overflow-x overflow-y">
+<%helpers:shorthand name="overflow" sub_properties="overflow-x overflow-y"
+                    spec="https://drafts.csswg.org/css-overflow/#propdef-overflow">
     use properties::longhands::{overflow_x, overflow_y};
 
     pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
@@ -15,12 +16,8 @@
         })
     }
 
-
-    // Overflow does not behave like a normal shorthand. When overflow-x and overflow-y are not of equal
-    // values, they no longer use the shared property name "overflow".
-    // Other shorthands do not include their name in the to_css method
-    impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    impl<'a> LonghandsToSerialize<'a>  {
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             let x_and_y_equal = match (self.overflow_x, self.overflow_y) {
                 (&DeclaredValue::Value(ref x_value), &DeclaredValue::Value(ref y_container)) => {
                     *x_value == y_container.0
@@ -28,6 +25,32 @@
                 (&DeclaredValue::WithVariables { .. }, &DeclaredValue::WithVariables { .. }) => true,
                 (&DeclaredValue::Initial, &DeclaredValue::Initial) => true,
                 (&DeclaredValue::Inherit, &DeclaredValue::Inherit) => true,
+                (&DeclaredValue::Unset, &DeclaredValue::Unset) => true,
+                _ => false
+            };
+
+            if x_and_y_equal {
+                try!(self.overflow_x.to_css(dest));
+            }
+            Ok(())
+        }
+
+        // Overflow does not behave like a normal shorthand. When overflow-x and overflow-y are not of equal
+        // values, they no longer use the shared property name "overflow".
+        // Other shorthands do not include their name in the to_css method
+        pub fn to_css_declared_with_name<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+            let x_and_y_equal = match (self.overflow_x, self.overflow_y) {
+                (&DeclaredValue::Value(ref x_value), &DeclaredValue::Value(ref y_container)) => {
+                    *x_value == y_container.0
+                },
+                (_, &DeclaredValue::WithVariables { .. }) |
+                (&DeclaredValue::WithVariables { .. }, _) => {
+                    // We don't serialize shorthands with variables
+                    return dest.write_str("");
+                },
+                (&DeclaredValue::Initial, &DeclaredValue::Initial) => true,
+                (&DeclaredValue::Inherit, &DeclaredValue::Inherit) => true,
+                (&DeclaredValue::Unset, &DeclaredValue::Unset) => true,
                 _ => false
             };
 
@@ -53,22 +76,34 @@
 macro_rules! try_parse_one {
     ($input: expr, $var: ident, $prop_module: ident) => {
         if $var.is_none() {
-            if let Ok(value) = $input.try($prop_module::parse_one) {
+            if let Ok(value) = $input.try($prop_module::SingleSpecifiedValue::parse) {
                 $var = Some(value);
                 continue;
             }
         }
-    }
+    };
+    ($context: expr, $input: expr, $var: ident, $prop_module: ident) => {
+        if $var.is_none() {
+            if let Ok(value) = $input.try(|i| {
+                $prop_module::SingleSpecifiedValue::parse($context, i)
+            }) {
+                $var = Some(value);
+                continue;
+            }
+        }
+    };
 }
 
-<%helpers:shorthand name="transition"
+<%helpers:shorthand name="transition" extra_prefixes="moz webkit"
                     sub_properties="transition-property transition-duration
                                     transition-timing-function
-                                    transition-delay">
+                                    transition-delay"
+                    spec="https://drafts.csswg.org/css-transitions/#propdef-transition">
+    use parser::Parse;
     use properties::longhands::{transition_delay, transition_duration, transition_property};
     use properties::longhands::{transition_timing_function};
 
-    pub fn parse_value(_: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
+    pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
         struct SingleTransition {
             transition_property: transition_property::SingleSpecifiedValue,
             transition_duration: transition_duration::SingleSpecifiedValue,
@@ -76,14 +111,14 @@ macro_rules! try_parse_one {
             transition_delay: transition_delay::SingleSpecifiedValue,
         }
 
-        fn parse_one_transition(input: &mut Parser) -> Result<SingleTransition,()> {
+        fn parse_one_transition(context: &ParserContext, input: &mut Parser) -> Result<SingleTransition,()> {
             let (mut property, mut duration) = (None, None);
             let (mut timing_function, mut delay) = (None, None);
             loop {
                 try_parse_one!(input, property, transition_property);
-                try_parse_one!(input, duration, transition_duration);
-                try_parse_one!(input, timing_function, transition_timing_function);
-                try_parse_one!(input, delay, transition_delay);
+                try_parse_one!(context, input, duration, transition_duration);
+                try_parse_one!(context, input, timing_function, transition_timing_function);
+                try_parse_one!(context, input, delay, transition_delay);
 
                 break
             }
@@ -92,12 +127,12 @@ macro_rules! try_parse_one {
                 Ok(SingleTransition {
                     transition_property: property,
                     transition_duration:
-                        duration.unwrap_or_else(transition_duration::get_initial_single_value),
+                        duration.unwrap_or_else(transition_duration::single_value::get_initial_value),
                     transition_timing_function:
-                        timing_function.unwrap_or_else(
-                            transition_timing_function::get_initial_single_value),
+                        timing_function.unwrap_or_else(transition_timing_function::single_value
+                                                                                 ::get_initial_specified_value),
                     transition_delay:
-                        delay.unwrap_or_else(transition_delay::get_initial_single_value),
+                        delay.unwrap_or_else(transition_delay::single_value::get_initial_value),
                 })
             } else {
                 Err(())
@@ -113,7 +148,7 @@ macro_rules! try_parse_one {
             })
         }
 
-        let results = try!(input.parse_comma_separated(parse_one_transition));
+        let results = try!(input.parse_comma_separated(|i| parse_one_transition(context, i)));
         let (mut properties, mut durations) = (Vec::new(), Vec::new());
         let (mut timing_functions, mut delays) = (Vec::new(), Vec::new());
         for result in results {
@@ -132,8 +167,8 @@ macro_rules! try_parse_one {
         })
     }
 
-    impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    impl<'a> LonghandsToSerialize<'a>  {
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             try!(self.transition_property.to_css(dest));
             try!(write!(dest, " "));
 
@@ -148,16 +183,19 @@ macro_rules! try_parse_one {
     }
 </%helpers:shorthand>
 
-<%helpers:shorthand name="animation"
+<%helpers:shorthand name="animation" extra_prefixes="moz webkit"
                     sub_properties="animation-name animation-duration
                                     animation-timing-function animation-delay
                                     animation-iteration-count animation-direction
-                                    animation-fill-mode animation-play-state">
+                                    animation-fill-mode animation-play-state"
+                    allowed_in_keyframe_block="False"
+                    spec="https://drafts.csswg.org/css-animations/#propdef-animation">
+    use parser::Parse;
     use properties::longhands::{animation_name, animation_duration, animation_timing_function};
     use properties::longhands::{animation_delay, animation_iteration_count, animation_direction};
     use properties::longhands::{animation_fill_mode, animation_play_state};
 
-    pub fn parse_value(_: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
+    pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
         struct SingleAnimation {
             animation_name: animation_name::SingleSpecifiedValue,
             animation_duration: animation_duration::SingleSpecifiedValue,
@@ -169,7 +207,7 @@ macro_rules! try_parse_one {
             animation_play_state: animation_play_state::SingleSpecifiedValue,
         }
 
-        fn parse_one_animation(input: &mut Parser) -> Result<SingleAnimation,()> {
+        fn parse_one_animation(context: &ParserContext, input: &mut Parser) -> Result<SingleAnimation,()> {
             let mut duration = None;
             let mut timing_function = None;
             let mut delay = None;
@@ -185,14 +223,14 @@ macro_rules! try_parse_one {
             // Also, duration must be before delay, see
             // https://drafts.csswg.org/css-animations/#typedef-single-animation
             loop {
-                try_parse_one!(input, duration, animation_duration);
-                try_parse_one!(input, timing_function, animation_timing_function);
-                try_parse_one!(input, delay, animation_delay);
-                try_parse_one!(input, iteration_count, animation_iteration_count);
+                try_parse_one!(context, input, duration, animation_duration);
+                try_parse_one!(context, input, timing_function, animation_timing_function);
+                try_parse_one!(context, input, delay, animation_delay);
+                try_parse_one!(context, input, iteration_count, animation_iteration_count);
                 try_parse_one!(input, direction, animation_direction);
                 try_parse_one!(input, fill_mode, animation_fill_mode);
                 try_parse_one!(input, play_state, animation_play_state);
-                try_parse_one!(input, name, animation_name);
+                try_parse_one!(context, input, name, animation_name);
 
                 break
             }
@@ -201,19 +239,20 @@ macro_rules! try_parse_one {
                 Ok(SingleAnimation {
                     animation_name: name,
                     animation_duration:
-                        duration.unwrap_or_else(animation_duration::get_initial_single_value),
+                        duration.unwrap_or_else(animation_duration::single_value::get_initial_value),
                     animation_timing_function:
-                        timing_function.unwrap_or_else(animation_timing_function::get_initial_single_value),
+                        timing_function.unwrap_or_else(animation_timing_function::single_value
+                                                                                ::get_initial_specified_value),
                     animation_delay:
-                        delay.unwrap_or_else(animation_delay::get_initial_single_value),
+                        delay.unwrap_or_else(animation_delay::single_value::get_initial_value),
                     animation_iteration_count:
-                        iteration_count.unwrap_or_else(animation_iteration_count::get_initial_single_value),
+                        iteration_count.unwrap_or_else(animation_iteration_count::single_value::get_initial_value),
                     animation_direction:
-                        direction.unwrap_or_else(animation_direction::get_initial_single_value),
+                        direction.unwrap_or_else(animation_direction::single_value::get_initial_value),
                     animation_fill_mode:
-                        fill_mode.unwrap_or_else(animation_fill_mode::get_initial_single_value),
+                        fill_mode.unwrap_or_else(animation_fill_mode::single_value::get_initial_value),
                     animation_play_state:
-                        play_state.unwrap_or_else(animation_play_state::get_initial_single_value),
+                        play_state.unwrap_or_else(animation_play_state::single_value::get_initial_value),
                 })
             } else {
                 Err(())
@@ -233,7 +272,7 @@ macro_rules! try_parse_one {
             })
         }
 
-        let results = try!(input.parse_comma_separated(parse_one_animation));
+        let results = try!(input.parse_comma_separated(|i| parse_one_animation(context, i)));
 
         let mut names = vec![];
         let mut durations = vec![];
@@ -267,8 +306,8 @@ macro_rules! try_parse_one {
         })
     }
 
-    impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    impl<'a> LonghandsToSerialize<'a>  {
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             try!(self.animation_duration.to_css(dest));
             try!(write!(dest, " "));
 
@@ -293,6 +332,42 @@ macro_rules! try_parse_one {
             try!(write!(dest, " "));
 
             self.animation_name.to_css(dest)
+        }
+    }
+</%helpers:shorthand>
+
+<%helpers:shorthand name="scroll-snap-type" products="gecko"
+                    sub_properties="scroll-snap-type-x scroll-snap-type-y"
+                    spec="https://drafts.csswg.org/css-scroll-snap/#propdef-scroll-snap-type">
+    use properties::longhands::scroll_snap_type_x;
+
+    pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
+        let result = try!(scroll_snap_type_x::parse(context, input));
+        Ok(Longhands {
+            scroll_snap_type_x: Some(result),
+            scroll_snap_type_y: Some(result),
+        })
+    }
+
+    impl<'a> LonghandsToSerialize<'a>  {
+        // Serializes into the single keyword value if both scroll-snap-type and scroll-snap-type-y are same.
+        // Otherwise into an empty string. This is done to match Gecko's behaviour.
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+            let x_and_y_equal = match (self.scroll_snap_type_x, self.scroll_snap_type_y) {
+                (&DeclaredValue::Value(ref x_value), &DeclaredValue::Value(ref y_value)) => {
+                    *x_value == *y_value
+                },
+                (&DeclaredValue::Initial, &DeclaredValue::Initial) => true,
+                (&DeclaredValue::Inherit, &DeclaredValue::Inherit) => true,
+                (&DeclaredValue::Unset, &DeclaredValue::Unset) => true,
+                (x, y) => { *x == *y },
+            };
+
+            if x_and_y_equal {
+                self.scroll_snap_type_x.to_css(dest)
+            } else {
+                Ok(())
+            }
         }
     }
 </%helpers:shorthand>

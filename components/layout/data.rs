@@ -3,19 +3,13 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use construct::ConstructionResult;
-use script_layout_interface::restyle_damage::RestyleDamage;
-use style::data::PrivateStyleData;
+use script_layout_interface::PartialPersistentLayoutData;
 
 /// Data that layout associates with a node.
-pub struct PrivateLayoutData {
-    /// Data that the style system associates with a node. When the
-    /// style system is being used standalone, this is all that hangs
-    /// off the node. This must be first to permit the various
-    /// transmuations between PrivateStyleData PrivateLayoutData.
-    pub style_data: PrivateStyleData,
-
-    /// Description of how to account for recent style changes.
-    pub restyle_damage: RestyleDamage,
+pub struct PersistentLayoutData {
+    /// Data accessed by script_layout_interface. This must be first to allow
+    /// casting between PersistentLayoutData and PartialPersistentLayoutData.
+    pub base: PartialPersistentLayoutData,
 
     /// The current results of flow construction for this node. This is either a
     /// flow or a `ConstructionItem`. See comments in `construct.rs` for more
@@ -34,12 +28,11 @@ pub struct PrivateLayoutData {
     pub flags: LayoutDataFlags,
 }
 
-impl PrivateLayoutData {
+impl PersistentLayoutData {
     /// Creates new layout data.
-    pub fn new() -> PrivateLayoutData {
-        PrivateLayoutData {
-            style_data: PrivateStyleData::new(),
-            restyle_damage: RestyleDamage::empty(),
+    pub fn new() -> PersistentLayoutData {
+        PersistentLayoutData {
+            base: PartialPersistentLayoutData::new(),
             flow_construction_result: ConstructionResult::None,
             before_flow_construction_result: ConstructionResult::None,
             after_flow_construction_result: ConstructionResult::None,
@@ -53,6 +46,8 @@ impl PrivateLayoutData {
 bitflags! {
     pub flags LayoutDataFlags: u8 {
         #[doc = "Whether a flow has been newly constructed."]
-        const HAS_NEWLY_CONSTRUCTED_FLOW = 0x01
+        const HAS_NEWLY_CONSTRUCTED_FLOW = 0x01,
+        #[doc = "Whether this node has been traversed by layout."]
+        const HAS_BEEN_TRAVERSED = 0x02,
     }
 }

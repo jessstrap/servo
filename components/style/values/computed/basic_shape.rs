@@ -7,20 +7,20 @@
 //!
 //! [basic-shape]: https://drafts.csswg.org/css-shapes/#typedef-basic-shape
 
-use cssparser::ToCss;
 use properties::shorthands::serialize_four_sides;
 use std::fmt;
-use url::Url;
-use values::computed::UrlExtraData;
-use values::computed::position::Position;
+use style_traits::ToCss;
 use values::computed::{BorderRadiusSize, LengthOrPercentage};
+use values::computed::position::Position;
+use values::specified::url::SpecifiedUrl;
 
 pub use values::specified::basic_shape::{FillRule, GeometryBox, ShapeBox};
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub enum ShapeSource<T> {
-    Url(Url, UrlExtraData),
+    Url(SpecifiedUrl),
     Shape(BasicShape, Option<T>),
     Box(T),
     None,
@@ -34,9 +34,8 @@ impl<T> Default for ShapeSource<T> {
 
 impl<T: ToCss> ToCss for ShapeSource<T> {
     fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-        use values::LocalToCss;
         match *self {
-            ShapeSource::Url(ref url, _) => url.to_css(dest),
+            ShapeSource::Url(ref url) => url.to_css(dest),
             ShapeSource::Shape(ref shape, Some(ref reference)) => {
                 try!(shape.to_css(dest));
                 try!(dest.write_str(" "));
@@ -53,6 +52,7 @@ impl<T: ToCss> ToCss for ShapeSource<T> {
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub enum BasicShape {
     Inset(InsetRect),
     Circle(Circle),
@@ -73,6 +73,7 @@ impl ToCss for BasicShape {
 
 #[derive(Clone, PartialEq, Copy, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub struct InsetRect {
     pub top: LengthOrPercentage,
     pub right: LengthOrPercentage,
@@ -102,6 +103,7 @@ impl ToCss for InsetRect {
 
 #[derive(Clone, PartialEq, Copy, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub struct Circle {
     pub radius: ShapeRadius,
     pub position: Position,
@@ -117,6 +119,7 @@ impl ToCss for Circle {
 
 #[derive(Clone, PartialEq, Copy, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub struct Ellipse {
     pub semiaxis_x: ShapeRadius,
     pub semiaxis_y: ShapeRadius,
@@ -140,6 +143,7 @@ impl ToCss for Ellipse {
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 /// https://drafts.csswg.org/css-shapes/#funcdef-polygon
 pub struct Polygon {
     pub fill: FillRule,
@@ -170,6 +174,7 @@ impl ToCss for Polygon {
 /// https://drafts.csswg.org/css-shapes/#typedef-shape-radius
 #[derive(Clone, PartialEq, Copy, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub enum ShapeRadius {
     Length(LengthOrPercentage),
     ClosestSide,
@@ -195,6 +200,7 @@ impl ToCss for ShapeRadius {
 /// https://drafts.csswg.org/css-backgrounds-3/#border-radius
 #[derive(Clone, PartialEq, Copy, Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub struct BorderRadius {
     pub top_left: BorderRadiusSize,
     pub top_right: BorderRadiusSize,

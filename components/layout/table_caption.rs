@@ -8,13 +8,11 @@
 
 use app_units::Au;
 use block::BlockFlow;
-use context::LayoutContext;
+use context::{LayoutContext, SharedLayoutContext};
 use display_list_builder::DisplayListBuildState;
 use euclid::Point2D;
 use flow::{Flow, FlowClass, OpaqueFlow};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
-use gfx::display_list::StackingContext;
-use gfx_traits::StackingContextId;
 use gfx_traits::print_tree::PrintTree;
 use std::fmt;
 use std::sync::Arc;
@@ -30,7 +28,7 @@ pub struct TableCaptionFlow {
 impl TableCaptionFlow {
     pub fn from_fragment(fragment: Fragment) -> TableCaptionFlow {
         TableCaptionFlow {
-            block_flow: BlockFlow::from_fragment(fragment, None)
+            block_flow: BlockFlow::from_fragment(fragment),
         }
     }
 }
@@ -66,7 +64,7 @@ impl Flow for TableCaptionFlow {
         self.block_flow.assign_block_size(layout_context);
     }
 
-    fn compute_absolute_position(&mut self, layout_context: &LayoutContext) {
+    fn compute_absolute_position(&mut self, layout_context: &SharedLayoutContext) {
         self.block_flow.compute_absolute_position(layout_context)
     }
 
@@ -83,11 +81,8 @@ impl Flow for TableCaptionFlow {
         self.block_flow.build_display_list(state);
     }
 
-    fn collect_stacking_contexts(&mut self,
-                                 parent_id: StackingContextId,
-                                 contexts: &mut Vec<Box<StackingContext>>)
-                                 -> StackingContextId {
-        self.block_flow.collect_stacking_contexts(parent_id, contexts)
+    fn collect_stacking_contexts(&mut self, state: &mut DisplayListBuildState) {
+        self.block_flow.collect_stacking_contexts(state);
     }
 
     fn repair_style(&mut self, new_style: &Arc<ServoComputedValues>) {

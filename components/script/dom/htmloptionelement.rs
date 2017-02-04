@@ -6,6 +6,7 @@ use dom::attr::Attr;
 use dom::bindings::codegen::Bindings::CharacterDataBinding::CharacterDataMethods;
 use dom::bindings::codegen::Bindings::HTMLOptionElementBinding;
 use dom::bindings::codegen::Bindings::HTMLOptionElementBinding::HTMLOptionElementMethods;
+use dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelectElementBinding::HTMLSelectElementMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
@@ -14,13 +15,15 @@ use dom::characterdata::CharacterData;
 use dom::document::Document;
 use dom::element::{AttributeMutation, Element};
 use dom::htmlelement::HTMLElement;
+use dom::htmlformelement::HTMLFormElement;
+use dom::htmloptgroupelement::HTMLOptGroupElement;
 use dom::htmlscriptelement::HTMLScriptElement;
 use dom::htmlselectelement::HTMLSelectElement;
 use dom::node::{Node, UnbindContext};
 use dom::text::Text;
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
 use std::cell::Cell;
-use string_cache::Atom;
 use style::element_state::*;
 use style::str::{split_html_space_chars, str_join};
 
@@ -36,29 +39,33 @@ pub struct HTMLOptionElement {
 }
 
 impl HTMLOptionElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLOptionElement {
         HTMLOptionElement {
             htmlelement:
                 HTMLElement::new_inherited_with_state(IN_ENABLED_STATE,
-                                                      localName, prefix, document),
+                                                      local_name, prefix, document),
             selectedness: Cell::new(false),
             dirtiness: Cell::new(false),
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLOptionElement> {
-        Node::reflect_node(box HTMLOptionElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLOptionElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLOptionElementBinding::Wrap)
     }
 
     pub fn set_selectedness(&self, selected: bool) {
         self.selectedness.set(selected);
+    }
+
+    pub fn set_dirtiness(&self, dirtiness: bool) {
+        self.dirtiness.set(dirtiness);
     }
 
     fn pick_if_selected_and_reset(&self) {
@@ -75,7 +82,7 @@ impl HTMLOptionElement {
 
 // FIXME(ajeffrey): Provide a way of buffering DOMStrings other than using Strings
 fn collect_text(element: &Element, value: &mut String) {
-    let svg_script = *element.namespace() == ns!(svg) && element.local_name() == &atom!("script");
+    let svg_script = *element.namespace() == ns!(svg) && element.local_name() == &local_name!("script");
     let html_script = element.is::<HTMLScriptElement>();
     if svg_script || html_script {
         return;
@@ -110,10 +117,23 @@ impl HTMLOptionElementMethods for HTMLOptionElement {
         self.upcast::<Node>().SetTextContent(Some(value))
     }
 
+    // https://html.spec.whatwg.org/multipage/#dom-option-form
+    fn GetForm(&self) -> Option<Root<HTMLFormElement>> {
+        let parent = self.upcast::<Node>().GetParentNode().and_then(|p|
+            if p.is::<HTMLOptGroupElement>() {
+                p.upcast::<Node>().GetParentNode()
+            } else {
+                Some(p)
+            }
+        );
+
+        parent.and_then(|p| p.downcast::<HTMLSelectElement>().and_then(|s| s.GetForm()))
+    }
+
     // https://html.spec.whatwg.org/multipage/#attr-option-value
     fn Value(&self) -> DOMString {
         let element = self.upcast::<Element>();
-        let attr = &atom!("value");
+        let attr = &local_name!("value");
         if element.has_attribute(attr) {
             element.get_string_attribute(attr)
         } else {
@@ -127,7 +147,7 @@ impl HTMLOptionElementMethods for HTMLOptionElement {
     // https://html.spec.whatwg.org/multipage/#attr-option-label
     fn Label(&self) -> DOMString {
         let element = self.upcast::<Element>();
-        let attr = &atom!("label");
+        let attr = &local_name!("label");
         if element.has_attribute(attr) {
             element.get_string_attribute(attr)
         } else {
@@ -165,7 +185,7 @@ impl VirtualMethods for HTMLOptionElement {
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
         match attr.local_name() {
-            &atom!("disabled") => {
+            &local_name!("disabled") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -179,7 +199,7 @@ impl VirtualMethods for HTMLOptionElement {
                     }
                 }
             },
-            &atom!("selected") => {
+            &local_name!("selected") => {
                 match mutation {
                     AttributeMutation::Set(_) => {
                         // https://html.spec.whatwg.org/multipage/#concept-option-selectedness

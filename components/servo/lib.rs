@@ -20,14 +20,16 @@
 extern crate env_logger;
 #[cfg(not(target_os = "windows"))]
 extern crate gaol;
-#[macro_use]
 extern crate gleam;
 extern crate log;
 
+pub extern crate bluetooth;
+pub extern crate bluetooth_traits;
 pub extern crate canvas;
 pub extern crate canvas_traits;
 pub extern crate compositing;
 pub extern crate constellation;
+pub extern crate debugger;
 pub extern crate devtools;
 pub extern crate devtools_traits;
 pub extern crate euclid;
@@ -42,9 +44,11 @@ pub extern crate profile_traits;
 pub extern crate script;
 pub extern crate script_traits;
 pub extern crate script_layout_interface;
+pub extern crate servo_config;
+pub extern crate servo_url;
 pub extern crate style;
-pub extern crate url;
-pub extern crate util;
+pub extern crate webvr;
+pub extern crate webvr_traits;
 
 #[cfg(feature = "webdriver")]
 extern crate webdriver_server;
@@ -60,38 +64,44 @@ fn webdriver(port: u16, constellation: Sender<ConstellationMsg>) {
 #[cfg(not(feature = "webdriver"))]
 fn webdriver(_port: u16, _constellation: Sender<ConstellationMsg>) { }
 
+use bluetooth::BluetoothThreadFactory;
+use bluetooth_traits::BluetoothRequest;
+use compositing::{CompositorProxy, IOCompositor};
 use compositing::compositor_thread::InitialCompositorState;
 use compositing::windowing::WindowEvent;
 use compositing::windowing::WindowMethods;
-use compositing::{CompositorProxy, IOCompositor};
+use constellation::{Constellation, InitialConstellationState, UnprivilegedPipelineContent};
+use constellation::{FromCompositorLogger, FromScriptLogger};
 #[cfg(not(target_os = "windows"))]
 use constellation::content_process_sandbox_profile;
-use constellation::{Constellation, InitialConstellationState, UnprivilegedPipelineContent};
-use constellation::{FromScriptLogger, FromCompositorLogger};
 use env_logger::Logger as EnvLogger;
 #[cfg(not(target_os = "windows"))]
 use gaol::sandbox::{ChildSandbox, ChildSandboxMethods};
 use gfx::font_cache_thread::FontCacheThread;
 use ipc_channel::ipc::{self, IpcSender};
 use log::{Log, LogMetadata, LogRecord};
-use net::bluetooth_thread::BluetoothThreadFactory;
 use net::image_cache_thread::new_image_cache_thread;
 use net::resource_thread::new_resource_threads;
 use net_traits::IpcSend;
-use net_traits::bluetooth_thread::BluetoothMethodMsg;
 use profile::mem as profile_mem;
 use profile::time as profile_time;
 use profile_traits::mem;
 use profile_traits::time;
-use script_traits::{ConstellationMsg, ScriptMsg, SWManagerSenders};
+use script_traits::{ConstellationMsg, SWManagerSenders, ScriptMsg};
+use servo_config::opts;
+use servo_config::prefs::PREFS;
+use servo_config::resource_files::resources_dir_path;
+use servo_url::ServoUrl;
+use std::borrow::Cow;
 use std::cmp::max;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use util::opts;
-use util::prefs::PREFS;
-use util::resource_files::resources_dir_path;
+use webvr::{WebVRThread, WebVRCompositorHandler};
 
 pub use gleam::gl;
+pub use servo_config as config;
+pub use servo_url as url;
 
 /// The in-process interface to Servo.
 ///
@@ -125,54 +135,79 @@ impl<Window> Browser<Window> where Window: WindowMethods + 'static {
         let time_profiler_chan = profile_time::Profiler::create(&opts.time_profiling,
                                                                 opts.time_profiler_trace_path.clone());
         let mem_profiler_chan = profile_mem::Profiler::create(opts.mem_profiler_period);
+        let debugger_chan = opts.debugger_port.map(|port| {
+            debugger::start_server(port)
+        });
         let devtools_chan = opts.devtools_port.map(|port| {
             devtools::start_server(port)
         });
 
-        let (webrender, webrender_api_sender) = if opts::get().use_webrender {
-            if let Ok(mut resource_path) = resources_dir_path() {
-                resource_path.push("shaders");
+        let mut resource_path = resources_dir_path().unwrap();
+        resource_path.push("shaders");
 
-                // TODO(gw): Duplicates device_pixels_per_screen_px from compositor. Tidy up!
-                let scale_factor = window.scale_factor().get();
-                let device_pixel_ratio = match opts.device_pixels_per_px {
-                    Some(device_pixels_per_px) => device_pixels_per_px,
-                    None => match opts.output_file {
-                        Some(_) => 1.0,
-                        None => scale_factor,
-                    }
-                };
+        let (webrender, webrender_api_sender) = {
+            // TODO(gw): Duplicates device_pixels_per_screen_px from compositor. Tidy up!
+            let scale_factor = window.scale_factor().get();
+            let device_pixel_ratio = match opts.device_pixels_per_px {
+                Some(device_pixels_per_px) => device_pixels_per_px,
+                None => match opts.output_file {
+                    Some(_) => 1.0,
+                    None => scale_factor,
+                }
+            };
 
-                let (webrender, webrender_sender) =
-                    webrender::Renderer::new(webrender::RendererOptions {
-                        device_pixel_ratio: device_pixel_ratio,
-                        resource_path: resource_path,
-                        enable_aa: opts.enable_text_antialiasing,
-                        enable_msaa: opts.use_msaa,
-                        enable_profiler: opts.webrender_stats,
-                        debug: opts.webrender_debug,
-                    });
-                (Some(webrender), Some(webrender_sender))
+            let renderer_kind = if opts::get().should_use_osmesa() {
+                webrender_traits::RendererKind::OSMesa
             } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
+                webrender_traits::RendererKind::Native
+            };
+
+            let recorder = if opts.webrender_record {
+                let record_path = PathBuf::from("wr-record.bin");
+                let recorder = Box::new(webrender::BinaryRecorder::new(&record_path));
+                Some(recorder as Box<webrender::ApiRecordingReceiver>)
+            } else {
+                None
+            };
+
+            webrender::Renderer::new(webrender::RendererOptions {
+                device_pixel_ratio: device_pixel_ratio,
+                resource_override_path: Some(resource_path),
+                enable_aa: opts.enable_text_antialiasing,
+                enable_profiler: opts.webrender_stats,
+                debug: opts.webrender_debug,
+                recorder: recorder,
+                precache_shaders: opts.precache_shaders,
+                enable_scrollbars: opts.output_file.is_none(),
+                renderer_kind: renderer_kind,
+                enable_subpixel_aa: opts.enable_subpixel_text_antialiasing,
+                clear_framebuffer: true,
+                clear_color: webrender_traits::ColorF::new(1.0, 1.0, 1.0, 1.0),
+                render_target_debug: false,
+            })
         };
+
+        // Important that this call is done in a single-threaded fashion, we
+        // can't defer it after `create_constellation` has started.
+        script::init();
 
         // Create the constellation, which maintains the engine
         // pipelines, including the script and layout threads, as well
         // as the navigation context.
-        let (constellation_chan, sw_senders) = create_constellation(opts.clone(),
-                                                                          compositor_proxy.clone_compositor_proxy(),
-                                                                          time_profiler_chan.clone(),
-                                                                          mem_profiler_chan.clone(),
-                                                                          devtools_chan,
-                                                                          supports_clipboard,
-                                                                          webrender_api_sender.clone());
+        let (constellation_chan, sw_senders) = create_constellation(opts.user_agent.clone(),
+                                                                    opts.config_dir.clone(),
+                                                                    opts.url.clone(),
+                                                                    compositor_proxy.clone_compositor_proxy(),
+                                                                    time_profiler_chan.clone(),
+                                                                    mem_profiler_chan.clone(),
+                                                                    debugger_chan,
+                                                                    devtools_chan,
+                                                                    supports_clipboard,
+                                                                    &webrender,
+                                                                    webrender_api_sender.clone());
 
         // Send the constellation's swmanager sender to service worker manager thread
-        script::init(sw_senders);
+        script::init_service_workers(sw_senders);
 
         if cfg!(feature = "webdriver") {
             if let Some(port) = opts.webdriver_port {
@@ -227,30 +262,35 @@ impl<Window> Browser<Window> where Window: WindowMethods + 'static {
     }
 }
 
-fn create_constellation(opts: opts::Opts,
+fn create_constellation(user_agent: Cow<'static, str>,
+                        config_dir: Option<PathBuf>,
+                        url: Option<ServoUrl>,
                         compositor_proxy: Box<CompositorProxy + Send>,
                         time_profiler_chan: time::ProfilerChan,
                         mem_profiler_chan: mem::ProfilerChan,
+                        debugger_chan: Option<debugger::Sender>,
                         devtools_chan: Option<Sender<devtools_traits::DevtoolsControlMsg>>,
                         supports_clipboard: bool,
-                        webrender_api_sender: Option<webrender_traits::RenderApiSender>)
+                        webrender: &webrender::Renderer,
+                        webrender_api_sender: webrender_traits::RenderApiSender)
                         -> (Sender<ConstellationMsg>, SWManagerSenders) {
-    let bluetooth_thread: IpcSender<BluetoothMethodMsg> = BluetoothThreadFactory::new();
+    let bluetooth_thread: IpcSender<BluetoothRequest> = BluetoothThreadFactory::new();
 
     let (public_resource_threads, private_resource_threads) =
-        new_resource_threads(opts.user_agent.clone(),
+        new_resource_threads(user_agent,
                              devtools_chan.clone(),
                              time_profiler_chan.clone(),
-                             opts.config_dir.map(Into::into));
+                             config_dir);
     let image_cache_thread = new_image_cache_thread(public_resource_threads.sender(),
-                                                    webrender_api_sender.as_ref().map(|wr| wr.create_api()));
+                                                    webrender_api_sender.create_api());
     let font_cache_thread = FontCacheThread::new(public_resource_threads.sender(),
-                                                 webrender_api_sender.as_ref().map(|wr| wr.create_api()));
+                                                 Some(webrender_api_sender.create_api()));
 
     let resource_sender = public_resource_threads.sender();
 
     let initial_state = InitialConstellationState {
         compositor_proxy: compositor_proxy,
+        debugger_chan: debugger_chan,
         devtools_chan: devtools_chan,
         bluetooth_thread: bluetooth_thread,
         image_cache_thread: image_cache_thread,
@@ -267,7 +307,17 @@ fn create_constellation(opts: opts::Opts,
                         layout_thread::LayoutThread,
                         script::script_thread::ScriptThread>::start(initial_state);
 
-    if let Some(url) = opts.url {
+    if PREFS.is_webvr_enabled() {
+        // WebVR initialization
+        let (mut handler, sender) = WebVRCompositorHandler::new();
+        let webvr_thread = WebVRThread::spawn(constellation_chan.clone(), sender);
+        handler.set_webvr_thread_sender(webvr_thread.clone());
+
+        webrender.set_vr_compositor_handler(handler);
+        constellation_chan.send(ConstellationMsg::SetWebVRThread(webvr_thread)).unwrap();
+    }
+
+    if let Some(url) = url {
         constellation_chan.send(ConstellationMsg::InitLoadUrl(url)).unwrap();
     };
 
@@ -326,7 +376,8 @@ pub fn run_content_process(token: String) {
 
     // send the required channels to the service worker manager
     let sw_senders = unprivileged_content.swmanager_senders();
-    script::init(sw_senders);
+    script::init();
+    script::init_service_workers(sw_senders);
 
     unprivileged_content.start_all::<script_layout_interface::message::Msg,
                                      layout_thread::LayoutThread,

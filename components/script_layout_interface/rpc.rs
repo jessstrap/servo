@@ -5,7 +5,7 @@
 use app_units::Au;
 use euclid::point::Point2D;
 use euclid::rect::Rect;
-use gfx_traits::LayerId;
+use gfx_traits::ScrollRootId;
 use script_traits::UntrustedNodeAddress;
 use style::properties::longhands::{margin_top, margin_right, margin_bottom, margin_left, overflow_x};
 
@@ -28,8 +28,8 @@ pub trait LayoutRPC {
     fn node_overflow(&self) -> NodeOverflowResponse;
     /// Requests the scroll geometry of this node. Used by APIs such as `scrollTop`.
     fn node_scroll_area(&self) -> NodeGeometryResponse;
-    /// Requests the layer id of this node. Used by APIs such as `scrollTop`
-    fn node_layer_id(&self) -> NodeLayerIdResponse;
+    /// Requests the scroll root id of this node. Used by APIs such as `scrollTop`
+    fn node_scroll_root_id(&self) -> NodeScrollRootIdResponse;
     /// Requests the node containing the point of interest
     fn hit_test(&self) -> HitTestResponse;
     /// Query layout for the resolved value of a given CSS property
@@ -39,9 +39,11 @@ pub trait LayoutRPC {
     fn margin_style(&self) -> MarginStyleResponse;
 
     fn nodes_from_point(&self, page_point: Point2D<f32>, client_point: Point2D<f32>) -> Vec<UntrustedNodeAddress>;
+
+    fn text_index(&self) -> TextIndexResponse;
 }
 
-pub struct ContentBoxResponse(pub Rect<Au>);
+pub struct ContentBoxResponse(pub Option<Rect<Au>>);
 
 pub struct ContentBoxesResponse(pub Vec<Rect<Au>>);
 
@@ -51,15 +53,13 @@ pub struct NodeGeometryResponse {
 
 pub struct NodeOverflowResponse(pub Option<Point2D<overflow_x::computed_value::T>>);
 
-pub struct NodeLayerIdResponse {
-    pub layer_id: LayerId,
-}
+pub struct NodeScrollRootIdResponse(pub ScrollRootId);
 
 pub struct HitTestResponse {
     pub node_address: Option<UntrustedNodeAddress>,
 }
 
-pub struct ResolvedStyleResponse(pub Option<String>);
+pub struct ResolvedStyleResponse(pub String);
 
 #[derive(Clone)]
 pub struct OffsetParentResponse {
@@ -94,3 +94,6 @@ impl MarginStyleResponse {
         }
     }
 }
+
+#[derive(Clone)]
+pub struct TextIndexResponse(pub Option<usize>);

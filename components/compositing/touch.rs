@@ -4,11 +4,10 @@
 
 use euclid::point::TypedPoint2D;
 use euclid::scale_factor::ScaleFactor;
-use layers::geometry::DevicePixel;
-use script_traits::{EventResult, TouchId};
+use script_traits::{DevicePixel, EventResult, TouchId};
 use self::TouchState::*;
 
-/// Minimum number of ScreenPx to begin touch scrolling.
+/// Minimum number of `ScreenPx` to begin touch scrolling.
 const TOUCH_PAN_MIN_SCREEN_PX: f32 = 20.0;
 
 pub struct TouchHandler {

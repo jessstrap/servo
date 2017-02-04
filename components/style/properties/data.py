@@ -4,6 +4,23 @@
 
 import re
 
+PHYSICAL_SIDES = ["top", "left", "bottom", "right"]
+LOGICAL_SIDES = ["block-start", "block-end", "inline-start", "inline-end"]
+PHYSICAL_SIZES = ["width", "height"]
+LOGICAL_SIZES = ["block-size", "inline-size"]
+
+# bool is True when logical
+ALL_SIDES = [(side, False) for side in PHYSICAL_SIDES] + [(side, True) for side in LOGICAL_SIDES]
+ALL_SIZES = [(size, False) for size in PHYSICAL_SIZES] + [(size, True) for size in LOGICAL_SIZES]
+
+
+def maybe_moz_logical_alias(product, side, prop):
+    if product == "gecko" and side[1]:
+        axis, dir = side[0].split("-")
+        if axis == "inline":
+            return prop % dir
+    return None
+
 
 def to_rust_ident(name):
     name = name.replace("-", "_")
@@ -18,8 +35,10 @@ def to_camel_case(ident):
 
 class Keyword(object):
     def __init__(self, name, values, gecko_constant_prefix=None,
-                 gecko_enum_prefix=None,
-                 extra_gecko_values=None, extra_servo_values=None):
+                 gecko_enum_prefix=None, custom_consts=None,
+                 extra_gecko_values=None, extra_servo_values=None,
+                 gecko_strip_moz_prefix=True,
+                 gecko_inexhaustive=None):
         self.name = name
         self.values = values.split()
         if gecko_constant_prefix and gecko_enum_prefix:
@@ -29,6 +48,9 @@ class Keyword(object):
         self.gecko_enum_prefix = gecko_enum_prefix
         self.extra_gecko_values = (extra_gecko_values or "").split()
         self.extra_servo_values = (extra_servo_values or "").split()
+        self.consts_map = {} if custom_consts is None else custom_consts
+        self.gecko_strip_moz_prefix = gecko_strip_moz_prefix
+        self.gecko_inexhaustive = gecko_inexhaustive or (gecko_enum_prefix is None)
 
     def gecko_values(self):
         return self.values + self.extra_gecko_values
@@ -45,15 +67,15 @@ class Keyword(object):
             raise Exception("Bad product: " + product)
 
     def gecko_constant(self, value):
+        moz_stripped = value.replace("-moz-", '') if self.gecko_strip_moz_prefix else value
+        mapped = self.consts_map.get(value)
         if self.gecko_enum_prefix:
-            if value == "none":
-                return self.gecko_enum_prefix + "::None_"
-            else:
-                parts = value.replace("-moz-", "").split("-")
-                parts = [p.title() for p in parts]
-                return self.gecko_enum_prefix + "::" + "".join(parts)
+            parts = moz_stripped.split('-')
+            parts = mapped if mapped else [p.title() for p in parts]
+            return self.gecko_enum_prefix + "::" + "".join(parts)
         else:
-            return self.gecko_constant_prefix + "_" + value.replace("-moz-", "").replace("-", "_").upper()
+            suffix = mapped if mapped else moz_stripped.replace("-", "_")
+            return self.gecko_constant_prefix + "_" + suffix.upper()
 
     def needs_cast(self):
         return self.gecko_enum_prefix is None
@@ -62,11 +84,23 @@ class Keyword(object):
         return "as " + type_str if self.needs_cast() else ""
 
 
+def arg_to_bool(arg):
+    if isinstance(arg, bool):
+        return arg
+    assert arg in ["True", "False"]
+    return arg == "True"
+
+
 class Longhand(object):
-    def __init__(self, style_struct, name, animatable=None, derived_from=None, keyword=None,
+    def __init__(self, style_struct, name, spec=None, animatable=None, derived_from=None, keyword=None,
                  predefined_type=None, custom_cascade=False, experimental=False, internal=False,
-                 need_clone=False, need_index=False, gecko_ffi_name=None, depend_on_viewport_size=False):
+                 need_clone=False, need_index=False, gecko_ffi_name=None, depend_on_viewport_size=False,
+                 allowed_in_keyframe_block=True, complex_color=False, cast_type='u8',
+                 has_uncacheable_values=False, logical=False, alias=None, extra_prefixes=None):
         self.name = name
+        if not spec:
+            raise TypeError("Spec should be specified for %s" % name)
+        self.spec = spec
         self.keyword = keyword
         self.predefined_type = predefined_type
         self.ident = to_rust_ident(name)
@@ -76,20 +110,31 @@ class Longhand(object):
         self.custom_cascade = custom_cascade
         self.internal = internal
         self.need_index = need_index
+        self.has_uncacheable_values = has_uncacheable_values
         self.gecko_ffi_name = gecko_ffi_name or "m" + self.camel_case
         self.depend_on_viewport_size = depend_on_viewport_size
         self.derived_from = (derived_from or "").split()
+        self.complex_color = complex_color
+        self.cast_type = cast_type
+        self.logical = arg_to_bool(logical)
+        self.alias = alias.split() if alias else []
+        self.extra_prefixes = extra_prefixes.split() if extra_prefixes else []
+
+        # https://drafts.csswg.org/css-animations/#keyframes
+        # > The <declaration-list> inside of <keyframe-block> accepts any CSS property
+        # > except those defined in this specification,
+        # > but does accept the `animation-play-state` property and interprets it specially.
+        self.allowed_in_keyframe_block = allowed_in_keyframe_block \
+            and allowed_in_keyframe_block != "False"
 
         # This is done like this since just a plain bool argument seemed like
         # really random.
         if animatable is None:
             raise TypeError("animatable should be specified for " + name + ")")
-        if isinstance(animatable, bool):
-            self.animatable = animatable
-        else:
-            assert animatable == "True" or animatable == "False"
-            self.animatable = animatable == "True"
-
+        self.animatable = arg_to_bool(animatable)
+        if self.logical:
+            # Logical properties don't animate separately
+            self.animatable = False
         # NB: Animatable implies clone because a property animation requires a
         # copy of the computed value.
         #
@@ -98,14 +143,27 @@ class Longhand(object):
 
 
 class Shorthand(object):
-    def __init__(self, name, sub_properties, experimental=False, internal=False):
+    def __init__(self, name, sub_properties, spec=None, experimental=False, internal=False,
+                 allowed_in_keyframe_block=True, alias=None, extra_prefixes=None):
         self.name = name
+        if not spec:
+            raise TypeError("Spec should be specified for %s" % name)
+        self.spec = spec
         self.ident = to_rust_ident(name)
         self.camel_case = to_camel_case(self.ident)
         self.derived_from = None
         self.experimental = ("layout.%s.enabled" % name) if experimental else None
         self.sub_properties = sub_properties
         self.internal = internal
+        self.alias = alias.split() if alias else []
+        self.extra_prefixes = extra_prefixes.split() if extra_prefixes else []
+
+        # https://drafts.csswg.org/css-animations/#keyframes
+        # > The <declaration-list> inside of <keyframe-block> accepts any CSS property
+        # > except those defined in this specification,
+        # > but does accept the `animation-play-state` property and interprets it specially.
+        self.allowed_in_keyframe_block = allowed_in_keyframe_block \
+            and allowed_in_keyframe_block != "False"
 
 
 class Method(object):
@@ -147,8 +205,16 @@ class StyleStruct(object):
 
 
 class PropertiesData(object):
-    def __init__(self, product):
+    """
+        The `testing` parameter means that we're running tests.
+
+        In this situation, the `product` value is ignored while choosing
+        which shorthands and longhands to generate; and instead all properties for
+        which code exists for either servo or stylo are generated.
+    """
+    def __init__(self, product, testing):
         self.product = product
+        self.testing = testing
         self.style_structs = []
         self.current_style_struct = None
         self.longhands = []
@@ -164,27 +230,37 @@ class PropertiesData(object):
     def active_style_structs(self):
         return [s for s in self.style_structs if s.additional_methods or s.longhands]
 
-    def declare_longhand(self, name, products="gecko servo", **kwargs):
+    def add_prefixed_aliases(self, property):
+        # FIXME Servo's DOM architecture doesn't support vendor-prefixed properties.
+        #       See servo/servo#14941.
+        if self.product == "gecko":
+            for prefix in property.extra_prefixes:
+                property.alias.append('-%s-%s' % (prefix, property.name))
+
+    def declare_longhand(self, name, products="gecko servo", disable_when_testing=False, **kwargs):
         products = products.split()
-        if self.product not in products:
+        if self.product not in products and not (self.testing and not disable_when_testing):
             return
 
-        longand = Longhand(self.current_style_struct, name, **kwargs)
-        self.current_style_struct.longhands.append(longand)
-        self.longhands.append(longand)
-        self.longhands_by_name[name] = longand
+        longhand = Longhand(self.current_style_struct, name, **kwargs)
+        self.add_prefixed_aliases(longhand)
+        self.current_style_struct.longhands.append(longhand)
+        self.longhands.append(longhand)
+        self.longhands_by_name[name] = longhand
 
-        for name in longand.derived_from:
-            self.derived_longhands.setdefault(name, []).append(longand)
+        for name in longhand.derived_from:
+            self.derived_longhands.setdefault(name, []).append(longhand)
 
-        return longand
+        return longhand
 
-    def declare_shorthand(self, name, sub_properties, products="gecko servo", *args, **kwargs):
+    def declare_shorthand(self, name, sub_properties, products="gecko servo",
+                          disable_when_testing=False, *args, **kwargs):
         products = products.split()
-        if self.product not in products:
+        if self.product not in products and not (self.testing and not disable_when_testing):
             return
 
         sub_properties = [self.longhands_by_name[s] for s in sub_properties]
         shorthand = Shorthand(name, sub_properties, *args, **kwargs)
+        self.add_prefixed_aliases(shorthand)
         self.shorthands.append(shorthand)
         return shorthand

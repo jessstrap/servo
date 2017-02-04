@@ -6,11 +6,14 @@
 interface HTMLIFrameElement : HTMLElement {
            attribute DOMString src;
   //         attribute DOMString srcdoc;
-  //         attribute DOMString name;
+
+  // https://github.com/servo/servo/issues/14453
+  // attribute DOMString name;
+
            [SameObject, PutForwards=value]
            readonly attribute DOMTokenList sandbox;
   //         attribute boolean seamless;
-  //         attribute boolean allowFullscreen;
+           attribute boolean allowFullscreen;
            attribute DOMString width;
            attribute DOMString height;
   readonly attribute Document? contentDocument;
@@ -23,7 +26,7 @@ interface HTMLIFrameElement : HTMLElement {
 partial interface HTMLIFrameElement {
   //         attribute DOMString align;
   //         attribute DOMString scrolling;
-  //         attribute DOMString frameBorder;
+           attribute DOMString frameBorder;
   //         attribute DOMString longDesc;
 
   //[TreatNullAs=EmptyString] attribute DOMString marginHeight;

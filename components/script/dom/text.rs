@@ -8,7 +8,6 @@ use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::Bindings::TextBinding::{self, TextMethods};
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::error::{Error, Fallible};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::js::RootedReference;
@@ -16,6 +15,7 @@ use dom::bindings::str::DOMString;
 use dom::characterdata::CharacterData;
 use dom::document::Document;
 use dom::node::Node;
+use dom::window::Window;
 
 /// An HTML text node.
 #[dom_struct]
@@ -35,9 +35,9 @@ impl Text {
                            document, TextBinding::Wrap)
     }
 
-    pub fn Constructor(global: GlobalRef, text: DOMString) -> Fallible<Root<Text>> {
-        let document = global.as_window().Document();
-        Ok(Text::new(text, document.r()))
+    pub fn Constructor(window: &Window, text: DOMString) -> Fallible<Root<Text>> {
+        let document = window.Document();
+        Ok(Text::new(text, &document))
     }
 }
 

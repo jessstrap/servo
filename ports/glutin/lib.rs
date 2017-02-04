@@ -8,27 +8,28 @@
 
 #[macro_use] extern crate bitflags;
 extern crate compositing;
-#[allow(unused_extern_crates)]
 #[cfg(target_os = "android")] extern crate egl;
 extern crate euclid;
 extern crate gleam;
 extern crate glutin;
-extern crate layers;
 #[macro_use] extern crate log;
 extern crate msg;
 extern crate net_traits;
+#[cfg(any(target_os = "linux", target_os = "macos"))] extern crate osmesa_sys;
 extern crate script_traits;
+extern crate servo_config;
+extern crate servo_geometry;
+extern crate servo_url;
 extern crate style_traits;
-extern crate url;
-extern crate util;
-#[cfg(target_os = "linux")] extern crate x11;
+extern crate webrender_traits;
+
 #[cfg(target_os = "windows")] extern crate winapi;
 #[cfg(target_os = "windows")] extern crate user32;
 #[cfg(target_os = "windows")] extern crate gdi32;
 
 use compositing::windowing::WindowEvent;
+use servo_config::opts;
 use std::rc::Rc;
-use util::opts;
 use window::Window;
 
 pub mod window;

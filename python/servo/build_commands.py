@@ -12,6 +12,7 @@ from __future__ import print_function, unicode_literals
 import datetime
 import os
 import os.path as path
+import platform
 import sys
 import shutil
 
@@ -23,7 +24,8 @@ from mach.decorators import (
     Command,
 )
 
-from servo.command_base import CommandBase, cd, call, BIN_SUFFIX, host_triple
+from servo.command_base import CommandBase, cd, call, BIN_SUFFIX, find_dep_path_newest
+from servo.util import host_triple
 
 
 def format_duration(seconds):
@@ -91,24 +93,39 @@ def notify_darwin(title, text):
         raise Exception("Optional Python module 'pyobjc' is not installed.")
 
 
-def notify_build_done(elapsed, success=True):
+def notify_with_command(command):
+    def notify(title, text):
+        if call([command, title, text]) != 0:
+            raise Exception("Could not run '%s'." % command)
+    return notify
+
+
+def notify_build_done(config, elapsed, success=True):
     """Generate desktop notification when build is complete and the
     elapsed build time was longer than 30 seconds."""
     if elapsed > 30:
-        notify("Servo build", "%s in %s" % ("Completed" if success else "FAILED", format_duration(elapsed)))
+        notify(config, "Servo build",
+               "%s in %s" % ("Completed" if success else "FAILED", format_duration(elapsed)))
 
 
-def notify(title, text):
+def notify(config, title, text):
     """Generate a desktop notification using appropriate means on
     supported platforms Linux, Windows, and Mac OS.  On unsupported
-    platforms, this function acts as a no-op."""
-    platforms = {
-        "linux": notify_linux,
-        "linux2": notify_linux,
-        "win32": notify_win,
-        "darwin": notify_darwin
-    }
-    func = platforms.get(sys.platform)
+    platforms, this function acts as a no-op.
+
+    If notify-command is set in the [tools] section of the configuration,
+    that is used instead."""
+    notify_command = config["tools"].get("notify-command")
+    if notify_command:
+        func = notify_with_command(notify_command)
+    else:
+        platforms = {
+            "linux": notify_linux,
+            "linux2": notify_linux,
+            "win32": notify_win,
+            "darwin": notify_darwin
+        }
+        func = platforms.get(sys.platform)
 
     if func is not None:
         try:
@@ -152,8 +169,13 @@ class MachCommands(CommandBase):
                      help='Print verbose output')
     @CommandArgument('params', nargs='...',
                      help="Command-line arguments to be passed through to Cargo")
+    @CommandArgument('--with-debug-assertions',
+                     default=None,
+                     action='store_true',
+                     help='Enable debug assertions in release')
     def build(self, target=None, release=False, dev=False, jobs=None,
-              features=None, android=None, verbose=False, debug_mozjs=False, params=None):
+              features=None, android=None, verbose=False, debug_mozjs=False, params=None,
+              with_debug_assertions=False):
         if android is None:
             android = self.config["build"]["android"]
         features = features or self.servo_features()
@@ -208,13 +230,16 @@ class MachCommands(CommandBase):
         self.ensure_bootstrapped(target=target)
 
         if debug_mozjs:
-            features += ["script/debugmozjs"]
+            features += ["debugmozjs"]
 
         if features:
             opts += ["--features", "%s" % ' '.join(features)]
 
         build_start = time()
         env = self.build_env(target=target, is_build=True)
+
+        if with_debug_assertions:
+            env["RUSTFLAGS"] = "-C debug_assertions"
 
         if android:
             # Build OpenSSL for android
@@ -227,6 +252,7 @@ class MachCommands(CommandBase):
                 os.makedirs(openssl_dir)
             shutil.copy(path.join(self.android_support_dir(), "openssl.makefile"), openssl_dir)
             shutil.copy(path.join(self.android_support_dir(), "openssl.sh"), openssl_dir)
+            env["ANDROID_NDK_ROOT"] = env["ANDROID_NDK"]
             with cd(openssl_dir):
                 status = call(
                     make_cmd + ["-f", "openssl.makefile"],
@@ -238,6 +264,36 @@ class MachCommands(CommandBase):
             env['OPENSSL_LIB_DIR'] = openssl_dir
             env['OPENSSL_INCLUDE_DIR'] = path.join(openssl_dir, "include")
             env['OPENSSL_STATIC'] = 'TRUE'
+            # Android builds also require having the gcc bits on the PATH and various INCLUDE
+            # path munging if you do not want to install a standalone NDK. See:
+            # https://dxr.mozilla.org/mozilla-central/source/build/autoconf/android.m4#139-161
+            os_type = platform.system().lower()
+            if os_type not in ["linux", "darwin"]:
+                raise Exception("Android cross builds are only supported on Linux and macOS.")
+            cpu_type = platform.machine().lower()
+            host_suffix = "unknown"
+            if cpu_type in ["i386", "i486", "i686", "i768", "x86"]:
+                host_suffix = "x86"
+            elif cpu_type in ["x86_64", "x86-64", "x64", "amd64"]:
+                host_suffix = "x86_64"
+            host = os_type + "-" + host_suffix
+            env['PATH'] = path.join(
+                env['ANDROID_NDK'], "toolchains", "arm-linux-androideabi-4.9", "prebuilt", host, "bin"
+            ) + ':' + env['PATH']
+            env['ANDROID_SYSROOT'] = path.join(env['ANDROID_NDK'], "platforms", "android-18", "arch-arm")
+            support_include = path.join(env['ANDROID_NDK'], "sources", "android", "support", "include")
+            cxx_include = path.join(
+                env['ANDROID_NDK'], "sources", "cxx-stl", "llvm-libc++", "libcxx", "include")
+            cxxabi_include = path.join(
+                env['ANDROID_NDK'], "sources", "cxx-stl", "llvm-libc++abi", "libcxxabi", "include")
+            env['CFLAGS'] = ' '.join([
+                "--sysroot", env['ANDROID_SYSROOT'],
+                "-I" + support_include])
+            env['CXXFLAGS'] = ' '.join([
+                "--sysroot", env['ANDROID_SYSROOT'],
+                "-I" + support_include,
+                "-I" + cxx_include,
+                "-I" + cxxabi_include])
 
         cargo_binary = "cargo" + BIN_SUFFIX
 
@@ -257,16 +313,16 @@ class MachCommands(CommandBase):
                 # On windows, copy in our manifest
                 shutil.copy(path.join(self.get_top_dir(), "components", "servo", "servo.exe.manifest"),
                             servo_exe_dir)
-                if "msvc" in host_triple():
-                    # on msvc builds, use editbin to change the subsystem to windows
-                    call(["editbin", "/nologo", "/subsystem:windows", path.join(servo_exe_dir, "servo.exe")],
-                         verbose=verbose)
+                if "msvc" in (target or host_triple()):
+                    msvc_x64 = "64" if "x86_64" in (target or host_triple()) else ""
+                    # on msvc builds, use editbin to change the subsystem to windows, but only
+                    # on release builds -- on debug builds, it hides log output
+                    if not dev:
+                        call(["editbin", "/nologo", "/subsystem:windows", path.join(servo_exe_dir, "servo.exe")],
+                             verbose=verbose)
                     # on msvc, we need to copy in some DLLs in to the servo.exe dir
                     for ssl_lib in ["ssleay32md.dll", "libeay32md.dll"]:
-                        shutil.copy(path.join(os.getenv('OPENSSL_LIB_DIR'), "../bin64", ssl_lib),
-                                    servo_exe_dir)
-                    for ffmpeg_lib in ["avutil-55.dll", "avformat-57.dll", "avcodec-57.dll", "swresample-2.dll"]:
-                        shutil.copy(path.join(os.getenv('FFMPEG_LIB_DIR'), "../bin", ffmpeg_lib),
+                        shutil.copy(path.join(env['OPENSSL_LIB_DIR'], "../bin" + msvc_x64, ssl_lib),
                                     servo_exe_dir)
 
                 elif sys.platform == "darwin":
@@ -284,7 +340,7 @@ class MachCommands(CommandBase):
                         pass
 
         # Generate Desktop Notification if elapsed-time > some threshold value
-        notify_build_done(elapsed, status == 0)
+        notify_build_done(self.config, elapsed, status == 0)
 
         print("Build %s in %s" % ("Completed" if status == 0 else "FAILED", format_duration(elapsed)))
         return status
@@ -301,7 +357,12 @@ class MachCommands(CommandBase):
     @CommandArgument('--release', '-r',
                      action='store_true',
                      help='Build in release mode')
-    def build_cef(self, jobs=None, verbose=False, release=False):
+    @CommandArgument('--with-debug-assertions',
+                     default=None,
+                     action='store_true',
+                     help='Enable debug assertions in release')
+    def build_cef(self, jobs=None, verbose=False, release=False,
+                  with_debug_assertions=False):
         self.ensure_bootstrapped()
 
         ret = None
@@ -315,16 +376,22 @@ class MachCommands(CommandBase):
 
         servo_features = self.servo_features()
         if servo_features:
-            opts += ["--features", "%s" % ' '.join("servo/" + x for x in servo_features)]
+            opts += ["--features", "%s" % ' '.join(servo_features)]
 
         build_start = time()
+        env = self.build_env(is_build=True)
+
+        if with_debug_assertions:
+            env["RUSTFLAGS"] = "-C debug_assertions"
+
         with cd(path.join("ports", "cef")):
             ret = call(["cargo", "build"] + opts,
-                       env=self.build_env(is_build=True), verbose=verbose)
+                       env=env,
+                       verbose=verbose)
         elapsed = time() - build_start
 
         # Generate Desktop Notification if elapsed-time > some threshold value
-        notify_build_done(elapsed)
+        notify_build_done(self.config, elapsed)
 
         print("CEF build completed in %s" % format_duration(elapsed))
 
@@ -333,6 +400,9 @@ class MachCommands(CommandBase):
     @Command('build-geckolib',
              description='Build a static library of components used by Gecko',
              category='build')
+    @CommandArgument('--with-gecko',
+                     default=None,
+                     help='Build with Gecko dist directory')
     @CommandArgument('--jobs', '-j',
                      default=None,
                      help='Number of jobs to run in parallel')
@@ -342,12 +412,19 @@ class MachCommands(CommandBase):
     @CommandArgument('--release', '-r',
                      action='store_true',
                      help='Build in release mode')
-    def build_geckolib(self, jobs=None, verbose=False, release=False):
+    def build_geckolib(self, with_gecko=None, jobs=None, verbose=False, release=False):
         self.set_use_stable_rust()
         self.ensure_bootstrapped()
 
+        env = self.build_env(is_build=True)
+        geckolib_build_path = path.join(self.context.topdir, "target", "geckolib").encode("UTF-8")
+        env["CARGO_TARGET_DIR"] = geckolib_build_path
+
         ret = None
         opts = []
+        if with_gecko is not None:
+            opts += ["--features", "bindgen"]
+            env["MOZ_DIST"] = path.abspath(path.expanduser(with_gecko))
         if jobs is not None:
             opts += ["-j", jobs]
         if verbose:
@@ -355,8 +432,13 @@ class MachCommands(CommandBase):
         if release:
             opts += ["--release"]
 
-        env = self.build_env(is_build=True)
-        env["CARGO_TARGET_DIR"] = path.join(self.context.topdir, "target", "geckolib").encode("UTF-8")
+        if with_gecko is not None:
+            print("Generating atoms data...")
+            run_file = path.join(self.context.topdir, "components",
+                                 "style", "binding_tools", "regen_atoms.py")
+            run_globals = {"__file__": run_file}
+            execfile(run_file, run_globals)
+            run_globals["generate_atoms"](env["MOZ_DIST"])
 
         build_start = time()
         with cd(path.join("ports", "geckolib")):
@@ -364,9 +446,18 @@ class MachCommands(CommandBase):
         elapsed = time() - build_start
 
         # Generate Desktop Notification if elapsed-time > some threshold value
-        notify_build_done(elapsed)
+        notify_build_done(self.config, elapsed)
 
         print("GeckoLib build completed in %s" % format_duration(elapsed))
+
+        if with_gecko is not None:
+            print("Copying binding files to style/gecko_bindings...")
+            build_path = path.join(geckolib_build_path, "release" if release else "debug", "")
+            target_style_path = find_dep_path_newest("style", build_path)
+            out_gecko_path = path.join(target_style_path, "out", "gecko")
+            bindings_path = path.join(self.context.topdir, "components", "style", "gecko_bindings")
+            for f in ["bindings.rs", "structs_debug.rs", "structs_release.rs"]:
+                shutil.copy(path.join(out_gecko_path, f), bindings_path)
 
         return ret
 

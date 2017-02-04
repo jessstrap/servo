@@ -3,20 +3,20 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmllinkelement
-[Exposed=(Window,Worker)]
 interface HTMLLinkElement : HTMLElement {
            attribute DOMString href;
-  //         attribute DOMString crossOrigin;
+           attribute DOMString? crossOrigin;
            attribute DOMString rel;
   readonly attribute DOMTokenList relList;
            attribute DOMString media;
            attribute DOMString hreflang;
            attribute DOMString type;
+           attribute DOMString integrity;
   // [SameObject, PutForwards=value] readonly attribute DOMTokenList sizes;
 
   // also has obsolete members
 };
-//HTMLLinkElement implements LinkStyle;
+HTMLLinkElement implements LinkStyle;
 
 // https://html.spec.whatwg.org/multipage/#HTMLLinkElement-partial
 partial interface HTMLLinkElement {

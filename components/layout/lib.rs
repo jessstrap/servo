@@ -4,21 +4,18 @@
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(custom_derive)]
+#![feature(conservative_impl_trait)]
 #![feature(nonzero)]
 #![feature(plugin)]
 #![feature(raw)]
 #![feature(step_by)]
-#![feature(unsafe_no_drop_flag)]
 
 #![deny(unsafe_code)]
 
-#![plugin(heapsize_plugin)]
 #![plugin(plugins)]
 
 extern crate app_units;
-extern crate azure;
-#[allow(unused_extern_crates)]
+extern crate atomic_refcell;
 #[macro_use]
 extern crate bitflags;
 extern crate canvas_traits;
@@ -29,6 +26,7 @@ extern crate fnv;
 extern crate gfx;
 extern crate gfx_traits;
 extern crate heapsize;
+#[macro_use] extern crate html5ever_atoms;
 extern crate ipc_channel;
 extern crate libc;
 #[macro_use]
@@ -36,25 +34,25 @@ extern crate log;
 extern crate msg;
 extern crate net_traits;
 extern crate ordered_float;
-#[macro_use]
-#[no_link]
-extern crate plugins as servo_plugins;
-#[macro_use]
+extern crate parking_lot;
 extern crate profile_traits;
 #[macro_use]
 extern crate range;
-extern crate rustc_serialize;
+extern crate rayon;
 extern crate script_layout_interface;
 extern crate script_traits;
-extern crate selectors;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde_json;
+extern crate servo_config;
+extern crate servo_geometry;
+extern crate servo_url;
 extern crate smallvec;
-#[macro_use(atom, ns)] extern crate string_cache;
 extern crate style;
 extern crate style_traits;
 extern crate unicode_bidi;
 extern crate unicode_script;
-extern crate url;
-extern crate util;
 extern crate webrender_traits;
 
 #[macro_use]
@@ -98,3 +96,4 @@ pub mod wrapper;
 
 // For unit tests:
 pub use fragment::Fragment;
+pub use fragment::SpecificFragmentInfo;

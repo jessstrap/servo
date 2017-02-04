@@ -3,15 +3,16 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use immeta::load_from_buf;
-use ipc_channel::ipc::{self, IpcSender, IpcReceiver};
+use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
-use msg::constellation_msg::{PipelineId, ReferrerPolicy};
-use net_traits::image::base::{Image, ImageMetadata, load_from_memory, PixelFormat};
-use net_traits::image_cache_thread::ImageResponder;
+use net_traits::{CoreResourceThread, NetworkError, fetch_async, FetchResponseMsg};
+use net_traits::image::base::{Image, ImageMetadata, PixelFormat, load_from_memory};
 use net_traits::image_cache_thread::{ImageCacheChan, ImageCacheCommand, ImageCacheThread, ImageState};
 use net_traits::image_cache_thread::{ImageCacheResult, ImageOrMetadataAvailable, ImageResponse, UsePlaceholder};
-use net_traits::{AsyncResponseTarget, CoreResourceMsg, LoadConsumer, LoadData, CoreResourceThread, LoadOrigin};
-use net_traits::{ResponseAction, LoadContext, NetworkError};
+use net_traits::image_cache_thread::ImageResponder;
+use net_traits::request::{Destination, RequestInit, Type as RequestType};
+use servo_config::resource_files::resources_dir_path;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
@@ -19,11 +20,9 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::mem;
 use std::sync::Arc;
-use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
 use threadpool::ThreadPool;
-use url::Url;
-use util::resource_files::resources_dir_path;
-use util::thread::spawn_named;
 use webrender_traits;
 
 ///
@@ -33,6 +32,26 @@ use webrender_traits;
 ///
 /// MAYBE(Yoric):
 ///     * For faster lookups, it might be useful to store the LoadKey in the DOM once we have performed a first load.
+
+// TODO(gw): This is a port of the old is_image_opaque code from WR.
+//           Consider using SIMD to speed this up if it shows in profiles.
+fn is_image_opaque(format: webrender_traits::ImageFormat, bytes: &[u8]) -> bool {
+    match format {
+        webrender_traits::ImageFormat::RGBA8 => {
+            let mut is_opaque = true;
+            for i in 0..(bytes.len() / 4) {
+                if bytes[i * 4 + 3] != 255 {
+                    is_opaque = false;
+                    break;
+                }
+            }
+            is_opaque
+        }
+        webrender_traits::ImageFormat::RGB8 => true,
+        webrender_traits::ImageFormat::A8 => false,
+        webrender_traits::ImageFormat::Invalid | webrender_traits::ImageFormat::RGBAF32 => unreachable!(),
+    }
+}
 
 /// Represents an image that is either being loaded
 /// by the resource thread, or decoded by a worker thread.
@@ -50,7 +69,7 @@ struct PendingLoad {
 
     // The url being loaded. Do not forget that this may be several Mb
     // if we are loading a data: url.
-    url: Arc<Url>
+    url: ServoUrl,
 }
 
 enum LoadResult {
@@ -60,7 +79,7 @@ enum LoadResult {
 }
 
 impl PendingLoad {
-    fn new(url: Arc<Url>) -> PendingLoad {
+    fn new(url: ServoUrl) -> PendingLoad {
         PendingLoad {
             bytes: vec!(),
             metadata: None,
@@ -84,7 +103,7 @@ struct AllPendingLoads {
 
     // Get a load key from its url. Used ony when starting and
     // finishing a load or when adding a new listener.
-    url_to_load_key: HashMap<Arc<Url>, LoadKey>,
+    url_to_load_key: HashMap<ServoUrl, LoadKey>,
 
     // A counter used to generate instances of LoadKey
     keygen: LoadKeyGenerator,
@@ -119,7 +138,7 @@ impl AllPendingLoads {
     }
 
     // get a PendingLoad from its url. When possible, prefer `get_by_key_mut`.
-    fn get_by_url(&self, url: &Url) -> Option<&PendingLoad> {
+    fn get_by_url(&self, url: &ServoUrl) -> Option<&PendingLoad> {
         self.url_to_load_key.get(url).
             and_then(|load_key|
                 self.loads.get(load_key)
@@ -134,7 +153,7 @@ impl AllPendingLoads {
             })
     }
 
-    fn get_cached(&mut self, url: Arc<Url>) -> (CacheResult, LoadKey, &mut PendingLoad) {
+    fn get_cached(&mut self, url: ServoUrl) -> (CacheResult, LoadKey, &mut PendingLoad) {
         match self.url_to_load_key.entry(url.clone()) {
             Occupied(url_entry) => {
                 let load_key = url_entry.get();
@@ -227,7 +246,7 @@ impl ImageListener {
 }
 
 struct ResourceLoadInfo {
-    action: ResponseAction,
+    action: FetchResponseMsg,
     key: LoadKey,
 }
 
@@ -247,13 +266,13 @@ struct ImageCache {
     pending_loads: AllPendingLoads,
 
     // Images that have finished loading (successful or not)
-    completed_loads: HashMap<Arc<Url>, CompletedLoad>,
+    completed_loads: HashMap<ServoUrl, CompletedLoad>,
 
     // The placeholder image used when an image fails to load
     placeholder_image: Option<Arc<Image>>,
 
-    // Webrender API instance, if enabled.
-    webrender_api: Option<webrender_traits::RenderApi>,
+    // Webrender API instance.
+    webrender_api: webrender_traits::RenderApi,
 }
 
 /// Message that the decoder worker threads send to main image cache thread.
@@ -305,37 +324,31 @@ fn convert_format(format: PixelFormat) -> webrender_traits::ImageFormat {
     }
 }
 
-struct ImageCacheOrigin;
-impl LoadOrigin for ImageCacheOrigin {
-    fn referrer_url(&self) -> Option<Url> {
-        None
-    }
-    fn referrer_policy(&self) -> Option<ReferrerPolicy> {
-        None
-    }
-    fn pipeline_id(&self) -> Option<PipelineId> {
-        None
-    }
-}
-
-fn get_placeholder_image(webrender_api: &Option<webrender_traits::RenderApi>) -> io::Result<Arc<Image>> {
+fn get_placeholder_image(webrender_api: &webrender_traits::RenderApi) -> io::Result<Arc<Image>> {
     let mut placeholder_path = try!(resources_dir_path());
     placeholder_path.push("rippy.png");
     let mut file = try!(File::open(&placeholder_path));
     let mut image_data = vec![];
     try!(file.read_to_end(&mut image_data));
     let mut image = load_from_memory(&image_data).unwrap();
-    if let Some(ref webrender_api) = *webrender_api {
-        let format = convert_format(image.format);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&*image.bytes);
-        image.id = Some(webrender_api.add_image(image.width, image.height, format, bytes));
-    }
+    let format = convert_format(image.format);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&*image.bytes);
+    let descriptor = webrender_traits::ImageDescriptor {
+        width: image.width,
+        height: image.height,
+        stride: None,
+        format: format,
+        is_opaque: is_image_opaque(format, &bytes),
+    };
+    let data = webrender_traits::ImageData::new(bytes);
+    image.id = Some(webrender_api.add_image(descriptor, data));
     Ok(Arc::new(image))
 }
+
 impl ImageCache {
     fn run(core_resource_thread: CoreResourceThread,
-           webrender_api: Option<webrender_traits::RenderApi>,
+           webrender_api: webrender_traits::RenderApi,
            ipc_command_receiver: IpcReceiver<ImageCacheCommand>) {
         // Preload the placeholder image, used when images fail to load.
         let placeholder_image = get_placeholder_image(&webrender_api).ok();
@@ -418,8 +431,10 @@ impl ImageCache {
     // Handle progress messages from the resource thread
     fn handle_progress(&mut self, msg: ResourceLoadInfo) {
         match (msg.action, msg.key) {
-            (ResponseAction::HeadersAvailable(_), _) => {}
-            (ResponseAction::DataAvailable(data), _) => {
+            (FetchResponseMsg::ProcessRequestBody, _) |
+            (FetchResponseMsg::ProcessRequestEOF, _) => return,
+            (FetchResponseMsg::ProcessResponse(_), _) => {}
+            (FetchResponseMsg::ProcessResponseChunk(data), _) => {
                 let pending_load = self.pending_loads.get_by_key_mut(&msg.key).unwrap();
                 pending_load.bytes.extend_from_slice(&data);
                 //jmr0 TODO: possibly move to another task?
@@ -435,7 +450,7 @@ impl ImageCache {
                     }
                 }
             }
-            (ResponseAction::ResponseComplete(result), key) => {
+            (FetchResponseMsg::ProcessResponseEOF(result), key) => {
                 match result {
                     Ok(()) => {
                         let pending_load = self.pending_loads.get_by_key_mut(&msg.key).unwrap();
@@ -479,16 +494,22 @@ impl ImageCache {
     fn complete_load(&mut self, key: LoadKey, mut load_result: LoadResult) {
         let pending_load = self.pending_loads.remove(&key).unwrap();
 
-        if let Some(ref webrender_api) = self.webrender_api {
-            match load_result {
-                LoadResult::Loaded(ref mut image) => {
-                    let format = convert_format(image.format);
-                    let mut bytes = Vec::new();
-                    bytes.extend_from_slice(&*image.bytes);
-                    image.id = Some(webrender_api.add_image(image.width, image.height, format, bytes));
-                }
-                LoadResult::PlaceholderLoaded(..) | LoadResult::None => {}
+        match load_result {
+            LoadResult::Loaded(ref mut image) => {
+                let format = convert_format(image.format);
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&*image.bytes);
+                let descriptor = webrender_traits::ImageDescriptor {
+                    width: image.width,
+                    height: image.height,
+                    stride: None,
+                    format: format,
+                    is_opaque: is_image_opaque(format, &bytes),
+                };
+                let data = webrender_traits::ImageData::new(bytes);
+                image.id = Some(self.webrender_api.add_image(descriptor, data));
             }
+            LoadResult::PlaceholderLoaded(..) | LoadResult::None => {}
         }
 
         let image_response = match load_result {
@@ -498,7 +519,7 @@ impl ImageCache {
         };
 
         let completed_load = CompletedLoad::new(image_response.clone());
-        self.completed_loads.insert(pending_load.url, completed_load);
+        self.completed_loads.insert(pending_load.url.into(), completed_load);
 
         for listener in pending_load.listeners {
             listener.notify(image_response.clone());
@@ -511,47 +532,50 @@ impl ImageCache {
     // that image metadata is available, possibly before the image has finished
     // loading.
     fn request_image(&mut self,
-                     url: Url,
+                     url: ServoUrl,
                      result_chan: ImageCacheChan,
                      responder: Option<ImageResponder>,
                      send_metadata_msg: bool) {
         let image_listener = ImageListener::new(result_chan, responder, send_metadata_msg);
-        // Let's avoid copying url everywhere.
-        let ref_url = Arc::new(url);
 
         // Check if already completed
-        match self.completed_loads.get(&ref_url) {
+        match self.completed_loads.get(&url) {
             Some(completed_load) => {
                 // It's already completed, return a notify straight away
                 image_listener.notify(completed_load.image_response.clone());
             }
             None => {
                 // Check if the load is already pending
-                let (cache_result, load_key, mut pending_load) = self.pending_loads.get_cached(ref_url.clone());
+                let (cache_result, load_key, mut pending_load) = self.pending_loads.get_cached(url.clone());
                 pending_load.add_listener(image_listener);
                 match cache_result {
                     CacheResult::Miss => {
                         // A new load request! Request the load from
                         // the resource thread.
-                        let load_data = LoadData::new(LoadContext::Image,
-                                                        (*ref_url).clone(),
-                                                        &ImageCacheOrigin);
-                        let (action_sender, action_receiver) = ipc::channel().unwrap();
-                        let response_target = AsyncResponseTarget {
-                            sender: action_sender,
+                        // https://html.spec.whatwg.org/multipage/#update-the-image-data
+                        // step 12.
+                        //
+                        // TODO(emilio): ServoUrl in more places please!
+                        let request = RequestInit {
+                            url: url.clone(),
+                            type_: RequestType::Image,
+                            destination: Destination::Image,
+                            origin: url.clone(),
+                            .. RequestInit::default()
                         };
-                        let msg = CoreResourceMsg::Load(load_data,
-                                                   LoadConsumer::Listener(response_target),
-                                                   None);
+
                         let progress_sender = self.progress_sender.clone();
-                        ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
-                            let action: ResponseAction = message.to().unwrap();
+                        fetch_async(request, &self.core_resource_thread, move |action| {
+                            let action = match action {
+                                FetchResponseMsg::ProcessRequestBody |
+                                FetchResponseMsg::ProcessRequestEOF => return,
+                                a => a
+                            };
                             progress_sender.send(ResourceLoadInfo {
                                 action: action,
                                 key: load_key,
                             }).unwrap();
                         });
-                        self.core_resource_thread.send(msg).unwrap();
                     }
                     CacheResult::Hit => {
                         // Request is already on its way.
@@ -562,9 +586,9 @@ impl ImageCache {
     }
 
     fn get_image_if_available(&mut self,
-                                   url: Url,
-                                   placeholder: UsePlaceholder, )
-                                   -> Result<Arc<Image>, ImageState> {
+                              url: ServoUrl,
+                              placeholder: UsePlaceholder, )
+                              -> Result<Arc<Image>, ImageState> {
        let img_or_metadata = self.get_image_or_meta_if_available(url, placeholder);
        match img_or_metadata {
             Ok(ImageOrMetadataAvailable::ImageAvailable(image)) => Ok(image),
@@ -574,7 +598,7 @@ impl ImageCache {
     }
 
     fn get_image_or_meta_if_available(&mut self,
-                                      url: Url,
+                                      url: ServoUrl,
                                       placeholder: UsePlaceholder)
                                       -> Result<ImageOrMetadataAvailable, ImageState> {
         match self.completed_loads.get(&url) {
@@ -608,16 +632,16 @@ impl ImageCache {
     }
 
     fn store_decode_image(&mut self,
-                          ref_url: Url,
+                          ref_url: ServoUrl,
                           loaded_bytes: Vec<u8>) {
-        let (cache_result, load_key, _) = self.pending_loads.get_cached(Arc::new(ref_url));
+        let (cache_result, load_key, _) = self.pending_loads.get_cached(ref_url.clone());
         assert!(cache_result == CacheResult::Miss);
-        let action = ResponseAction::DataAvailable(loaded_bytes);
+        let action = FetchResponseMsg::ProcessResponseChunk(loaded_bytes);
         let _ = self.progress_sender.send(ResourceLoadInfo {
             action: action,
             key: load_key,
         });
-        let action = ResponseAction::ResponseComplete(Ok(()));
+        let action = FetchResponseMsg::ProcessResponseEOF(Ok(()));
         let _ = self.progress_sender.send(ResourceLoadInfo {
             action: action,
             key: load_key,
@@ -627,12 +651,12 @@ impl ImageCache {
 
 /// Create a new image cache.
 pub fn new_image_cache_thread(core_resource_thread: CoreResourceThread,
-                              webrender_api: Option<webrender_traits::RenderApi>) -> ImageCacheThread {
+                              webrender_api: webrender_traits::RenderApi) -> ImageCacheThread {
     let (ipc_command_sender, ipc_command_receiver) = ipc::channel().unwrap();
 
-    spawn_named("ImageCacheThread".to_owned(), move || {
+    thread::Builder::new().name("ImageCacheThread".to_owned()).spawn(move || {
         ImageCache::run(core_resource_thread, webrender_api, ipc_command_receiver)
-    });
+    }).expect("Thread spawning failed");
 
     ImageCacheThread::new(ipc_command_sender)
 }

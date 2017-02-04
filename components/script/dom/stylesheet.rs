@@ -4,12 +4,12 @@
 
 use dom::bindings::codegen::Bindings::StyleSheetBinding;
 use dom::bindings::codegen::Bindings::StyleSheetBinding::StyleSheetMethods;
-use dom::bindings::global::GlobalRef;
+use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
+use dom::cssstylesheet::CSSStyleSheet;
 use dom::window::Window;
-
 
 #[dom_struct]
 pub struct StyleSheet {
@@ -21,12 +21,14 @@ pub struct StyleSheet {
 
 impl StyleSheet {
     #[allow(unrooted_must_root)]
-    fn new_inherited(type_: DOMString, href: Option<DOMString>, title: Option<DOMString>) -> StyleSheet {
+    pub fn new_inherited(type_: DOMString,
+                         href: Option<DOMString>,
+                         title: Option<DOMString>) -> StyleSheet {
         StyleSheet {
             reflector_: Reflector::new(),
             type_: type_,
             href: href,
-            title: title
+            title: title,
         }
     }
 
@@ -35,7 +37,7 @@ impl StyleSheet {
                href: Option<DOMString>,
                title: Option<DOMString>) -> Root<StyleSheet> {
         reflect_dom_object(box StyleSheet::new_inherited(type_, href, title),
-                           GlobalRef::Window(window),
+                           window,
                            StyleSheetBinding::Wrap)
     }
 }
@@ -56,5 +58,14 @@ impl StyleSheetMethods for StyleSheet {
     fn GetTitle(&self) -> Option<DOMString> {
         self.title.clone()
     }
-}
 
+    // https://drafts.csswg.org/cssom/#dom-stylesheet-disabled
+    fn Disabled(&self) -> bool {
+        self.downcast::<CSSStyleSheet>().unwrap().disabled()
+    }
+
+    // https://drafts.csswg.org/cssom/#dom-stylesheet-disabled
+    fn SetDisabled(&self, disabled: bool) {
+        self.downcast::<CSSStyleSheet>().unwrap().set_disabled(disabled)
+    }
+}

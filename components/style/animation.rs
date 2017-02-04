@@ -3,23 +3,23 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 //! CSS transitions and animations.
+#![deny(missing_docs)]
 
+use Atom;
 use bezier::Bezier;
 use context::SharedStyleContext;
-use dom::OpaqueNode;
+use dom::{OpaqueNode, UnsafeNode};
 use euclid::point::Point2D;
 use keyframes::{KeyframesStep, KeyframesStepValue};
+use properties::{self, CascadeFlags, ComputedValues, Importance};
 use properties::animated_properties::{AnimatedProperty, TransitionProperty};
-use properties::longhands::animation_direction::computed_value::AnimationDirection;
-use properties::longhands::animation_iteration_count::computed_value::AnimationIterationCount;
-use properties::longhands::animation_play_state::computed_value::AnimationPlayState;
-use properties::longhands::transition_timing_function::computed_value::StartEnd;
-use properties::longhands::transition_timing_function::computed_value::TransitionTimingFunction;
-use properties::{self, ComputedValues};
-use selectors::matching::DeclarationBlock;
+use properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
+use properties::longhands::animation_iteration_count::single_value::computed_value::T as AnimationIterationCount;
+use properties::longhands::animation_play_state::computed_value::single_value::T as AnimationPlayState;
+use properties::longhands::transition_timing_function::single_value::computed_value::StartEnd;
+use properties::longhands::transition_timing_function::single_value::computed_value::T as TransitionTimingFunction;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use string_cache::Atom;
 use timer::Timer;
 use values::computed::Time;
 
@@ -29,9 +29,10 @@ use values::computed::Time;
 /// have to keep track the current iteration and the max iteration count.
 #[derive(Debug, Clone)]
 pub enum KeyframesIterationState {
+    /// Infinite iterations, so no need to track a state.
     Infinite,
-    // current, max
-    Finite(u32, u32),
+    /// Current and max iterations.
+    Finite(f32, f32),
 }
 
 /// This structure represents wether an animation is actually running.
@@ -91,7 +92,7 @@ impl KeyframesAnimationState {
         }
 
         if let KeyframesIterationState::Finite(ref mut current, ref max) = self.iteration_state {
-            *current += 1;
+            *current += 1.0;
             // NB: This prevent us from updating the direction, which might be
             // needed for the correct handling of animation-fill-mode.
             if *current >= *max {
@@ -186,38 +187,42 @@ pub enum Animation {
     /// the f64 field is the start time as returned by `time::precise_time_s()`.
     ///
     /// The `bool` field is werther this animation should no longer run.
-    Transition(OpaqueNode, f64, AnimationFrame, bool),
+    Transition(OpaqueNode, UnsafeNode, f64, AnimationFrame, bool),
     /// A keyframes animation is identified by a name, and can have a
     /// node-dependent state (i.e. iteration count, etc.).
     Keyframes(OpaqueNode, Atom, KeyframesAnimationState),
 }
 
 impl Animation {
+    /// Mark this animation as expired.
     #[inline]
     pub fn mark_as_expired(&mut self) {
         debug_assert!(!self.is_expired());
         match *self {
-            Animation::Transition(_, _, _, ref mut expired) => *expired = true,
+            Animation::Transition(_, _, _, _, ref mut expired) => *expired = true,
             Animation::Keyframes(_, _, ref mut state) => state.expired = true,
         }
     }
 
+    /// Whether this animation is expired.
     #[inline]
     pub fn is_expired(&self) -> bool {
         match *self {
-            Animation::Transition(_, _, _, expired) => expired,
+            Animation::Transition(_, _, _, _, expired) => expired,
             Animation::Keyframes(_, _, ref state) => state.expired,
         }
     }
 
+    /// The opaque node that owns the animation.
     #[inline]
     pub fn node(&self) -> &OpaqueNode {
         match *self {
-            Animation::Transition(ref node, _, _, _) => node,
+            Animation::Transition(ref node, _, _, _, _) => node,
             Animation::Keyframes(ref node, _, _) => node,
         }
     }
 
+    /// Whether this animation is paused. A transition can never be paused.
     #[inline]
     pub fn is_paused(&self) -> bool {
         match *self {
@@ -238,6 +243,7 @@ pub struct AnimationFrame {
     pub duration: f64,
 }
 
+/// Represents an animation for a given property.
 #[derive(Debug, Clone)]
 pub struct PropertyAnimation {
     property: AnimatedProperty,
@@ -246,9 +252,15 @@ pub struct PropertyAnimation {
 }
 
 impl PropertyAnimation {
-    /// Creates a new property animation for the given transition index and old and new styles.
-    /// Any number of animations may be returned, from zero (if the property did not animate) to
-    /// one (for a single transition property) to arbitrarily many (for `all`).
+    /// Returns the given property name.
+    pub fn property_name(&self) -> &'static str {
+        self.property.name()
+    }
+
+    /// Creates a new property animation for the given transition index and old
+    /// and new styles.  Any number of animations may be returned, from zero (if
+    /// the property did not animate) to one (for a single transition property)
+    /// to arbitrarily many (for `all`).
     pub fn from_transition(transition_index: usize,
                            old_style: &ComputedValues,
                            new_style: &mut ComputedValues)
@@ -309,6 +321,7 @@ impl PropertyAnimation {
         }
     }
 
+    /// Update the given animation at a given point of progress.
     pub fn update(&self, style: &mut ComputedValues, time: f64) {
         let progress = match self.timing_function {
             TransitionTimingFunction::CubicBezier(p1, p2) => {
@@ -332,6 +345,12 @@ impl PropertyAnimation {
     fn does_animate(&self) -> bool {
         self.property.does_animate() && self.duration != Time(0.0)
     }
+
+    /// Whether this animation has the same end value as another one.
+    #[inline]
+    pub fn has_the_same_end_value_as(&self, other: &Self) -> bool {
+        self.property.has_the_same_end_value_as(&other.property)
+    }
 }
 
 /// Inserts transitions into the queue of running animations as applicable for
@@ -341,16 +360,30 @@ impl PropertyAnimation {
 // TODO(emilio): Take rid of this mutex splitting SharedLayoutContex into a
 // cloneable part and a non-cloneable part..
 pub fn start_transitions_if_applicable(new_animations_sender: &Sender<Animation>,
-                                       node: OpaqueNode,
+                                       opaque_node: OpaqueNode,
+                                       unsafe_node: UnsafeNode,
                                        old_style: &ComputedValues,
                                        new_style: &mut Arc<ComputedValues>,
-                                       timer: &Timer)
+                                       timer: &Timer,
+                                       possibly_expired_animations: &[PropertyAnimation])
                                        -> bool {
     let mut had_animations = false;
     for i in 0..new_style.get_box().transition_property_count() {
         // Create any property animations, if applicable.
-        let property_animations = PropertyAnimation::from_transition(i, old_style, Arc::make_mut(new_style));
+        let property_animations = PropertyAnimation::from_transition(i,
+                                                                     old_style,
+                                                                     Arc::make_mut(new_style));
         for property_animation in property_animations {
+            // Per [1], don't trigger a new transition if the end state for that transition is
+            // the same as that of a transition that's already running on the same node.
+            //
+            // [1]: https://drafts.csswg.org/css-transitions/#starting
+            if possibly_expired_animations.iter().any(|animation| {
+                    animation.has_the_same_end_value_as(&property_animation)
+               }) {
+                continue
+            }
+
             // Set the property to the initial value.
             // NB: get_mut is guaranteed to succeed since we called make_mut()
             // above.
@@ -362,7 +395,7 @@ pub fn start_transitions_if_applicable(new_animations_sender: &Sender<Animation>
             let start_time =
                 now + (box_style.transition_delay_mod(i).seconds() as f64);
             new_animations_sender
-                .send(Animation::Transition(node, start_time, AnimationFrame {
+                .send(Animation::Transition(opaque_node, unsafe_node, start_time, AnimationFrame {
                     duration: box_style.transition_duration_mod(i).seconds() as f64,
                     property_animation: property_animation,
                 }, /* is_expired = */ false)).unwrap();
@@ -380,27 +413,35 @@ fn compute_style_for_animation_step(context: &SharedStyleContext,
                                     style_from_cascade: &ComputedValues)
                                     -> ComputedValues {
     match step.value {
-        // TODO: avoiding this spurious clone might involve having to create
-        // an Arc in the below (more common case).
         KeyframesStepValue::ComputedValues => style_from_cascade.clone(),
-        KeyframesStepValue::Declarations(ref declarations) => {
-            let declaration_block = DeclarationBlock {
-                declarations: declarations.clone(),
-                source_order: 0,
-                specificity: ::std::u32::MAX,
+        KeyframesStepValue::Declarations { block: ref declarations } => {
+            let guard = declarations.read();
+
+            // No !important in keyframes.
+            debug_assert!(guard.declarations.iter()
+                            .all(|&(_, importance)| importance == Importance::Normal));
+
+            let iter = || {
+                guard.declarations.iter().rev().map(|&(ref decl, _importance)| decl)
             };
-            let (computed, _) = properties::cascade(context.viewport_size,
-                                                    &[declaration_block],
-                                                    false,
-                                                    Some(previous_style),
-                                                    None,
-                                                    None,
-                                                    context.error_reporter.clone());
+
+            let computed =
+                properties::apply_declarations(context.viewport_size,
+                                               /* is_root = */ false,
+                                               iter,
+                                               previous_style,
+                                               &context.default_computed_values,
+                                               /* cascade_info = */ None,
+                                               context.error_reporter.clone(),
+                                               /* Metrics provider */ None,
+                                               CascadeFlags::empty());
             computed
         }
     }
 }
 
+/// Triggers animations for a given node looking at the animation property
+/// values.
 pub fn maybe_start_animations(context: &SharedStyleContext,
                               new_animations_sender: &Sender<Animation>,
                               node: OpaqueNode,
@@ -416,7 +457,7 @@ pub fn maybe_start_animations(context: &SharedStyleContext,
             continue
         }
 
-        if let Some(ref anim) = context.stylist.animations().get(&name) {
+        if let Some(ref anim) = context.stylist.animations().get(&name.0) {
             debug!("maybe_start_animations: animation {} found", name);
 
             // If this animation doesn't have any keyframe, we can just continue
@@ -433,7 +474,7 @@ pub fn maybe_start_animations(context: &SharedStyleContext,
             let duration = box_style.animation_duration_mod(i).seconds();
             let iteration_state = match box_style.animation_iteration_count_mod(i) {
                 AnimationIterationCount::Infinite => KeyframesIterationState::Infinite,
-                AnimationIterationCount::Number(n) => KeyframesIterationState::Finite(0, n),
+                AnimationIterationCount::Number(n) => KeyframesIterationState::Finite(0.0, n),
             };
 
             let animation_direction = box_style.animation_direction_mod(i);
@@ -452,7 +493,7 @@ pub fn maybe_start_animations(context: &SharedStyleContext,
 
 
             new_animations_sender
-                .send(Animation::Keyframes(node, name.clone(), KeyframesAnimationState {
+                .send(Animation::Keyframes(node, name.0.clone(), KeyframesAnimationState {
                     started_at: animation_start,
                     duration: duration as f64,
                     delay: delay as f64,
@@ -498,7 +539,7 @@ pub fn update_style_for_animation(context: &SharedStyleContext,
     debug_assert!(!animation.is_expired());
 
     match *animation {
-        Animation::Transition(_, start_time, ref frame, _) => {
+        Animation::Transition(_, _, start_time, ref frame, _) => {
             debug!("update_style_for_animation: transition found");
             let now = context.timer.seconds();
             let mut new_style = (*style).clone();
@@ -531,7 +572,7 @@ pub fn update_style_for_animation(context: &SharedStyleContext,
 
             let maybe_index = style.get_box()
                                    .animation_name_iter()
-                                   .position(|animation_name| *name == animation_name);
+                                   .position(|animation_name| *name == animation_name.0);
 
             let index = match maybe_index {
                 Some(index) => index,
@@ -666,13 +707,13 @@ pub fn complete_expired_transitions(node: OpaqueNode, style: &mut Arc<ComputedVa
                                     context: &SharedStyleContext) -> bool {
     let had_animations_to_expire;
     {
-        let all_expired_animations = context.expired_animations.read().unwrap();
+        let all_expired_animations = context.expired_animations.read();
         let animations_to_expire = all_expired_animations.get(&node);
         had_animations_to_expire = animations_to_expire.is_some();
         if let Some(ref animations) = animations_to_expire {
             for animation in *animations {
                 // TODO: support animation-fill-mode
-                if let Animation::Transition(_, _, ref frame, _) = *animation {
+                if let Animation::Transition(_, _, _, ref frame, _) = *animation {
                     frame.property_animation.update(Arc::make_mut(style), 1.0);
                 }
             }
@@ -680,9 +721,8 @@ pub fn complete_expired_transitions(node: OpaqueNode, style: &mut Arc<ComputedVa
     }
 
     if had_animations_to_expire {
-        context.expired_animations.write().unwrap().remove(&node);
+        context.expired_animations.write().remove(&node);
     }
 
     had_animations_to_expire
 }
-

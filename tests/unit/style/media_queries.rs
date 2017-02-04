@@ -2,16 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use app_units::Au;
 use cssparser::{Parser, SourcePosition};
 use euclid::size::TypedSize2D;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
+use style::Atom;
 use style::error_reporting::ParseErrorReporter;
 use style::media_queries::*;
 use style::parser::ParserContextExtraData;
-use style::stylesheets::{Stylesheet, Origin, CSSRuleIteratorExt};
+use style::servo::media_queries::*;
+use style::stylesheets::{Stylesheet, Origin, CssRule};
 use style::values::specified;
-use url::Url;
+use style_traits::ToCss;
 
 pub struct CSSErrorReporterTest;
 
@@ -23,34 +25,51 @@ impl ParseErrorReporter for CSSErrorReporterTest {
      }
 }
 
-fn test_media_rule<F>(css: &str, callback: F) where F: Fn(&MediaQueryList, &str) {
-    let url = Url::parse("http://localhost").unwrap();
-    let stylesheet = Stylesheet::from_str(css, url, Origin::Author, Box::new(CSSErrorReporterTest),
-                                          ParserContextExtraData::default());
+fn test_media_rule<F>(css: &str, callback: F)
+    where F: Fn(&MediaList, &str),
+{
+    let url = ServoUrl::parse("http://localhost").unwrap();
+    let css_str = css.to_owned();
+    let stylesheet = Stylesheet::from_str(
+        css, url, Origin::Author, Default::default(),
+        None, Box::new(CSSErrorReporterTest),
+        ParserContextExtraData::default());
     let mut rule_count = 0;
-    for rule in stylesheet.rules().media() {
+    media_queries(&stylesheet.rules.read().0, &mut |mq| {
         rule_count += 1;
-        callback(&rule.media_queries, css);
+        callback(mq, css);
+    });
+    assert!(rule_count > 0, css_str);
+}
+
+fn media_queries<F>(rules: &[CssRule], f: &mut F)
+    where F: FnMut(&MediaList),
+{
+    for rule in rules {
+        rule.with_nested_rules_and_mq(|rules, mq| {
+            if let Some(mq) = mq {
+                f(mq)
+            }
+            media_queries(rules, f)
+        })
     }
-    assert!(rule_count > 0);
 }
 
 fn media_query_test(device: &Device, css: &str, expected_rule_count: usize) {
-    let url = Url::parse("http://localhost").unwrap();
-    let ss = Stylesheet::from_str(css, url, Origin::Author, Box::new(CSSErrorReporterTest),
-                                  ParserContextExtraData::default());
-    let rule_count = ss.effective_rules(device).style().count();
+    let url = ServoUrl::parse("http://localhost").unwrap();
+    let ss = Stylesheet::from_str(
+        css, url, Origin::Author, Default::default(),
+        None, Box::new(CSSErrorReporterTest),
+        ParserContextExtraData::default());
+    let mut rule_count = 0;
+    ss.effective_style_rules(device, |_| rule_count += 1);
     assert!(rule_count == expected_rule_count, css.to_owned());
 }
 
 #[test]
 fn test_mq_empty() {
     test_media_rule("@media { }", |list, css| {
-        assert!(list.media_queries.len() == 1, css.to_owned());
-        let q = &list.media_queries[0];
-        assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
+        assert!(list.media_queries.len() == 0, css.to_owned());
     });
 }
 
@@ -60,7 +79,7 @@ fn test_mq_screen() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Screen), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Screen), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 
@@ -68,7 +87,7 @@ fn test_mq_screen() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Only), css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Screen), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Screen), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 
@@ -76,7 +95,7 @@ fn test_mq_screen() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Screen), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Screen), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 }
@@ -87,7 +106,7 @@ fn test_mq_print() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Print), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Print), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 
@@ -95,7 +114,7 @@ fn test_mq_print() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Only), css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Print), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Print), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 
@@ -103,7 +122,7 @@ fn test_mq_print() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Print), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Print), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 }
@@ -114,7 +133,7 @@ fn test_mq_unknown() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Unknown), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Unknown(Atom::from("fridge")), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 
@@ -122,7 +141,7 @@ fn test_mq_unknown() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Only), css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Unknown), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Unknown(Atom::from("glass")), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 
@@ -130,7 +149,7 @@ fn test_mq_unknown() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Unknown), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Unknown(Atom::from("wood")), css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
     });
 }
@@ -168,12 +187,12 @@ fn test_mq_or() {
         assert!(list.media_queries.len() == 2, css.to_owned());
         let q0 = &list.media_queries[0];
         assert!(q0.qualifier == None, css.to_owned());
-        assert!(q0.media_type == MediaQueryType::MediaType(MediaType::Screen), css.to_owned());
+        assert!(q0.media_type == MediaQueryType::Known(MediaType::Screen), css.to_owned());
         assert!(q0.expressions.len() == 0, css.to_owned());
 
         let q1 = &list.media_queries[1];
         assert!(q1.qualifier == None, css.to_owned());
-        assert!(q1.media_type == MediaQueryType::MediaType(MediaType::Print), css.to_owned());
+        assert!(q1.media_type == MediaQueryType::Known(MediaType::Print), css.to_owned());
         assert!(q1.expressions.len() == 0, css.to_owned());
     });
 }
@@ -186,8 +205,8 @@ fn test_mq_default_expressions() {
         assert!(q.qualifier == None, css.to_owned());
         assert!(q.media_type == MediaQueryType::All, css.to_owned());
         assert!(q.expressions.len() == 1, css.to_owned());
-        match q.expressions[0] {
-            Expression::Width(Range::Min(w)) => assert!(w == specified::Length::Absolute(Au::from_px(100))),
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Min(ref w)) => assert!(*w == specified::Length::from_px(100.)),
             _ => panic!("wrong expression type"),
         }
     });
@@ -198,8 +217,8 @@ fn test_mq_default_expressions() {
         assert!(q.qualifier == None, css.to_owned());
         assert!(q.media_type == MediaQueryType::All, css.to_owned());
         assert!(q.expressions.len() == 1, css.to_owned());
-        match q.expressions[0] {
-            Expression::Width(Range::Max(w)) => assert!(w == specified::Length::Absolute(Au::from_px(43))),
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Max(ref w)) => assert!(*w == specified::Length::from_px(43.)),
             _ => panic!("wrong expression type"),
         }
     });
@@ -211,10 +230,10 @@ fn test_mq_expressions() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Screen), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Screen), css.to_owned());
         assert!(q.expressions.len() == 1, css.to_owned());
-        match q.expressions[0] {
-            Expression::Width(Range::Min(w)) => assert!(w == specified::Length::Absolute(Au::from_px(100))),
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Min(ref w)) => assert!(*w == specified::Length::from_px(100.)),
             _ => panic!("wrong expression type"),
         }
     });
@@ -223,10 +242,22 @@ fn test_mq_expressions() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Print), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Print), css.to_owned());
         assert!(q.expressions.len() == 1, css.to_owned());
-        match q.expressions[0] {
-            Expression::Width(Range::Max(w)) => assert!(w == specified::Length::Absolute(Au::from_px(43))),
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Max(ref w)) => assert!(*w == specified::Length::from_px(43.)),
+            _ => panic!("wrong expression type"),
+        }
+    });
+
+    test_media_rule("@media print and (width: 43px) { }", |list, css| {
+        assert!(list.media_queries.len() == 1, css.to_owned());
+        let q = &list.media_queries[0];
+        assert!(q.qualifier == None, css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Print), css.to_owned());
+        assert!(q.expressions.len() == 1, css.to_owned());
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Eq(ref w)) => assert!(*w == specified::Length::from_px(43.)),
             _ => panic!("wrong expression type"),
         }
     });
@@ -235,13 +266,23 @@ fn test_mq_expressions() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Unknown), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Unknown(Atom::from("fridge")), css.to_owned());
         assert!(q.expressions.len() == 1, css.to_owned());
-        match q.expressions[0] {
-            Expression::Width(Range::Max(w)) => assert!(w == specified::Length::Absolute(Au::from_px(52))),
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Max(ref w)) => assert!(*w == specified::Length::from_px(52.)),
             _ => panic!("wrong expression type"),
         }
     });
+}
+
+#[test]
+fn test_to_css() {
+  test_media_rule("@media print and (width: 43px) { }", |list, _| {
+      let q = &list.media_queries[0];
+      let mut dest = String::new();
+      assert_eq!(Ok(()), q.to_css(&mut dest));
+      assert_eq!(dest, "print and (width: 43px)");
+  });
 }
 
 #[test]
@@ -252,12 +293,12 @@ fn test_mq_multiple_expressions() {
         assert!(q.qualifier == None, css.to_owned());
         assert!(q.media_type == MediaQueryType::All, css.to_owned());
         assert!(q.expressions.len() == 2, css.to_owned());
-        match q.expressions[0] {
-            Expression::Width(Range::Min(w)) => assert!(w == specified::Length::Absolute(Au::from_px(100))),
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Min(ref w)) => assert!(*w == specified::Length::from_px(100.)),
             _ => panic!("wrong expression type"),
         }
-        match q.expressions[1] {
-            Expression::Width(Range::Max(w)) => assert!(w == specified::Length::Absolute(Au::from_px(200))),
+        match *q.expressions[1].kind_for_testing() {
+            ExpressionKind::Width(Range::Max(ref w)) => assert!(*w == specified::Length::from_px(200.)),
             _ => panic!("wrong expression type"),
         }
     });
@@ -266,14 +307,14 @@ fn test_mq_multiple_expressions() {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::MediaType(MediaType::Screen), css.to_owned());
+        assert!(q.media_type == MediaQueryType::Known(MediaType::Screen), css.to_owned());
         assert!(q.expressions.len() == 2, css.to_owned());
-        match q.expressions[0] {
-            Expression::Width(Range::Min(w)) => assert!(w == specified::Length::Absolute(Au::from_px(100))),
+        match *q.expressions[0].kind_for_testing() {
+            ExpressionKind::Width(Range::Min(ref w)) => assert!(*w == specified::Length::from_px(100.)),
             _ => panic!("wrong expression type"),
         }
-        match q.expressions[1] {
-            Expression::Width(Range::Max(w)) => assert!(w == specified::Length::Absolute(Au::from_px(200))),
+        match *q.expressions[1].kind_for_testing() {
+            ExpressionKind::Width(Range::Max(ref w)) => assert!(*w == specified::Length::from_px(200.)),
             _ => panic!("wrong expression type"),
         }
     });
@@ -281,89 +322,31 @@ fn test_mq_multiple_expressions() {
 
 #[test]
 fn test_mq_malformed_expressions() {
-    test_media_rule("@media (min-width: 100blah) and (max-width: 200px) { }", |list, css| {
+    fn check_malformed_expr(list: &MediaList, css: &str) {
         assert!(list.media_queries.len() == 1, css.to_owned());
         let q = &list.media_queries[0];
         assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
         assert!(q.media_type == MediaQueryType::All, css.to_owned());
         assert!(q.expressions.len() == 0, css.to_owned());
-    });
+    }
 
-    test_media_rule("@media screen and (height: 200px) { }", |list, css| {
-        assert!(list.media_queries.len() == 1, css.to_owned());
-        let q = &list.media_queries[0];
-        assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
-    });
-
-    test_media_rule("@media (min-width: 30em foo bar) {}", |list, css| {
-        assert!(list.media_queries.len() == 1, css.to_owned());
-        let q = &list.media_queries[0];
-        assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
-    });
-
-    test_media_rule("@media not {}", |list, css| {
-        assert!(list.media_queries.len() == 1, css.to_owned());
-        let q = &list.media_queries[0];
-        assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
-    });
-
-    test_media_rule("@media not (min-width: 300px) {}", |list, css| {
-        assert!(list.media_queries.len() == 1, css.to_owned());
-        let q = &list.media_queries[0];
-        assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
-    });
-
-    test_media_rule("@media , {}", |list, css| {
-        assert!(list.media_queries.len() == 2, css.to_owned());
-        let q = &list.media_queries[0];
-        assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
-        let q = &list.media_queries[1];
-        assert!(q.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
-    });
-
-    test_media_rule("@media screen 4px, print {}", |list, css| {
-        assert!(list.media_queries.len() == 2, css.to_owned());
-        let q0 = &list.media_queries[0];
-        assert!(q0.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q0.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q0.expressions.len() == 0, css.to_owned());
-        let q1 = &list.media_queries[1];
-        assert!(q1.qualifier == None, css.to_owned());
-        assert!(q1.media_type == MediaQueryType::MediaType(MediaType::Print), css.to_owned());
-        assert!(q1.expressions.len() == 0, css.to_owned());
-    });
-
-    test_media_rule("@media screen, {}", |list, css| {
-        assert!(list.media_queries.len() == 2, css.to_owned());
-        let q0 = &list.media_queries[0];
-        assert!(q0.qualifier == None, css.to_owned());
-        assert!(q0.media_type == MediaQueryType::MediaType(MediaType::Screen), css.to_owned());
-        assert!(q0.expressions.len() == 0, css.to_owned());
-        let q1 = &list.media_queries[1];
-        assert!(q1.qualifier == Some(Qualifier::Not), css.to_owned());
-        assert!(q1.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q1.expressions.len() == 0, css.to_owned());
-    });
+    for rule in &[
+        "@media (min-width: 100blah) and (max-width: 200px) { }",
+        "@media screen and (height: 200px) { }",
+        "@media (min-width: 30em foo bar) {}",
+        "@media not {}",
+        "@media not (min-width: 300px) {}",
+        "@media , {}",
+        "@media screen 4px, print {}",
+        "@media screen, {}",
+    ] {
+        test_media_rule(rule, check_malformed_expr);
+    }
 }
 
 #[test]
 fn test_matching_simple() {
-    let device = Device {
-        media_type: MediaType::Screen,
-        viewport_size: TypedSize2D::new(200.0, 100.0),
-    };
+    let device = Device::new(MediaType::Screen, TypedSize2D::new(200.0, 100.0));
 
     media_query_test(&device, "@media not all { a { color: red; } }", 0);
     media_query_test(&device, "@media not screen { a { color: red; } }", 0);
@@ -379,10 +362,7 @@ fn test_matching_simple() {
 
 #[test]
 fn test_matching_width() {
-    let device = Device {
-        media_type: MediaType::Screen,
-        viewport_size: TypedSize2D::new(200.0, 100.0),
-    };
+    let device = Device::new(MediaType::Screen, TypedSize2D::new(200.0, 100.0));
 
     media_query_test(&device, "@media { a { color: red; } }", 1);
 
@@ -423,10 +403,7 @@ fn test_matching_width() {
 
 #[test]
 fn test_matching_invalid() {
-    let device = Device {
-        media_type: MediaType::Screen,
-        viewport_size: TypedSize2D::new(200.0, 100.0),
-    };
+    let device = Device::new(MediaType::Screen, TypedSize2D::new(200.0, 100.0));
 
     media_query_test(&device, "@media fridge { a { color: red; } }", 0);
     media_query_test(&device, "@media screen and (height: 100px) { a { color: red; } }", 0);

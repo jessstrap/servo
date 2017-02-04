@@ -2,14 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#![feature(borrow_state)]
 #![feature(box_syntax)]
 #![feature(core_intrinsics)]
-#![feature(filling_drop)]
 #![feature(link_args)]
 #![feature(plugin)]
-#![feature(unicode)]
-#![feature(unsafe_no_drop_flag)]
 
 #![allow(non_camel_case_types)]
 
@@ -24,17 +20,17 @@ extern crate compositing;
 extern crate euclid;
 extern crate gleam;
 extern crate glutin_app;
-extern crate layers;
-extern crate rustc_unicode;
 extern crate script_traits;
+extern crate servo_config;
+extern crate servo_geometry;
+extern crate servo_url;
+extern crate style_traits;
 
 extern crate net_traits;
 extern crate msg;
-extern crate util;
-extern crate style_traits;
+extern crate webrender_traits;
 
 extern crate libc;
-extern crate url as std_url;
 
 #[cfg(target_os="macos")]
 #[link_args="-Xlinker -undefined -Xlinker dynamic_lookup"]

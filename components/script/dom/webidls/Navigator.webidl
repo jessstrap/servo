@@ -3,17 +3,16 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#navigator
-[Exposed=(Window,Worker)]
 interface Navigator {
   // objects implementing this interface also implement the interfaces given below
 };
 Navigator implements NavigatorID;
-Navigator implements NavigatorBluetooth;
 Navigator implements NavigatorLanguage;
 //Navigator implements NavigatorOnLine;
 //Navigator implements NavigatorContentUtils;
 //Navigator implements NavigatorStorageUtils;
 Navigator implements NavigatorPlugins;
+Navigator implements NavigatorCookies;
 
 // https://html.spec.whatwg.org/multipage/#navigatorid
 [NoInterfaceObject, Exposed=(Window,Worker)]
@@ -27,12 +26,12 @@ interface NavigatorID {
   readonly attribute DOMString userAgent;
 };
 
-[NoInterfaceObject, Exposed=(Window,Worker)]
-interface NavigatorBluetooth {
-    readonly attribute Bluetooth bluetooth;
+// https://webbluetoothcg.github.io/web-bluetooth/#navigator-extensions
+partial interface Navigator {
+  [SameObject, Pref="dom.bluetooth.enabled"] readonly attribute Bluetooth bluetooth;
 };
 
-// https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#navigator-service-worker
+// https://w3c.github.io/ServiceWorker/#navigator-service-worker
 partial interface Navigator {
   [SameObject, Pref="dom.serviceworker.enabled"] readonly attribute ServiceWorkerContainer serviceWorker;
 };
@@ -46,9 +45,20 @@ interface NavigatorLanguage {
 };
 
 // https://html.spec.whatwg.org/multipage/#navigatorplugins
-[NoInterfaceObject, Exposed=(Window,Worker)]
+[NoInterfaceObject]
 interface NavigatorPlugins {
   [SameObject] readonly attribute PluginArray plugins;
   [SameObject] readonly attribute MimeTypeArray mimeTypes;
   boolean javaEnabled();
+};
+
+// https://html.spec.whatwg.org/multipage/#navigatorcookies
+[NoInterfaceObject]
+interface NavigatorCookies {
+  readonly attribute boolean cookieEnabled;
+};
+
+// https://w3c.github.io/webvr/#interface-navigator
+partial interface Navigator {
+  [SameObject, Pref="dom.webvr.enabled"] readonly attribute VR vr;
 };

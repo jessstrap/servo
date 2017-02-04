@@ -30,60 +30,39 @@
 
 #![allow(unsafe_code)]
 
+use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 use core::nonzero::NonZero;
-use data::{LayoutDataFlags, PrivateLayoutData};
-use script_layout_interface::wrapper_traits::{LayoutNode, ThreadSafeLayoutNode};
-use script_layout_interface::{OpaqueStyleAndLayoutData, PartialStyleAndLayoutData};
+use data::{LayoutDataFlags, PersistentLayoutData};
+use script_layout_interface::{OpaqueStyleAndLayoutData, PartialPersistentLayoutData};
+use script_layout_interface::wrapper_traits::{LayoutNode, ThreadSafeLayoutElement, ThreadSafeLayoutNode};
+use script_layout_interface::wrapper_traits::GetLayoutData;
 use style::computed_values::content::{self, ContentItem};
-use style::refcell::{Ref, RefCell, RefMut};
+use style::dom::{NodeInfo, TNode};
+use style::selector_parser::RestyleDamage;
 
-pub type NonOpaqueStyleAndLayoutData = *mut RefCell<PrivateLayoutData>;
+pub type NonOpaqueStyleAndLayoutData = AtomicRefCell<PersistentLayoutData>;
+
+pub unsafe fn drop_style_and_layout_data(data: OpaqueStyleAndLayoutData) {
+    let ptr: *mut AtomicRefCell<PartialPersistentLayoutData> = *data.ptr;
+    let non_opaque: *mut NonOpaqueStyleAndLayoutData = ptr as *mut _;
+    let _ = Box::from_raw(non_opaque);
+}
 
 pub trait LayoutNodeLayoutData {
-    /// Similar to borrow_data*, but returns the full PrivateLayoutData rather
-    /// than only the PrivateStyleData.
-    unsafe fn borrow_layout_data_unchecked(&self) -> Option<*const PrivateLayoutData>;
-    fn borrow_layout_data(&self) -> Option<Ref<PrivateLayoutData>>;
-    fn mutate_layout_data(&self) -> Option<RefMut<PrivateLayoutData>>;
-    fn initialize_data(self);
+    /// Similar to borrow_data*, but returns the full PersistentLayoutData rather
+    /// than only the style::data::ElementData.
+    fn borrow_layout_data(&self) -> Option<AtomicRef<PersistentLayoutData>>;
+    fn mutate_layout_data(&self) -> Option<AtomicRefMut<PersistentLayoutData>>;
     fn flow_debug_id(self) -> usize;
 }
 
-impl<T: LayoutNode> LayoutNodeLayoutData for T {
-    unsafe fn borrow_layout_data_unchecked(&self) -> Option<*const PrivateLayoutData> {
-        self.get_style_and_layout_data().map(|opaque| {
-            let container = *opaque.ptr as NonOpaqueStyleAndLayoutData;
-            &(*(*container).as_unsafe_cell().get()) as *const PrivateLayoutData
-        })
+impl<T: GetLayoutData> LayoutNodeLayoutData for T {
+    fn borrow_layout_data(&self) -> Option<AtomicRef<PersistentLayoutData>> {
+        self.get_raw_data().map(|d| d.borrow())
     }
 
-    fn borrow_layout_data(&self) -> Option<Ref<PrivateLayoutData>> {
-        unsafe {
-            self.get_style_and_layout_data().map(|opaque| {
-                let container = *opaque.ptr as NonOpaqueStyleAndLayoutData;
-                (*container).borrow()
-            })
-        }
-    }
-
-    fn mutate_layout_data(&self) -> Option<RefMut<PrivateLayoutData>> {
-        unsafe {
-            self.get_style_and_layout_data().map(|opaque| {
-                let container = *opaque.ptr as NonOpaqueStyleAndLayoutData;
-                (*container).borrow_mut()
-            })
-        }
-    }
-
-    fn initialize_data(self) {
-        if unsafe { self.borrow_data_unchecked() }.is_none() {
-            let ptr: NonOpaqueStyleAndLayoutData =
-                Box::into_raw(box RefCell::new(PrivateLayoutData::new()));
-            let opaque = OpaqueStyleAndLayoutData {
-                ptr: unsafe { NonZero::new(ptr as *mut RefCell<PartialStyleAndLayoutData>) }
-            };
-            self.init_style_and_layout_data(opaque);
-        }
+    fn mutate_layout_data(&self) -> Option<AtomicRefMut<PersistentLayoutData>> {
+        self.get_raw_data().map(|d| d.borrow_mut())
     }
 
     fn flow_debug_id(self) -> usize {
@@ -91,23 +70,44 @@ impl<T: LayoutNode> LayoutNodeLayoutData for T {
     }
 }
 
+pub trait GetRawData {
+    fn get_raw_data(&self) -> Option<&NonOpaqueStyleAndLayoutData>;
+}
+
+impl<T: GetLayoutData> GetRawData for T {
+    fn get_raw_data(&self) -> Option<&NonOpaqueStyleAndLayoutData> {
+        self.get_style_and_layout_data().map(|opaque| {
+            let container = *opaque.ptr as *mut NonOpaqueStyleAndLayoutData;
+            unsafe { &*container }
+        })
+    }
+}
+
+pub trait LayoutNodeHelpers {
+    fn initialize_data(&self);
+    fn clear_data(&self);
+}
+
+impl<T: LayoutNode> LayoutNodeHelpers for T {
+    fn initialize_data(&self) {
+        if self.get_raw_data().is_none() {
+            let ptr: *mut NonOpaqueStyleAndLayoutData =
+                Box::into_raw(box AtomicRefCell::new(PersistentLayoutData::new()));
+            let opaque = OpaqueStyleAndLayoutData {
+                ptr: unsafe { NonZero::new(ptr as *mut AtomicRefCell<PartialPersistentLayoutData>) }
+            };
+            unsafe { self.init_style_and_layout_data(opaque) };
+        };
+    }
+
+    fn clear_data(&self) {
+        if self.get_raw_data().is_some() {
+            unsafe { drop_style_and_layout_data(self.take_style_and_layout_data()) };
+        }
+    }
+}
+
 pub trait ThreadSafeLayoutNodeHelpers {
-    fn flow_debug_id(self) -> usize;
-
-    unsafe fn borrow_layout_data_unchecked(&self) -> Option<*const PrivateLayoutData>;
-
-    /// Borrows the layout data immutably. Fails on a conflicting borrow.
-    ///
-    /// TODO(pcwalton): Make this private. It will let us avoid borrow flag checks in some cases.
-    #[inline(always)]
-    fn borrow_layout_data(&self) -> Option<Ref<PrivateLayoutData>>;
-
-    /// Borrows the layout data mutably. Fails on a conflicting borrow.
-    ///
-    /// TODO(pcwalton): Make this private. It will let us avoid borrow flag checks in some cases.
-    #[inline(always)]
-    fn mutate_layout_data(&self) -> Option<RefMut<PrivateLayoutData>>;
-
     /// Returns the layout data flags for this node.
     fn flags(self) -> LayoutDataFlags;
 
@@ -122,42 +122,17 @@ pub trait ThreadSafeLayoutNodeHelpers {
     ///
     /// FIXME(pcwalton): This might have too much copying and/or allocation. Profile this.
     fn text_content(&self) -> TextContent;
+
+    /// The RestyleDamage from any restyling, or RestyleDamage::rebuild_and_reflow() if this
+    /// is the first time layout is visiting this node. We implement this here, rather than
+    /// with the rest of the wrapper layer, because we need layout code to determine whether
+    /// layout has visited the node.
+    fn restyle_damage(self) -> RestyleDamage;
 }
 
 impl<T: ThreadSafeLayoutNode> ThreadSafeLayoutNodeHelpers for T {
-    fn flow_debug_id(self) -> usize {
-        self.borrow_layout_data().map_or(0, |d| d.flow_construction_result.debug_id())
-    }
-
-    unsafe fn borrow_layout_data_unchecked(&self) -> Option<*const PrivateLayoutData> {
-        self.get_style_and_layout_data().map(|opaque| {
-            let container = *opaque.ptr as NonOpaqueStyleAndLayoutData;
-            &(*(*container).as_unsafe_cell().get()) as *const PrivateLayoutData
-        })
-    }
-
-    fn borrow_layout_data(&self) -> Option<Ref<PrivateLayoutData>> {
-        unsafe {
-            self.get_style_and_layout_data().map(|opaque| {
-                let container = *opaque.ptr as NonOpaqueStyleAndLayoutData;
-                (*container).borrow()
-            })
-        }
-    }
-
-    fn mutate_layout_data(&self) -> Option<RefMut<PrivateLayoutData>> {
-        unsafe {
-            self.get_style_and_layout_data().map(|opaque| {
-                let container = *opaque.ptr as NonOpaqueStyleAndLayoutData;
-                (*container).borrow_mut()
-            })
-        }
-    }
-
     fn flags(self) -> LayoutDataFlags {
-        unsafe {
-            (*self.borrow_layout_data_unchecked().unwrap()).flags
-        }
+            self.borrow_layout_data().as_ref().unwrap().flags
     }
 
     fn insert_flags(self, new_flags: LayoutDataFlags) {
@@ -170,7 +145,7 @@ impl<T: ThreadSafeLayoutNode> ThreadSafeLayoutNodeHelpers for T {
 
     fn text_content(&self) -> TextContent {
         if self.get_pseudo_element_type().is_replaced_content() {
-            let style = self.resolved_style();
+            let style = self.as_element().unwrap().resolved_style();
 
             return match style.as_ref().get_counters().content {
                 content::T::Content(ref value) if !value.is_empty() => {
@@ -182,6 +157,37 @@ impl<T: ThreadSafeLayoutNode> ThreadSafeLayoutNodeHelpers for T {
 
         return TextContent::Text(self.node_text_content());
     }
+
+    fn restyle_damage(self) -> RestyleDamage {
+        // We need the underlying node to potentially access the parent in the
+        // case of text nodes. This is safe as long as we don't let the parent
+        // escape and never access its descendants.
+        let mut node = unsafe { self.unsafe_get() };
+
+        // If this is a text node, use the parent element, since that's what
+        // controls our style.
+        if node.is_text_node() {
+            node = node.parent_node().unwrap();
+            debug_assert!(node.is_element());
+        }
+
+        let data = node.borrow_layout_data().unwrap();
+        if let Some(r) = data.base.style_data.get_restyle() {
+            // We're reflowing a node that just got a restyle, and so the
+            // damage has been computed and stored in the RestyleData.
+            r.damage
+        } else if !data.flags.contains(::data::HAS_BEEN_TRAVERSED) {
+            // We're reflowing a node that was styled for the first time and
+            // has never been visited by layout. Return rebuild_and_reflow,
+            // because that's what the code expects.
+            RestyleDamage::rebuild_and_reflow()
+        } else {
+            // We're reflowing a node whose style data didn't change, but whose
+            // layout may change due to changes in ancestors or descendants.
+            RestyleDamage::empty()
+        }
+    }
+
 }
 
 pub enum TextContent {

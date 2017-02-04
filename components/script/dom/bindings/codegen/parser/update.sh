@@ -2,6 +2,9 @@ wget https://hg.mozilla.org/mozilla-central/raw-file/tip/dom/bindings/parser/Web
 patch < abstract.patch
 patch < debug.patch
 patch < pref-main-thread.patch
+patch < callback-location.patch
+patch < union-typedef.patch
+patch < inline.patch
 
 wget https://hg.mozilla.org/mozilla-central/archive/tip.tar.gz/dom/bindings/parser/tests/ -O tests.tar.gz
 rm -r tests

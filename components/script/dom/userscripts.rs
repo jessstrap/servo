@@ -9,11 +9,11 @@ use dom::bindings::js::RootedReference;
 use dom::bindings::str::DOMString;
 use dom::htmlheadelement::HTMLHeadElement;
 use dom::node::Node;
+use servo_config::opts;
+use servo_config::resource_files::resources_dir_path;
 use std::borrow::ToOwned;
 use std::fs::read_dir;
 use std::path::PathBuf;
-use util::opts;
-use util::resource_files::resources_dir_path;
 
 
 pub fn load_script(head: &HTMLHeadElement) {
@@ -21,7 +21,6 @@ pub fn load_script(head: &HTMLHeadElement) {
         let node = head.upcast::<Node>();
         let first_child = node.GetFirstChild();
         let doc = node.owner_doc();
-        let doc = doc.r();
 
         let path = if &**path_str == "" {
             if let Ok(mut p) = resources_dir_path() {
@@ -46,8 +45,7 @@ pub fn load_script(head: &HTMLHeadElement) {
                 _ => continue
             };
             let new_script = doc.CreateElement(DOMString::from("script")).unwrap();
-            let new_script = new_script.r();
-            new_script.set_string_attribute(&atom!("src"), DOMString::from(name));
+            new_script.set_string_attribute(&local_name!("src"), DOMString::from(name));
             node.InsertBefore(new_script.upcast(), first_child.r()).unwrap();
         }
     }

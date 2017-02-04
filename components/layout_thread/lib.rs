@@ -6,16 +6,12 @@
 //! painted.
 
 #![feature(box_syntax)]
-#![feature(custom_derive)]
 #![feature(mpsc_select)]
 #![feature(plugin)]
 
-#![plugin(heapsize_plugin)]
 #![plugin(plugins)]
 
 extern crate app_units;
-extern crate azure;
-extern crate core;
 extern crate euclid;
 extern crate fnv;
 extern crate gfx;
@@ -26,102 +22,106 @@ extern crate ipc_channel;
 extern crate layout;
 extern crate layout_traits;
 #[macro_use]
+extern crate lazy_static;
+#[macro_use]
 extern crate log;
 extern crate msg;
 extern crate net_traits;
+extern crate parking_lot;
 #[macro_use]
 extern crate profile_traits;
+extern crate rayon;
 extern crate script;
 extern crate script_layout_interface;
 extern crate script_traits;
+extern crate selectors;
 extern crate serde_json;
+extern crate servo_config;
+extern crate servo_geometry;
+extern crate servo_url;
 extern crate style;
-extern crate url;
-extern crate util;
 extern crate webrender_traits;
 
 use app_units::Au;
-use azure::azure::AzColor;
-use euclid::Matrix4D;
 use euclid::point::Point2D;
 use euclid::rect::Rect;
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::Size2D;
 use fnv::FnvHasher;
-use gfx::display_list::{ClippingRegion, DisplayList, LayerInfo, OpaqueNode};
-use gfx::display_list::{StackingContext, StackingContextType, WebRenderImageInfo};
+use gfx::display_list::{ClippingRegion, OpaqueNode};
+use gfx::display_list::WebRenderImageInfo;
 use gfx::font;
 use gfx::font_cache_thread::FontCacheThread;
 use gfx::font_context;
-use gfx::paint_thread::LayoutToPaintMsg;
-use gfx_traits::{color, Epoch, FragmentType, LayerId, ScrollPolicy, StackingContextId};
+use gfx_traits::{Epoch, FragmentType, ScrollRootId};
 use heapsize::HeapSizeOf;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
 use layout::animation;
 use layout::construct::ConstructionResult;
-use layout::context::{LayoutContext, SharedLayoutContext, heap_size_of_local_context};
+use layout::context::{LayoutContext, SharedLayoutContext};
+use layout::context::heap_size_of_persistent_local_context;
 use layout::display_list_builder::ToGfxColor;
-use layout::flow::{self, Flow, ImmutableFlowUtils, MutableOwnedFlowUtils};
-use layout::flow_ref::{self, FlowRef};
+use layout::flow::{self, Flow, ImmutableFlowUtils, MutableFlowUtils, MutableOwnedFlowUtils};
+use layout::flow_ref::FlowRef;
 use layout::incremental::{LayoutDamageComputation, REFLOW_ENTIRE_DOCUMENT};
 use layout::layout_debug;
 use layout::parallel;
-use layout::query::process_offset_parent_query;
 use layout::query::{LayoutRPCImpl, LayoutThreadData, process_content_box_request, process_content_boxes_request};
-use layout::query::{process_node_geometry_request, process_node_layer_id_request, process_node_scroll_area_request};
-use layout::query::{process_node_overflow_request, process_resolved_style_request, process_margin_style_query};
+use layout::query::{process_margin_style_query, process_node_overflow_request, process_resolved_style_request};
+use layout::query::{process_node_geometry_request, process_node_scroll_area_request};
+use layout::query::{process_node_scroll_root_id_request, process_offset_parent_query};
 use layout::sequential;
-use layout::traversal::RecalcStyleAndConstructFlows;
-use layout::webrender_helpers::{WebRenderDisplayListConverter, WebRenderFrameBuilder};
-use layout::wrapper::{LayoutNodeLayoutData, NonOpaqueStyleAndLayoutData};
+use layout::traversal::{ComputeAbsolutePositions, RecalcStyleAndConstructFlows};
+use layout::webrender_helpers::WebRenderDisplayListConverter;
+use layout::wrapper::LayoutNodeLayoutData;
+use layout::wrapper::drop_style_and_layout_data;
 use layout_traits::LayoutThreadFactory;
-use msg::constellation_msg::PipelineId;
-use net_traits::image_cache_thread::UsePlaceholder;
+use msg::constellation_msg::{FrameId, PipelineId};
 use net_traits::image_cache_thread::{ImageCacheChan, ImageCacheResult, ImageCacheThread};
+use net_traits::image_cache_thread::UsePlaceholder;
+use parking_lot::RwLock;
 use profile_traits::mem::{self, Report, ReportKind, ReportsChan};
-use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
 use profile_traits::time::{self, TimerMetadata, profile};
-use script::layout_wrapper::ServoLayoutNode;
+use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
+use script::layout_wrapper::{ServoLayoutElement, ServoLayoutDocument, ServoLayoutNode};
 use script_layout_interface::message::{Msg, NewLayoutThreadInfo, Reflow, ReflowQueryType, ScriptReflow};
 use script_layout_interface::reporter::CSSErrorReporter;
-use script_layout_interface::restyle_damage::{REPAINT, STORE_OVERFLOW, REFLOW_OUT_OF_FLOW, REFLOW};
 use script_layout_interface::rpc::{LayoutRPC, MarginStyleResponse, NodeOverflowResponse, OffsetParentResponse};
+use script_layout_interface::rpc::TextIndexResponse;
 use script_layout_interface::wrapper_traits::LayoutNode;
-use script_layout_interface::{OpaqueStyleAndLayoutData, PartialStyleAndLayoutData};
 use script_traits::{ConstellationControlMsg, LayoutControlMsg, LayoutMsg as ConstellationMsg};
 use script_traits::{StackingContextScrollState, UntrustedNodeAddress};
+use selectors::Element;
+use servo_config::opts;
+use servo_config::prefs::PREFS;
+use servo_config::resource_files::read_resource_file;
+use servo_geometry::max_rect;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::ops::{Deref, DerefMut};
+use std::process;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Sender, Receiver};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
 use style::animation::Animation;
-use style::computed_values::{filter, mix_blend_mode};
-use style::context::{ReflowGoal, LocalStyleContextCreationInfo, SharedStyleContext};
-use style::dom::{TDocument, TElement, TNode};
-use style::error_reporting::ParseErrorReporter;
+use style::context::{QuirksMode, ReflowGoal, SharedStyleContext, ThreadLocalStyleContextCreationInfo};
+use style::data::StoredRestyleHint;
+use style::dom::{ShowSubtree, ShowSubtreeDataAndPrimaryValues, TElement, TNode};
+use style::error_reporting::{ParseErrorReporter, StdoutErrorReporter};
 use style::logical_geometry::LogicalPoint;
 use style::media_queries::{Device, MediaType};
-use style::parallel::WorkQueueData;
-use style::refcell::RefCell;
-use style::selector_matching::Stylist;
-use style::servo_selector_impl::USER_OR_USER_AGENT_STYLESHEETS;
-use style::stylesheets::{Stylesheet, CSSRuleIteratorExt};
+use style::parser::ParserContextExtraData;
+use style::properties::ComputedValues;
+use style::servo::restyle_damage::{REFLOW, REFLOW_OUT_OF_FLOW, REPAINT, REPOSITION, STORE_OVERFLOW};
+use style::stylesheets::{Origin, Stylesheet, UserAgentStylesheets};
+use style::stylist::Stylist;
+use style::thread_state;
 use style::timer::Timer;
-use style::workqueue::WorkQueue;
-use url::Url;
-use util::geometry::max_rect;
-use util::ipc::OptionalIpcSender;
-use util::opts;
-use util::prefs::PREFS;
-use util::thread;
-use util::thread_state;
-
-/// The number of screens we have to traverse before we decide to generate new display lists.
-const DISPLAY_PORT_THRESHOLD_SIZE_FACTOR: i32 = 4;
+use style::traversal::{DomTraversal, TraversalDriver};
 
 /// Information needed by the layout thread.
 pub struct LayoutThread {
@@ -129,7 +129,7 @@ pub struct LayoutThread {
     id: PipelineId,
 
     /// The URL of the pipeline that we belong to.
-    url: Url,
+    url: ServoUrl,
 
     /// Is the current reflow of an iframe, as opposed to a root window?
     is_iframe: bool,
@@ -158,9 +158,6 @@ pub struct LayoutThread {
     /// The channel on which messages can be sent to the script thread.
     script_chan: IpcSender<ConstellationControlMsg>,
 
-    /// The channel on which messages can be sent to the painting thread.
-    paint_chan: OptionalIpcSender<LayoutToPaintMsg>,
-
     /// The channel on which messages can be sent to the time profiler.
     time_profiler_chan: time::ProfilerChan,
 
@@ -177,7 +174,10 @@ pub struct LayoutThread {
     first_reflow: bool,
 
     /// The workers that we use for parallel operation.
-    parallel_traversal: Option<WorkQueue<SharedLayoutContext, WorkQueueData>>,
+    parallel_traversal: Option<rayon::ThreadPool>,
+
+    /// Flag to indicate whether to use parallel operations
+    parallel_flag: bool,
 
     /// Starts at zero, and increased by one every time a layout completes.
     /// This can be used to easily check for invalid stale data.
@@ -195,10 +195,6 @@ pub struct LayoutThread {
 
     /// The root of the flow tree.
     root_flow: Option<FlowRef>,
-
-    /// The position and size of the visible rect for each layer. We do not build display lists
-    /// for any areas more than `DISPLAY_PORT_SIZE_FACTOR` screens away from this area.
-    visible_rects: Arc<HashMap<LayerId, Rect<Au>, BuildHasherDefault<FnvHasher>>>,
 
     /// The list of currently-running animations.
     running_animations: Arc<RwLock<HashMap<OpaqueNode, Vec<Animation>>>>,
@@ -222,20 +218,23 @@ pub struct LayoutThread {
     /// The CSS error reporter for all CSS loaded in this layout thread
     error_reporter: CSSErrorReporter,
 
-    webrender_image_cache: Arc<RwLock<HashMap<(Url, UsePlaceholder),
+    webrender_image_cache: Arc<RwLock<HashMap<(ServoUrl, UsePlaceholder),
                                               WebRenderImageInfo,
                                               BuildHasherDefault<FnvHasher>>>>,
 
-    // Webrender interface, if enabled.
-    webrender_api: Option<webrender_traits::RenderApi>,
+    // Webrender interface.
+    webrender_api: webrender_traits::RenderApi,
 
     /// The timer object to control the timing of the animations. This should
     /// only be a test-mode timer during testing for animations.
     timer: Timer,
 
-    // Number of layout threads. This is copied from `util::opts`, but we'd
+    // Number of layout threads. This is copied from `servo_config::opts`, but we'd
     // rather limit the dependency on that module here.
     layout_threads: usize,
+
+    /// Which quirks mode are we rendering the document in?
+    quirks_mode: Option<QuirksMode>
 }
 
 impl LayoutThreadFactory for LayoutThread {
@@ -243,48 +242,52 @@ impl LayoutThreadFactory for LayoutThread {
 
     /// Spawns a new layout thread.
     fn create(id: PipelineId,
-              url: Url,
+              top_level_frame_id: Option<FrameId>,
+              url: ServoUrl,
               is_iframe: bool,
               chan: (Sender<Msg>, Receiver<Msg>),
               pipeline_port: IpcReceiver<LayoutControlMsg>,
               constellation_chan: IpcSender<ConstellationMsg>,
               script_chan: IpcSender<ConstellationControlMsg>,
-              paint_chan: OptionalIpcSender<LayoutToPaintMsg>,
               image_cache_thread: ImageCacheThread,
               font_cache_thread: FontCacheThread,
               time_profiler_chan: time::ProfilerChan,
               mem_profiler_chan: mem::ProfilerChan,
-              content_process_shutdown_chan: IpcSender<()>,
-              webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+              content_process_shutdown_chan: Option<IpcSender<()>>,
+              webrender_api_sender: webrender_traits::RenderApiSender,
               layout_threads: usize) {
-        thread::spawn_named(format!("LayoutThread {:?}", id),
-                      move || {
+        thread::Builder::new().name(format!("LayoutThread {:?}", id)).spawn(move || {
             thread_state::initialize(thread_state::LAYOUT);
-            PipelineId::install(id);
+
+            if let Some(top_level_frame_id) = top_level_frame_id {
+                FrameId::install(top_level_frame_id);
+            }
+
             { // Ensures layout thread is destroyed before we send shutdown message
                 let sender = chan.0;
                 let layout = LayoutThread::new(id,
-                                             url,
-                                             is_iframe,
-                                             chan.1,
-                                             pipeline_port,
-                                             constellation_chan,
-                                             script_chan,
-                                             paint_chan,
-                                             image_cache_thread,
-                                             font_cache_thread,
-                                             time_profiler_chan,
-                                             mem_profiler_chan.clone(),
-                                             webrender_api_sender,
-                                             layout_threads);
+                                               url,
+                                               is_iframe,
+                                               chan.1,
+                                               pipeline_port,
+                                               constellation_chan,
+                                               script_chan,
+                                               image_cache_thread,
+                                               font_cache_thread,
+                                               time_profiler_chan,
+                                               mem_profiler_chan.clone(),
+                                               webrender_api_sender,
+                                               layout_threads);
 
                 let reporter_name = format!("layout-reporter-{}", id);
                 mem_profiler_chan.run_with_memory_reporting(|| {
                     layout.start();
                 }, reporter_name, sender, Msg::CollectReports);
             }
-            let _ = content_process_shutdown_chan.send(());
-        });
+            if let Some(content_process_shutdown_chan) = content_process_shutdown_chan {
+                let _ = content_process_shutdown_chan.send(());
+            }
+        }).expect("Thread spawning failed");
     }
 }
 
@@ -355,49 +358,48 @@ fn add_font_face_rules(stylesheet: &Stylesheet,
                        outstanding_web_fonts_counter: &Arc<AtomicUsize>) {
     if opts::get().load_webfonts_synchronously {
         let (sender, receiver) = ipc::channel().unwrap();
-        for font_face in stylesheet.effective_rules(&device).font_face() {
+        stylesheet.effective_font_face_rules(&device, |font_face| {
             let effective_sources = font_face.effective_sources();
             font_cache_thread.add_web_font(font_face.family.clone(),
                                            effective_sources,
                                            sender.clone());
             receiver.recv().unwrap();
-        }
+        })
     } else {
-        for font_face in stylesheet.effective_rules(&device).font_face() {
+        stylesheet.effective_font_face_rules(&device, |font_face| {
             let effective_sources = font_face.effective_sources();
             outstanding_web_fonts_counter.fetch_add(1, Ordering::SeqCst);
             font_cache_thread.add_web_font(font_face.family.clone(),
                                           effective_sources,
                                           (*font_cache_sender).clone());
-        }
+        })
     }
 }
 
 impl LayoutThread {
     /// Creates a new `LayoutThread` structure.
     fn new(id: PipelineId,
-           url: Url,
+           url: ServoUrl,
            is_iframe: bool,
            port: Receiver<Msg>,
            pipeline_port: IpcReceiver<LayoutControlMsg>,
            constellation_chan: IpcSender<ConstellationMsg>,
            script_chan: IpcSender<ConstellationControlMsg>,
-           paint_chan: OptionalIpcSender<LayoutToPaintMsg>,
            image_cache_thread: ImageCacheThread,
            font_cache_thread: FontCacheThread,
            time_profiler_chan: time::ProfilerChan,
            mem_profiler_chan: mem::ProfilerChan,
-           webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+           webrender_api_sender: webrender_traits::RenderApiSender,
            layout_threads: usize)
            -> LayoutThread {
         let device = Device::new(
             MediaType::Screen,
-            opts::get().initial_window_size.as_f32() * ScaleFactor::new(1.0));
-        let parallel_traversal = if layout_threads != 1 {
-            Some(WorkQueue::new("LayoutWorker", thread_state::LAYOUT, layout_threads))
-        } else {
-            None
-        };
+            opts::get().initial_window_size.to_f32() * ScaleFactor::new(1.0));
+
+        let configuration =
+            rayon::Configuration::new().set_num_threads(layout_threads);
+        let parallel_traversal = rayon::ThreadPool::new(configuration).ok();
+        debug!("Possible layout Threads: {}", layout_threads);
 
         // Create the channel on which new animations can be sent.
         let (new_animations_sender, new_animations_receiver) = channel();
@@ -417,7 +419,7 @@ impl LayoutThread {
 
         let stylist = Arc::new(Stylist::new(device));
         let outstanding_web_fonts_counter = Arc::new(AtomicUsize::new(0));
-        for stylesheet in &*USER_OR_USER_AGENT_STYLESHEETS {
+        for stylesheet in &*UA_STYLESHEETS.user_or_user_agent_stylesheets {
             add_font_face_rules(stylesheet,
                                 &stylist.device,
                                 &font_cache_thread,
@@ -433,7 +435,6 @@ impl LayoutThread {
             pipeline_port: pipeline_receiver,
             script_chan: script_chan.clone(),
             constellation_chan: constellation_chan.clone(),
-            paint_chan: paint_chan,
             time_profiler_chan: time_profiler_chan,
             mem_profiler_chan: mem_profiler_chan,
             image_cache_thread: image_cache_thread,
@@ -444,33 +445,34 @@ impl LayoutThread {
             font_cache_receiver: font_cache_receiver,
             font_cache_sender: ipc_font_cache_sender,
             parallel_traversal: parallel_traversal,
+            parallel_flag: true,
             generation: 0,
             new_animations_sender: new_animations_sender,
             new_animations_receiver: new_animations_receiver,
             outstanding_web_fonts: outstanding_web_fonts_counter,
             root_flow: None,
-            visible_rects: Arc::new(HashMap::with_hasher(Default::default())),
             running_animations: Arc::new(RwLock::new(HashMap::new())),
             expired_animations: Arc::new(RwLock::new(HashMap::new())),
             epoch: Epoch(0),
             viewport_size: Size2D::new(Au(0), Au(0)),
-            webrender_api: webrender_api_sender.map(|wr| wr.create_api()),
+            webrender_api: webrender_api_sender.create_api(),
             rw_data: Arc::new(Mutex::new(
                 LayoutThreadData {
                     constellation_chan: constellation_chan,
                     display_list: None,
                     stylist: stylist,
-                    content_box_response: Rect::zero(),
+                    content_box_response: None,
                     content_boxes_response: Vec::new(),
                     client_rect_response: Rect::zero(),
-                    layer_id_response: None,
                     hit_test_response: (None, false),
+                    scroll_root_id_response: None,
                     scroll_area_response: Rect::zero(),
                     overflow_response: NodeOverflowResponse(None),
-                    resolved_style_response: None,
+                    resolved_style_response: String::new(),
                     offset_parent_response: OffsetParentResponse::empty(),
                     margin_style_response: MarginStyleResponse::empty(),
                     stacking_context_scroll_offsets: HashMap::new(),
+                    text_index_response: TextIndexResponse(None),
                 })),
             error_reporter: CSSErrorReporter {
                 pipelineid: id,
@@ -486,6 +488,7 @@ impl LayoutThread {
                     Timer::new()
                 },
             layout_threads: layout_threads,
+            quirks_mode: None,
         }
     }
 
@@ -508,25 +511,30 @@ impl LayoutThread {
                                    screen_size_changed: bool,
                                    goal: ReflowGoal)
                                    -> SharedLayoutContext {
-        let local_style_context_creation_data = LocalStyleContextCreationInfo::new(self.new_animations_sender.clone());
+        let thread_local_style_context_creation_data =
+            ThreadLocalStyleContextCreationInfo::new(self.new_animations_sender.clone());
 
         SharedLayoutContext {
             style_context: SharedStyleContext {
                 viewport_size: self.viewport_size.clone(),
                 screen_size_changed: screen_size_changed,
                 stylist: rw_data.stylist.clone(),
-                generation: self.generation,
                 goal: goal,
                 running_animations: self.running_animations.clone(),
                 expired_animations: self.expired_animations.clone(),
                 error_reporter: self.error_reporter.clone(),
-                local_context_creation_data: Mutex::new(local_style_context_creation_data),
+                local_context_creation_data: Mutex::new(thread_local_style_context_creation_data),
                 timer: self.timer.clone(),
+                quirks_mode: self.quirks_mode.unwrap(),
+                // FIXME(bz): This isn't really right, but it's no more wrong
+                // than what we used to do.  See
+                // https://github.com/servo/servo/issues/14773 for fixing it
+                // properly.
+                default_computed_values: Arc::new(ComputedValues::initial_values().clone()),
             },
-            image_cache_thread: self.image_cache_thread.clone(),
+            image_cache_thread: Mutex::new(self.image_cache_thread.clone()),
             image_cache_sender: Mutex::new(self.image_cache_sender.clone()),
             font_cache_thread: Mutex::new(self.font_cache_thread.clone()),
-            visible_rects: self.visible_rects.clone(),
             webrender_image_cache: self.webrender_image_cache.clone(),
         }
     }
@@ -564,10 +572,6 @@ impl LayoutThread {
         };
 
         match request {
-            Request::FromPipeline(LayoutControlMsg::SetVisibleRects(new_visible_rects)) => {
-                self.handle_request_helper(Msg::SetVisibleRects(new_visible_rects),
-                                           possibly_locked_rw_data)
-            },
             Request::FromPipeline(LayoutControlMsg::SetStackingContextScrollStates(
                     new_scroll_states)) => {
                 self.handle_request_helper(Msg::SetStackingContextScrollStates(new_scroll_states),
@@ -611,7 +615,7 @@ impl LayoutThread {
         let mut rw_data = possibly_locked_rw_data.lock();
 
         if let Some(mut root_flow) = self.root_flow.clone() {
-            let flow = flow::mut_base(flow_ref::deref_mut(&mut root_flow));
+            let flow = flow::mut_base(FlowRef::deref_mut(&mut root_flow));
             flow.restyle_damage.insert(REPAINT);
         }
 
@@ -624,6 +628,8 @@ impl LayoutThread {
                                                                   reflow_info.goal);
 
         self.perform_post_style_recalc_layout_passes(&reflow_info,
+                                                     None,
+                                                     None,
                                                      &mut *rw_data,
                                                      &mut layout_context);
 
@@ -655,16 +661,13 @@ impl LayoutThread {
             Msg::ReflowWithNewlyLoadedWebFont => {
                 self.reflow_with_newly_loaded_web_font(possibly_locked_rw_data)
             }
-            Msg::SetVisibleRects(new_visible_rects) => {
-                self.set_visible_rects(new_visible_rects, possibly_locked_rw_data);
-            }
             Msg::SetStackingContextScrollStates(new_scroll_states) => {
                 self.set_stacking_context_scroll_states(new_scroll_states,
                                                         possibly_locked_rw_data);
             }
             Msg::ReapStyleAndLayoutData(dead_data) => {
                 unsafe {
-                    self.handle_reap_style_and_layout_data(dead_data)
+                    drop_style_and_layout_data(dead_data)
                 }
             }
             Msg::CollectReports(reports_chan) => {
@@ -724,44 +727,31 @@ impl LayoutThread {
             size: stylist.heap_size_of_children(),
         });
 
-        // The LayoutThread has a context in TLS...
+        // The LayoutThread has data in Persistent TLS...
         reports.push(Report {
             path: path![formatted_url, "layout-thread", "local-context"],
             kind: ReportKind::ExplicitJemallocHeapSize,
-            size: heap_size_of_local_context(),
+            size: heap_size_of_persistent_local_context(),
         });
-
-        // ... as do each of the LayoutWorkers, if present.
-        if let Some(ref traversal) = self.parallel_traversal {
-            let sizes = traversal.heap_size_of_tls(heap_size_of_local_context);
-            for (i, size) in sizes.iter().enumerate() {
-                reports.push(Report {
-                    path: path![formatted_url,
-                                format!("layout-worker-{}-local-context", i)],
-                    kind: ReportKind::ExplicitJemallocHeapSize,
-                    size: *size,
-                });
-            }
-        }
 
         reports_chan.send(reports);
     }
 
     fn create_layout_thread(&self, info: NewLayoutThreadInfo) {
         LayoutThread::create(info.id,
+                             FrameId::installed(),
                              info.url.clone(),
                              info.is_parent,
                              info.layout_pair,
                              info.pipeline_port,
                              info.constellation_chan,
                              info.script_chan.clone(),
-                             info.paint_chan.to::<LayoutToPaintMsg>(),
                              self.image_cache_thread.clone(),
                              self.font_cache_thread.clone(),
                              self.time_profiler_chan.clone(),
                              self.mem_profiler_chan.clone(),
                              info.content_process_shutdown_chan,
-                             self.webrender_api.as_ref().map(|wr| wr.clone_sender()),
+                             self.webrender_api.clone_sender(),
                              info.layout_threads);
     }
 
@@ -773,7 +763,7 @@ impl LayoutThread {
             match self.port.recv().unwrap() {
                 Msg::ReapStyleAndLayoutData(dead_data) => {
                     unsafe {
-                        self.handle_reap_style_and_layout_data(dead_data)
+                        drop_style_and_layout_data(dead_data)
                     }
                 }
                 Msg::ExitNow => {
@@ -794,11 +784,8 @@ impl LayoutThread {
     /// Shuts down the layout thread now. If there are any DOM nodes left, layout will now (safely)
     /// crash.
     fn exit_now(&mut self) {
-        if let Some(ref mut traversal) = self.parallel_traversal {
-            traversal.shutdown()
-        }
-
-        let _ = self.paint_chan.send(LayoutToPaintMsg::Exit);
+        // Drop the rayon threadpool if present.
+        let _ = self.parallel_traversal.take();
     }
 
     fn handle_add_stylesheet<'a, 'b>(&self,
@@ -857,7 +844,7 @@ impl LayoutThread {
             _ => return None,
         };
 
-        flow_ref::deref_mut(&mut flow).mark_as_root();
+        FlowRef::deref_mut(&mut flow).mark_as_root();
 
         Some(flow)
     }
@@ -867,7 +854,7 @@ impl LayoutThread {
     /// This corresponds to `Reflow()` in Gecko and `layout()` in WebKit/Blink and should be
     /// benchmarked against those two. It is marked `#[inline(never)]` to aid profiling.
     #[inline(never)]
-    fn solve_constraints(layout_root: &mut FlowRef,
+    fn solve_constraints(layout_root: &mut Flow,
                          shared_layout_context: &SharedLayoutContext) {
         let _scope = layout_debug_scope!("solve_constraints");
         sequential::traverse_flow_tree_preorder(layout_root, shared_layout_context);
@@ -878,8 +865,8 @@ impl LayoutThread {
     /// This corresponds to `Reflow()` in Gecko and `layout()` in WebKit/Blink and should be
     /// benchmarked against those two. It is marked `#[inline(never)]` to aid profiling.
     #[inline(never)]
-    fn solve_constraints_parallel(traversal: &mut WorkQueue<SharedLayoutContext, WorkQueueData>,
-                                  layout_root: &mut FlowRef,
+    fn solve_constraints_parallel(traversal: &rayon::ThreadPool,
+                                  layout_root: &mut Flow,
                                   profiler_metadata: Option<TimerMetadata>,
                                   time_profiler_chan: time::ProfilerChan,
                                   shared_layout_context: &SharedLayoutContext) {
@@ -894,125 +881,114 @@ impl LayoutThread {
                                               traversal);
     }
 
+    /// Computes the stacking-relative positions of all flows and, if the painting is dirty and the
+    /// reflow goal and query type need it, builds the display list.
     fn compute_abs_pos_and_build_display_list(&mut self,
                                               data: &Reflow,
-                                              layout_root: &mut FlowRef,
+                                              query_type: Option<&ReflowQueryType>,
+                                              document: Option<&ServoLayoutDocument>,
+                                              layout_root: &mut Flow,
                                               shared_layout_context: &mut SharedLayoutContext,
                                               rw_data: &mut LayoutThreadData) {
-        let writing_mode = flow::base(&**layout_root).writing_mode;
+        let writing_mode = flow::base(layout_root).writing_mode;
         let (metadata, sender) = (self.profiler_metadata(), self.time_profiler_chan.clone());
         profile(time::ProfilerCategory::LayoutDispListBuild,
                 metadata.clone(),
                 sender.clone(),
                 || {
-            flow::mut_base(flow_ref::deref_mut(layout_root)).stacking_relative_position =
+            flow::mut_base(layout_root).stacking_relative_position =
                 LogicalPoint::zero(writing_mode).to_physical(writing_mode,
                                                              self.viewport_size);
 
-            flow::mut_base(flow_ref::deref_mut(layout_root)).clip =
+            flow::mut_base(layout_root).clip =
                 ClippingRegion::from_rect(&data.page_clip_rect);
 
-            if flow::base(&**layout_root).restyle_damage.contains(REPAINT) ||
+            if flow::base(layout_root).restyle_damage.contains(REPOSITION) {
+                layout_root.traverse_preorder(&ComputeAbsolutePositions {
+                    layout_context: shared_layout_context
+                });
+            }
+
+            if flow::base(layout_root).restyle_damage.contains(REPAINT) ||
                     rw_data.display_list.is_none() {
-                let mut root_stacking_context = StackingContext::new(StackingContextId::new(0),
-                                                                     StackingContextType::Real,
-                                                                     &Rect::zero(),
-                                                                     &Rect::zero(),
-                                                                     0,
-                                                                     filter::T::new(Vec::new()),
-                                                                     mix_blend_mode::T::normal,
-                                                                     Matrix4D::identity(),
-                                                                     Matrix4D::identity(),
-                                                                     true,
-                                                                     false,
-                                                                     None);
+                let display_list_needed = query_type.map(reflow_query_type_needs_display_list)
+                                                    .unwrap_or(false);
+                match (data.goal, display_list_needed) {
+                    (ReflowGoal::ForDisplay, _) | (ReflowGoal::ForScriptQuery, true) => {
+                        let mut build_state =
+                            sequential::build_display_list_for_subtree(layout_root,
+                                                                       shared_layout_context);
 
-                let display_list_entries =
-                    sequential::build_display_list_for_subtree(layout_root,
-                                                               &mut root_stacking_context,
-                                                               shared_layout_context);
+                        debug!("Done building display list.");
 
-                debug!("Done building display list.");
+                        let root_size = {
+                            let root_flow = flow::base(layout_root);
+                            if rw_data.stylist.viewport_constraints().is_some() {
+                                root_flow.position.size.to_physical(root_flow.writing_mode)
+                            } else {
+                                root_flow.overflow.scroll.size
+                            }
+                        };
 
-                let root_background_color = get_root_flow_background_color(
-                    flow_ref::deref_mut(layout_root));
-                let root_size = {
-                    let root_flow = flow::base(&**layout_root);
-                    if rw_data.stylist.viewport_constraints().is_some() {
-                        root_flow.position.size.to_physical(root_flow.writing_mode)
-                    } else {
-                        root_flow.overflow.scroll.size
+                        let origin = Rect::new(Point2D::new(Au(0), Au(0)), root_size);
+                        build_state.root_stacking_context.bounds = origin;
+                        build_state.root_stacking_context.overflow = origin;
+
+                        if !build_state.iframe_sizes.is_empty() {
+                            // build_state.iframe_sizes is only used here, so its okay to replace
+                            // it with an empty vector
+                            let iframe_sizes = std::mem::replace(&mut build_state.iframe_sizes, vec![]);
+                            let msg = ConstellationMsg::FrameSizes(iframe_sizes);
+                            if let Err(e) = self.constellation_chan.send(msg) {
+                                warn!("Layout resize to constellation failed ({}).", e);
+                            }
+                        }
+
+                        rw_data.display_list = Some(Arc::new(build_state.to_display_list()));
                     }
-                };
-
-                let origin = Rect::new(Point2D::new(Au(0), Au(0)), root_size);
-                root_stacking_context.bounds = origin;
-                root_stacking_context.overflow = origin;
-                root_stacking_context.layer_info =
-                    Some(LayerInfo::new(layout_root.layer_id(),
-                                        ScrollPolicy::Scrollable,
-                                        None,
-                                        root_background_color));
-
-                rw_data.display_list =
-                    Some(Arc::new(DisplayList::new(root_stacking_context, display_list_entries)))
-            }
-
-            if data.goal == ReflowGoal::ForDisplay {
-                let display_list = (*rw_data.display_list.as_ref().unwrap()).clone();
-
-                if opts::get().dump_display_list {
-                    display_list.print();
-                }
-                if opts::get().dump_display_list_json {
-                    println!("{}", serde_json::to_string_pretty(&display_list).unwrap());
-                }
-
-                debug!("Layout done!");
-
-                self.epoch.next();
-
-                if let Some(ref mut webrender_api) = self.webrender_api {
-                    // TODO: Avoid the temporary conversion and build webrender sc/dl directly!
-                    let Epoch(epoch_number) = self.epoch;
-                    let epoch = webrender_traits::Epoch(epoch_number);
-                    let pipeline_id = self.id.to_webrender();
-
-                    // TODO(gw) For now only create a root scrolling layer!
-                    let mut frame_builder = WebRenderFrameBuilder::new(pipeline_id);
-                    let root_scroll_layer_id = frame_builder.next_scroll_layer_id();
-                    let sc_id = rw_data.display_list.as_ref().unwrap().convert_to_webrender(
-                        webrender_api,
-                        pipeline_id,
-                        epoch,
-                        Some(root_scroll_layer_id),
-                        &mut frame_builder);
-                    let root_background_color = get_root_flow_background_color(
-                        flow_ref::deref_mut(layout_root));
-                    let root_background_color =
-                        webrender_traits::ColorF::new(root_background_color.r,
-                                                      root_background_color.g,
-                                                      root_background_color.b,
-                                                      root_background_color.a);
-
-                    let viewport_size = Size2D::new(self.viewport_size.width.to_f32_px(),
-                                                    self.viewport_size.height.to_f32_px());
-
-                    webrender_api.set_root_stacking_context(
-                        sc_id,
-                        root_background_color,
-                        epoch,
-                        pipeline_id,
-                        viewport_size,
-                        frame_builder.stacking_contexts,
-                        frame_builder.display_lists,
-                        frame_builder.auxiliary_lists_builder.finalize());
-                } else {
-                    self.paint_chan
-                        .send(LayoutToPaintMsg::PaintInit(self.epoch, display_list))
-                        .unwrap();
+                    (ReflowGoal::ForScriptQuery, false) => {}
                 }
             }
+
+            if data.goal != ReflowGoal::ForDisplay {
+                // Defer the paint step until the next ForDisplay.
+                //
+                // We need to tell the document about this so it doesn't
+                // incorrectly suppress reflows. See #13131.
+                document.expect("No document in a non-display reflow?")
+                        .needs_paint_from_layout();
+                return;
+            }
+            if let Some(document) = document {
+                document.will_paint();
+            }
+            let display_list = (*rw_data.display_list.as_ref().unwrap()).clone();
+
+            if opts::get().dump_display_list {
+                display_list.print();
+            }
+            if opts::get().dump_display_list_json {
+                println!("{}", serde_json::to_string_pretty(&display_list).unwrap());
+            }
+
+            debug!("Layout done!");
+
+            // TODO: Avoid the temporary conversion and build webrender sc/dl directly!
+            let builder = rw_data.display_list.as_ref().unwrap().convert_to_webrender(self.id);
+
+            let viewport_size = Size2D::new(self.viewport_size.width.to_f32_px(),
+                                            self.viewport_size.height.to_f32_px());
+
+            self.epoch.next();
+            let Epoch(epoch_number) = self.epoch;
+
+            let viewport_size = webrender_traits::LayoutSize::from_untyped(&viewport_size);
+            self.webrender_api.set_root_display_list(
+                Some(get_root_flow_background_color(layout_root)),
+                webrender_traits::Epoch(epoch_number),
+                viewport_size,
+                builder);
+            self.webrender_api.generate_frame();
         });
     }
 
@@ -1022,18 +998,30 @@ impl LayoutThread {
                              possibly_locked_rw_data: &mut RwData<'a, 'b>) {
         let document = unsafe { ServoLayoutNode::new(&data.document) };
         let document = document.as_document().unwrap();
+        self.quirks_mode = Some(document.quirks_mode());
 
+        // FIXME(pcwalton): Combine `ReflowGoal` and `ReflowQueryType`. Then remove this assert.
+        debug_assert!((data.reflow_info.goal == ReflowGoal::ForDisplay &&
+                       data.query_type == ReflowQueryType::NoQuery) ||
+                      (data.reflow_info.goal == ReflowGoal::ForScriptQuery &&
+                       data.query_type != ReflowQueryType::NoQuery));
+
+        // Parallelize if there's more than 750 objects based on rzambre's suggestion
+        // https://github.com/servo/servo/issues/10110
+        self.parallel_flag = self.layout_threads > 1 && data.dom_count > 750;
         debug!("layout: received layout request for: {}", self.url);
+        debug!("Number of objects in DOM: {}", data.dom_count);
+        debug!("layout: parallel? {}", self.parallel_flag);
 
         let mut rw_data = possibly_locked_rw_data.lock();
 
-        let node: ServoLayoutNode = match document.root_node() {
+        let element: ServoLayoutElement = match document.root_node() {
             None => {
                 // Since we cannot compute anything, give spec-required placeholders.
                 debug!("layout: No root node: bailing");
                 match data.query_type {
                     ReflowQueryType::ContentBoxQuery(_) => {
-                        rw_data.content_box_response = Rect::zero();
+                        rw_data.content_box_response = None;
                     },
                     ReflowQueryType::ContentBoxesQuery(_) => {
                         rw_data.content_boxes_response = Vec::new();
@@ -1044,17 +1032,17 @@ impl LayoutThread {
                     ReflowQueryType::NodeGeometryQuery(_) => {
                         rw_data.client_rect_response = Rect::zero();
                     },
-                    ReflowQueryType::NodeLayerIdQuery(_) => {
-                        rw_data.layer_id_response = None;
-                    },
                     ReflowQueryType::NodeScrollGeometryQuery(_) => {
                         rw_data.scroll_area_response = Rect::zero();
                     },
                     ReflowQueryType::NodeOverflowQuery(_) => {
                         rw_data.overflow_response = NodeOverflowResponse(None);
                     },
+                    ReflowQueryType::NodeScrollRootIdQuery(_) => {
+                        rw_data.scroll_root_id_response = None;
+                    },
                     ReflowQueryType::ResolvedStyleQuery(_, _, _) => {
-                        rw_data.resolved_style_response = None;
+                        rw_data.resolved_style_response = String::new();
                     },
                     ReflowQueryType::OffsetParentQuery(_) => {
                         rw_data.offset_parent_response = OffsetParentResponse::empty();
@@ -1062,17 +1050,19 @@ impl LayoutThread {
                     ReflowQueryType::MarginStyleQuery(_) => {
                         rw_data.margin_style_response = MarginStyleResponse::empty();
                     },
+                    ReflowQueryType::TextIndexQuery(..) => {
+                        rw_data.text_index_response = TextIndexResponse(None);
+                    }
                     ReflowQueryType::NoQuery => {}
                 }
                 return;
             },
-            Some(x) => x,
+            Some(x) => x.as_element().unwrap(),
         };
 
-        debug!("layout: received layout request for: {}", self.url);
-        if log_enabled!(log::LogLevel::Debug) {
-            node.dump();
-        }
+        debug!("layout: processing reflow request for: {:?} ({}) (query={:?})",
+               element, self.url, data.query_type);
+        debug!("{:?}", ShowSubtree(element.as_node()));
 
         let initial_viewport = data.window_size.initial_viewport;
         let old_viewport_size = self.viewport_size;
@@ -1083,43 +1073,40 @@ impl LayoutThread {
         let device = Device::new(MediaType::Screen, initial_viewport);
         Arc::get_mut(&mut rw_data.stylist).unwrap().set_device(device, &data.document_stylesheets);
 
-        let constraints = rw_data.stylist.viewport_constraints().clone();
-        self.viewport_size = match constraints {
-            Some(ref constraints) => {
+        self.viewport_size =
+            rw_data.stylist.viewport_constraints().map_or(current_screen_size, |constraints| {
                 debug!("Viewport constraints: {:?}", constraints);
 
                 // other rules are evaluated against the actual viewport
                 Size2D::new(Au::from_f32_px(constraints.size.width),
                             Au::from_f32_px(constraints.size.height))
-            }
-            None => current_screen_size,
-        };
+            });
 
         // Handle conditions where the entire flow tree is invalid.
         let mut needs_dirtying = false;
 
         let viewport_size_changed = self.viewport_size != old_viewport_size;
         if viewport_size_changed {
-            if let Some(constraints) = constraints {
+            if let Some(constraints) = rw_data.stylist.viewport_constraints() {
                 // let the constellation know about the viewport constraints
                 rw_data.constellation_chan
-                       .send(ConstellationMsg::ViewportConstrained(self.id, constraints))
+                       .send(ConstellationMsg::ViewportConstrained(self.id, constraints.clone()))
                        .unwrap();
             }
-            if data.document_stylesheets.iter().any(|sheet| sheet.dirty_on_viewport_size_change) {
-                let mut iter = node.traverse_preorder();
+            if data.document_stylesheets.iter().any(|sheet| sheet.dirty_on_viewport_size_change()) {
+                let mut iter = element.as_node().traverse_preorder();
 
                 let mut next = iter.next();
                 while let Some(node) = next {
                     if node.needs_dirty_on_viewport_size_changed() {
-                        // NB: The dirty bit is propagated down the tree.
-                        unsafe { node.set_dirty(true); }
-
-                        let mut current = node.parent_node();
-                        while let Some(node) = current {
-                            if node.has_dirty_descendants() { break; }
-                            unsafe { node.set_dirty_descendants(true); }
-                            current = node.parent_node();
+                        let el = node.as_element().unwrap();
+                        if let Some(mut d) = element.mutate_data() {
+                            if d.has_styles() {
+                                d.ensure_restyle().hint.insert(&StoredRestyleHint::subtree());
+                            }
+                        }
+                        if let Some(p) = el.parent_element() {
+                            unsafe { p.note_dirty_descendant() };
                         }
 
                         next = iter.next_skipping_children();
@@ -1132,26 +1119,49 @@ impl LayoutThread {
 
         // If the entire flow tree is invalid, then it will be reflowed anyhow.
         needs_dirtying |= Arc::get_mut(&mut rw_data.stylist).unwrap().update(&data.document_stylesheets,
+                                                                             Some(&*UA_STYLESHEETS),
                                                                              data.stylesheets_changed);
         let needs_reflow = viewport_size_changed && !needs_dirtying;
-        unsafe {
-            if needs_dirtying {
-                // NB: The dirty flag is propagated down during the restyle
-                // process.
-                node.set_dirty(true);
+        if needs_dirtying {
+            if let Some(mut d) = element.mutate_data() {
+                if d.has_styles() {
+                    d.ensure_restyle().hint.insert(&StoredRestyleHint::subtree());
+                }
             }
         }
         if needs_reflow {
-            if let Some(mut flow) = self.try_get_layout_root(node) {
-                LayoutThread::reflow_all_nodes(flow_ref::deref_mut(&mut flow));
+            if let Some(mut flow) = self.try_get_layout_root(element.as_node()) {
+                LayoutThread::reflow_all_nodes(FlowRef::deref_mut(&mut flow));
             }
         }
 
-        let modified_elements = document.drain_modified_elements();
+        let restyles = document.drain_pending_restyles();
+        debug!("Draining restyles: {} (needs dirtying? {:?})", restyles.len(), needs_dirtying);
         if !needs_dirtying {
-            for (el, snapshot) in modified_elements {
-                let hint = rw_data.stylist.compute_restyle_hint(&el, &snapshot, el.get_state());
-                el.note_restyle_hint(hint);
+            for (el, restyle) in restyles {
+                // Propagate the descendant bit up the ancestors. Do this before
+                // the restyle calculation so that we can also do it for new
+                // unstyled nodes, which the descendants bit helps us find.
+                if let Some(parent) = el.parent_element() {
+                    unsafe { parent.note_dirty_descendant() };
+                }
+
+                // If we haven't styled this node yet, we don't need to track a restyle.
+                let mut data = match el.mutate_layout_data() {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let mut style_data = &mut data.base.style_data;
+                debug_assert!(style_data.has_current_styles());
+                let mut restyle_data = style_data.ensure_restyle();
+
+                // Stash the data on the element for processing by the style system.
+                restyle_data.hint = restyle.hint.into();
+                restyle_data.damage = restyle.damage;
+                if let Some(s) = restyle.snapshot {
+                    restyle_data.snapshot.ensure(move || s);
+                }
+                debug!("Noting restyle for {:?}: {:?}", el, restyle_data);
             }
         }
 
@@ -1160,25 +1170,40 @@ impl LayoutThread {
                                                                          viewport_size_changed,
                                                                          data.reflow_info.goal);
 
-        if node.is_dirty() || node.has_dirty_descendants() {
+        // NB: Type inference falls apart here for some reason, so we need to be very verbose. :-(
+        let traversal_driver = if self.parallel_flag && self.parallel_traversal.is_some() {
+            TraversalDriver::Parallel
+        } else {
+            TraversalDriver::Sequential
+        };
+
+        let traversal = RecalcStyleAndConstructFlows::new(shared_layout_context, traversal_driver);
+        let dom_depth = Some(0); // This is always the root node.
+        let token = {
+            let stylist = &<RecalcStyleAndConstructFlows as
+                            DomTraversal<ServoLayoutElement>>::shared_context(&traversal).stylist;
+            <RecalcStyleAndConstructFlows as
+             DomTraversal<ServoLayoutElement>>::pre_traverse(element, stylist, /* skip_root = */ false)
+        };
+
+        if token.should_traverse() {
             // Recalculate CSS styles and rebuild flows and fragments.
             profile(time::ProfilerCategory::LayoutStyleRecalc,
                     self.profiler_metadata(),
                     self.time_profiler_chan.clone(),
                     || {
                 // Perform CSS selector matching and flow construction.
-                match self.parallel_traversal {
-                    None => {
-                        sequential::traverse_dom::<ServoLayoutNode, RecalcStyleAndConstructFlows>(
-                            node, &shared_layout_context);
-                    }
-                    Some(ref mut traversal) => {
-                        parallel::traverse_dom::<ServoLayoutNode, RecalcStyleAndConstructFlows>(
-                            node, &shared_layout_context, traversal);
-                    }
+                if traversal_driver.is_parallel() {
+                    let pool = self.parallel_traversal.as_mut().unwrap();
+                    // Parallel mode
+                    parallel::traverse_dom::<ServoLayoutElement, RecalcStyleAndConstructFlows>(
+                        &traversal, element, dom_depth, token, pool);
+                } else {
+                    // Sequential mode
+                    sequential::traverse_dom::<ServoLayoutElement, RecalcStyleAndConstructFlows>(
+                        &traversal, element, token);
                 }
             });
-
             // TODO(pcwalton): Measure energy usage of text shaping, perhaps?
             let text_shaping_time =
                 (font::get_and_reset_text_shaping_performance_counter() as u64) /
@@ -1192,138 +1217,115 @@ impl LayoutThread {
                                     0);
 
             // Retrieve the (possibly rebuilt) root flow.
-            self.root_flow = self.try_get_layout_root(node);
+            self.root_flow = self.try_get_layout_root(element.as_node());
         }
 
+        shared_layout_context = traversal.destroy();
+
         if opts::get().dump_style_tree {
-            node.dump_style();
+            println!("{:?}", ShowSubtreeDataAndPrimaryValues(element.as_node()));
         }
+
+        if opts::get().dump_rule_tree {
+            shared_layout_context.style_context.stylist.rule_tree.dump_stdout();
+        }
+
+        // GC the rule tree if some heuristics are met.
+        unsafe { shared_layout_context.style_context.stylist.rule_tree.maybe_gc(); }
 
         // Perform post-style recalculation layout passes.
         self.perform_post_style_recalc_layout_passes(&data.reflow_info,
+                                                     Some(&data.query_type),
+                                                     Some(&document),
                                                      &mut rw_data,
                                                      &mut shared_layout_context);
 
-        if let Some(mut root_flow) = self.root_flow.clone() {
-            match data.query_type {
-                ReflowQueryType::ContentBoxQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.content_box_response = process_content_box_request(node, &mut root_flow);
-                },
-                ReflowQueryType::ContentBoxesQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.content_boxes_response = process_content_boxes_request(node, &mut root_flow);
-                },
-                ReflowQueryType::HitTestQuery(translated_point, client_point, update_cursor) => {
-                    let translated_point =
-                        Point2D::new(Au::from_f32_px(translated_point.x),
-                                     Au::from_f32_px(translated_point.y));
-
-                    let client_point =
-                        Point2D::new(Au::from_f32_px(client_point.x),
-                                     Au::from_f32_px(client_point.y));
-
-                    let result = rw_data.display_list
-                                        .as_ref()
-                                        .expect("Tried to hit test with no display list")
-                                        .hit_test(&translated_point,
-                                                  &client_point,
-                                                  &rw_data.stacking_context_scroll_offsets);
-                    rw_data.hit_test_response = (result.last().cloned(), update_cursor);
-                },
-                ReflowQueryType::NodeGeometryQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.client_rect_response = process_node_geometry_request(node, &mut root_flow);
-                },
-                ReflowQueryType::NodeScrollGeometryQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.scroll_area_response = process_node_scroll_area_request(node, &mut root_flow);
-                },
-                ReflowQueryType::NodeOverflowQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.overflow_response = process_node_overflow_request(node);
-                },
-                ReflowQueryType::NodeLayerIdQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.layer_id_response = Some(process_node_layer_id_request(node));
-                },
-                ReflowQueryType::ResolvedStyleQuery(node, ref pseudo, ref property) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    let layout_context = LayoutContext::new(&shared_layout_context);
-                    rw_data.resolved_style_response =
-                        process_resolved_style_request(node,
-                                                       &layout_context,
-                                                       pseudo,
-                                                       property,
-                                                       &mut root_flow);
-                },
-                ReflowQueryType::OffsetParentQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.offset_parent_response = process_offset_parent_query(node, &mut root_flow);
-                },
-                ReflowQueryType::MarginStyleQuery(node) => {
-                    let node = unsafe { ServoLayoutNode::new(&node) };
-                    rw_data.margin_style_response = process_margin_style_query(node);
-                },
-                ReflowQueryType::NoQuery => {}
-            }
-        }
+        self.respond_to_query_if_necessary(&data.query_type,
+                                           &mut *rw_data,
+                                           &mut shared_layout_context);
     }
 
-    fn set_visible_rects<'a, 'b>(&mut self,
-                                 new_visible_rects: Vec<(LayerId, Rect<Au>)>,
-                                 possibly_locked_rw_data: &mut RwData<'a, 'b>)
-                                 -> bool {
-        let mut rw_data = possibly_locked_rw_data.lock();
-
-        // First, determine if we need to regenerate the display lists. This will happen if the
-        // layers have moved more than `DISPLAY_PORT_THRESHOLD_SIZE_FACTOR` away from their last
-        // positions.
-        let mut must_regenerate_display_lists = false;
-        let mut old_visible_rects = HashMap::with_hasher(Default::default());
-        let inflation_amount =
-            Size2D::new(self.viewport_size.width * DISPLAY_PORT_THRESHOLD_SIZE_FACTOR,
-                        self.viewport_size.height * DISPLAY_PORT_THRESHOLD_SIZE_FACTOR);
-        for &(ref layer_id, ref new_visible_rect) in &new_visible_rects {
-            match self.visible_rects.get(layer_id) {
-                None => {
-                    old_visible_rects.insert(*layer_id, *new_visible_rect);
-                }
-                Some(old_visible_rect) => {
-                    old_visible_rects.insert(*layer_id, *old_visible_rect);
-
-                    if !old_visible_rect.inflate(inflation_amount.width, inflation_amount.height)
-                                        .intersects(new_visible_rect) {
-                        must_regenerate_display_lists = true;
-                    }
-                }
-            }
-        }
-
-        if !must_regenerate_display_lists {
-            // Update `visible_rects` in case there are new layers that were discovered.
-            self.visible_rects = Arc::new(old_visible_rects);
-            return true
-        }
-
-        debug!("regenerating display lists!");
-        for &(ref layer_id, ref new_visible_rect) in &new_visible_rects {
-            old_visible_rects.insert(*layer_id, *new_visible_rect);
-        }
-        self.visible_rects = Arc::new(old_visible_rects);
-
-        // Regenerate the display lists.
-        let reflow_info = Reflow {
-            goal: ReflowGoal::ForDisplay,
-            page_clip_rect: max_rect(),
+    fn respond_to_query_if_necessary(&mut self,
+                                     query_type: &ReflowQueryType,
+                                     rw_data: &mut LayoutThreadData,
+                                     shared: &mut SharedLayoutContext) {
+        let mut root_flow = match self.root_flow.clone() {
+            Some(root_flow) => root_flow,
+            None => return,
         };
+        let root_flow = FlowRef::deref_mut(&mut root_flow);
+        match *query_type {
+            ReflowQueryType::ContentBoxQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.content_box_response = process_content_box_request(node, root_flow);
+            },
+            ReflowQueryType::ContentBoxesQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.content_boxes_response = process_content_boxes_request(node, root_flow);
+            },
+            ReflowQueryType::HitTestQuery(translated_point, client_point, update_cursor) => {
+                let mut translated_point = Point2D::new(Au::from_f32_px(translated_point.x),
+                                                    Au::from_f32_px(translated_point.y));
 
-        let mut layout_context = self.build_shared_layout_context(&*rw_data,
-                                                                  false,
-                                                                  reflow_info.goal);
+                let client_point = Point2D::new(Au::from_f32_px(client_point.x),
+                                                Au::from_f32_px(client_point.y));
 
-        self.perform_post_main_layout_passes(&reflow_info, &mut *rw_data, &mut layout_context);
-        true
+                let result = rw_data.display_list
+                                    .as_ref()
+                                    .expect("Tried to hit test with no display list")
+                                    .hit_test(&mut translated_point,
+                                              &client_point,
+                                              &rw_data.stacking_context_scroll_offsets);
+                rw_data.hit_test_response = (result.last().cloned(), update_cursor);
+            },
+            ReflowQueryType::TextIndexQuery(node, mouse_x, mouse_y) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                let opaque_node = node.opaque();
+                let client_point = Point2D::new(Au::from_px(mouse_x),
+                                                Au::from_px(mouse_y));
+                rw_data.text_index_response =
+                    TextIndexResponse(rw_data.display_list
+                                      .as_ref()
+                                      .expect("Tried to hit test with no display list")
+                                      .text_index(opaque_node,
+                                                  &client_point,
+                                                  &rw_data.stacking_context_scroll_offsets));
+            },
+            ReflowQueryType::NodeGeometryQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.client_rect_response = process_node_geometry_request(node, root_flow);
+            },
+            ReflowQueryType::NodeScrollGeometryQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.scroll_area_response = process_node_scroll_area_request(node, root_flow);
+            },
+            ReflowQueryType::NodeOverflowQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.overflow_response = process_node_overflow_request(node);
+            },
+            ReflowQueryType::NodeScrollRootIdQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.scroll_root_id_response = Some(process_node_scroll_root_id_request(node));
+            },
+            ReflowQueryType::ResolvedStyleQuery(node, ref pseudo, ref property) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.resolved_style_response =
+                    process_resolved_style_request(shared,
+                                                   node,
+                                                   pseudo,
+                                                   property,
+                                                   root_flow);
+            },
+            ReflowQueryType::OffsetParentQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.offset_parent_response = process_offset_parent_query(node, root_flow);
+            },
+            ReflowQueryType::MarginStyleQuery(node) => {
+                let node = unsafe { ServoLayoutNode::new(&node) };
+                rw_data.margin_style_response = process_margin_style_query(node);
+            },
+            ReflowQueryType::NoQuery => {}
+        }
     }
 
     fn set_stacking_context_scroll_states<'a, 'b>(
@@ -1335,14 +1337,13 @@ impl LayoutThread {
         let mut layout_scroll_states = HashMap::new();
         for new_scroll_state in &new_scroll_states {
             let offset = new_scroll_state.scroll_offset;
-            layout_scroll_states.insert(new_scroll_state.stacking_context_id, offset);
+            layout_scroll_states.insert(new_scroll_state.scroll_root_id, offset);
 
-            if new_scroll_state.stacking_context_id == StackingContextId::root() {
+            if new_scroll_state.scroll_root_id == ScrollRootId::root() {
                 script_scroll_states.push((UntrustedNodeAddress::from_id(0), offset))
-            } else if !new_scroll_state.stacking_context_id.is_special() &&
-                    new_scroll_state.stacking_context_id.fragment_type() ==
-                        FragmentType::FragmentBody {
-                let id = new_scroll_state.stacking_context_id.id();
+            } else if !new_scroll_state.scroll_root_id.is_special() &&
+                    new_scroll_state.scroll_root_id.fragment_type() == FragmentType::FragmentBody {
+                let id = new_scroll_state.scroll_root_id.id();
                 script_scroll_states.push((UntrustedNodeAddress::from_id(id), offset))
             }
         }
@@ -1357,6 +1358,10 @@ impl LayoutThread {
     }
 
     fn tick_animations(&mut self, rw_data: &mut LayoutThreadData) {
+        if opts::get().relayout_event {
+            println!("**** pipeline={}\tForDisplay\tSpecial\tAnimationTick", self.id);
+        }
+
         let reflow_info = Reflow {
             goal: ReflowGoal::ForDisplay,
             page_clip_rect: max_rect(),
@@ -1368,18 +1373,20 @@ impl LayoutThread {
 
         if let Some(mut root_flow) = self.root_flow.clone() {
             // Perform an abbreviated style recalc that operates without access to the DOM.
-            let animations = self.running_animations.read().unwrap();
+            let animations = self.running_animations.read();
             profile(time::ProfilerCategory::LayoutStyleRecalc,
                     self.profiler_metadata(),
                     self.time_profiler_chan.clone(),
                     || {
                         animation::recalc_style_for_animations(&layout_context,
-                                                               flow_ref::deref_mut(&mut root_flow),
+                                                               FlowRef::deref_mut(&mut root_flow),
                                                                &animations)
                     });
         }
 
         self.perform_post_style_recalc_layout_passes(&reflow_info,
+                                                     None,
+                                                     None,
                                                      &mut *rw_data,
                                                      &mut layout_context);
     }
@@ -1402,19 +1409,24 @@ impl LayoutThread {
             return
         }
         self.perform_post_style_recalc_layout_passes(&reflow_info,
+                                                     None,
+                                                     None,
                                                      &mut *rw_data,
                                                      &mut layout_context);
     }
 
     fn perform_post_style_recalc_layout_passes(&mut self,
                                                data: &Reflow,
+                                               query_type: Option<&ReflowQueryType>,
+                                               document: Option<&ServoLayoutDocument>,
                                                rw_data: &mut LayoutThreadData,
-                                               layout_context: &mut SharedLayoutContext) {
+                                               shared: &mut SharedLayoutContext) {
         if let Some(mut root_flow) = self.root_flow.clone() {
             // Kick off animations if any were triggered, expire completed ones.
             animation::update_animation_state(&self.constellation_chan,
-                                              &mut *self.running_animations.write().unwrap(),
-                                              &mut *self.expired_animations.write().unwrap(),
+                                              &self.script_chan,
+                                              &mut *self.running_animations.write(),
+                                              &mut *self.expired_animations.write(),
                                               &self.new_animations_receiver,
                                               self.id,
                                               &self.timer);
@@ -1425,10 +1437,10 @@ impl LayoutThread {
                     || {
                 // Call `compute_layout_damage` even in non-incremental mode, because it sets flags
                 // that are needed in both incremental and non-incremental traversals.
-                let damage = flow_ref::deref_mut(&mut root_flow).compute_layout_damage();
+                let damage = FlowRef::deref_mut(&mut root_flow).compute_layout_damage();
 
                 if opts::get().nonincremental_layout || damage.contains(REFLOW_ENTIRE_DOCUMENT) {
-                    flow_ref::deref_mut(&mut root_flow).reflow_entire_document()
+                    FlowRef::deref_mut(&mut root_flow).reflow_entire_document()
                 }
             });
 
@@ -1440,13 +1452,13 @@ impl LayoutThread {
             profile(time::ProfilerCategory::LayoutGeneratedContent,
                     self.profiler_metadata(),
                     self.time_profiler_chan.clone(),
-                    || sequential::resolve_generated_content(&mut root_flow, &layout_context));
+                    || sequential::resolve_generated_content(FlowRef::deref_mut(&mut root_flow), &shared));
 
             // Guess float placement.
             profile(time::ProfilerCategory::LayoutFloatPlacementSpeculation,
                     self.profiler_metadata(),
                     self.time_profiler_chan.clone(),
-                    || sequential::guess_float_placement(flow_ref::deref_mut(&mut root_flow)));
+                    || sequential::guess_float_placement(FlowRef::deref_mut(&mut root_flow)));
 
             // Perform the primary layout passes over the flow tree to compute the locations of all
             // the boxes.
@@ -1456,19 +1468,17 @@ impl LayoutThread {
                         self.time_profiler_chan.clone(),
                         || {
                     let profiler_metadata = self.profiler_metadata();
-                    match self.parallel_traversal {
-                        None => {
-                            // Sequential mode.
-                            LayoutThread::solve_constraints(&mut root_flow, &layout_context)
-                        }
-                        Some(ref mut parallel) => {
-                            // Parallel mode.
-                            LayoutThread::solve_constraints_parallel(parallel,
-                                                                   &mut root_flow,
-                                                                   profiler_metadata,
-                                                                   self.time_profiler_chan.clone(),
-                                                                   &*layout_context);
-                        }
+
+                    if let (true, Some(traversal)) = (self.parallel_flag, self.parallel_traversal.as_mut()) {
+                        // Parallel mode.
+                        LayoutThread::solve_constraints_parallel(traversal,
+                                                                 FlowRef::deref_mut(&mut root_flow),
+                                                                 profiler_metadata,
+                                                                 self.time_profiler_chan.clone(),
+                                                                 &*shared);
+                    } else {
+                        //Sequential mode
+                        LayoutThread::solve_constraints(FlowRef::deref_mut(&mut root_flow), &shared)
                     }
                 });
             }
@@ -1477,29 +1487,37 @@ impl LayoutThread {
                     self.profiler_metadata(),
                     self.time_profiler_chan.clone(),
                     || {
-                let layout_context = LayoutContext::new(&*layout_context);
-                sequential::store_overflow(&layout_context,
-                                           flow_ref::deref_mut(&mut root_flow) as &mut Flow);
+                let context = LayoutContext::new(&shared);
+                sequential::store_overflow(&context,
+                                           FlowRef::deref_mut(&mut root_flow) as &mut Flow);
             });
 
-            self.perform_post_main_layout_passes(data, rw_data, layout_context);
+            self.perform_post_main_layout_passes(data,
+                                                 query_type,
+                                                 document,
+                                                 rw_data,
+                                                 shared);
         }
     }
 
     fn perform_post_main_layout_passes(&mut self,
                                        data: &Reflow,
+                                       query_type: Option<&ReflowQueryType>,
+                                       document: Option<&ServoLayoutDocument>,
                                        rw_data: &mut LayoutThreadData,
                                        layout_context: &mut SharedLayoutContext) {
         // Build the display list if necessary, and send it to the painter.
         if let Some(mut root_flow) = self.root_flow.clone() {
             self.compute_abs_pos_and_build_display_list(data,
-                                                        &mut root_flow,
+                                                        query_type,
+                                                        document,
+                                                        FlowRef::deref_mut(&mut root_flow),
                                                         &mut *layout_context,
                                                         rw_data);
             self.first_reflow = false;
 
             if opts::get().trace_layout {
-                layout_debug::end_trace();
+                layout_debug::end_trace(self.generation);
             }
 
             if opts::get().dump_flow_tree {
@@ -1517,14 +1535,6 @@ impl LayoutThread {
         for child in flow::child_iter_mut(flow) {
             LayoutThread::reflow_all_nodes(child);
         }
-    }
-
-    /// Handles a message to destroy layout data. Layout data must be destroyed on *this* thread
-    /// because the struct type is transmuted to a different type on the script side.
-    unsafe fn handle_reap_style_and_layout_data(&self, data: OpaqueStyleAndLayoutData) {
-        let ptr: *mut RefCell<PartialStyleAndLayoutData> = *data.ptr;
-        let non_opaque: NonOpaqueStyleAndLayoutData = ptr as *mut _;
-        let _ = Box::from_raw(non_opaque);
     }
 
     /// Returns profiling information which is passed to the time profiler.
@@ -1555,18 +1565,19 @@ impl LayoutThread {
 // clearing the frame buffer to white. This ensures that setting a background
 // color on an iframe element, while the iframe content itself has a default
 // transparent background color is handled correctly.
-fn get_root_flow_background_color(flow: &mut Flow) -> AzColor {
+fn get_root_flow_background_color(flow: &mut Flow) -> webrender_traits::ColorF {
+    let transparent = webrender_traits::ColorF { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
     if !flow.is_block_like() {
-        return color::transparent()
+        return transparent;
     }
 
     let block_flow = flow.as_mut_block();
     let kid = match block_flow.base.children.iter_mut().next() {
-        None => return color::transparent(),
+        None => return transparent,
         Some(kid) => kid,
     };
     if !kid.is_block_like() {
-        return color::transparent()
+        return transparent;
     }
 
     let kid_block_flow = kid.as_block();
@@ -1574,4 +1585,65 @@ fn get_root_flow_background_color(flow: &mut Flow) -> AzColor {
                   .style
                   .resolve_color(kid_block_flow.fragment.style.get_background().background_color)
                   .to_gfx_color()
+}
+
+fn get_ua_stylesheets() -> Result<UserAgentStylesheets, &'static str> {
+    fn parse_ua_stylesheet(filename: &'static str) -> Result<Stylesheet, &'static str> {
+        let res = try!(read_resource_file(filename).map_err(|_| filename));
+        Ok(Stylesheet::from_bytes(
+            &res,
+            ServoUrl::parse(&format!("chrome://resources/{:?}", filename)).unwrap(),
+            None,
+            None,
+            Origin::UserAgent,
+            Default::default(),
+            None,
+            Box::new(StdoutErrorReporter),
+            ParserContextExtraData::default()))
+    }
+
+    let mut user_or_user_agent_stylesheets = vec!();
+    // FIXME: presentational-hints.css should be at author origin with zero specificity.
+    //        (Does it make a difference?)
+    for &filename in &["user-agent.css", "servo.css", "presentational-hints.css"] {
+        user_or_user_agent_stylesheets.push(try!(parse_ua_stylesheet(filename)));
+    }
+    for &(ref contents, ref url) in &opts::get().user_stylesheets {
+        user_or_user_agent_stylesheets.push(Stylesheet::from_bytes(
+            &contents, url.clone(), None, None, Origin::User, Default::default(),
+            None, Box::new(StdoutErrorReporter),
+            ParserContextExtraData::default()));
+    }
+
+    let quirks_mode_stylesheet = try!(parse_ua_stylesheet("quirks-mode.css"));
+
+    Ok(UserAgentStylesheets {
+        user_or_user_agent_stylesheets: user_or_user_agent_stylesheets,
+        quirks_mode_stylesheet: quirks_mode_stylesheet,
+    })
+}
+
+/// Returns true if the given reflow query type needs a full, up-to-date display list to be present
+/// or false if it only needs stacking-relative positions.
+fn reflow_query_type_needs_display_list(query_type: &ReflowQueryType) -> bool {
+    match *query_type {
+        ReflowQueryType::HitTestQuery(..) | ReflowQueryType::TextIndexQuery(..) => true,
+        ReflowQueryType::ContentBoxQuery(_) | ReflowQueryType::ContentBoxesQuery(_) |
+        ReflowQueryType::NodeGeometryQuery(_) | ReflowQueryType::NodeScrollGeometryQuery(_) |
+        ReflowQueryType::NodeOverflowQuery(_) | ReflowQueryType::NodeScrollRootIdQuery(_) |
+        ReflowQueryType::ResolvedStyleQuery(..) | ReflowQueryType::OffsetParentQuery(_) |
+        ReflowQueryType::MarginStyleQuery(_) | ReflowQueryType::NoQuery => false,
+    }
+}
+
+lazy_static! {
+    static ref UA_STYLESHEETS: UserAgentStylesheets = {
+        match get_ua_stylesheets() {
+            Ok(stylesheets) => stylesheets,
+            Err(filename) => {
+                error!("Failed to load UA stylesheet {}!", filename);
+                process::exit(1);
+            }
+        }
+    };
 }

@@ -10,17 +10,17 @@ use interfaces::{cef_browser_t, cef_browser_host_t, cef_client_t, cef_frame_t};
 use interfaces::{cef_request_context_t};
 use servo::Browser;
 use types::{cef_browser_settings_t, cef_string_t, cef_window_info_t, cef_window_handle_t};
-use util::thread::spawn_named;
 use window;
 use wrappers::CefWrap;
 
 use compositing::windowing::{WindowNavigateMsg, WindowEvent};
 use glutin_app;
 use libc::c_int;
-use std::cell::{Cell, RefCell, BorrowState};
+use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::thread;
 
 thread_local!(pub static ID_COUNTER: AtomicIsize = AtomicIsize::new(0));
 thread_local!(pub static BROWSERS: RefCell<Vec<CefBrowser>> = RefCell::new(vec!()));
@@ -183,24 +183,18 @@ impl ServoCefBrowserExtensions for CefBrowser {
     }
 
     fn send_window_event(&self, event: WindowEvent) {
-        self.downcast().message_queue.borrow_mut().push(event);
+        let browser = self.downcast();
 
-        loop {
-            match self.downcast().servo_browser.borrow_state() {
-                BorrowState::Unused => {
-                    let event = match self.downcast().message_queue.borrow_mut().pop() {
-                        None => return,
-                        Some(event) => event,
-                    };
-                    self.downcast().servo_browser.borrow_mut().handle_event(event);
-                }
-                _ => {
-                    // We're trying to send an event while processing another one. This will
-                    // cause general badness, so queue up that event instead of immediately
-                    // processing it.
-                    break
-                }
+        if let Ok(mut servo_browser) = browser.servo_browser.try_borrow_mut() {
+            servo_browser.handle_event(event);
+            while let Some(event) = browser.message_queue.borrow_mut().pop() {
+                servo_browser.handle_event(event);
             }
+        } else {
+            // If we fail to borrow mutably, this means we're trying to send an
+            // event while processing another one. This will cause general badness,
+            // we just queue up that event instead of immediately processing it.
+            browser.message_queue.borrow_mut().push(event);
         }
     }
 
@@ -299,9 +293,9 @@ cef_static_method_impls! {
         let _browser_settings: &cef_browser_settings_t = _browser_settings;
         let _request_context: CefRequestContext = _request_context;
         browser_host_create(window_info, client, url, false);
-        spawn_named("async_browser_creation".to_owned(), move || {
+        thread::Builder::new().name("async_browser_creation".to_owned()).spawn(move || {
             window::app_wakeup();
-        });
+        }).expect("Thread spawning failed");
         1i32
     }}
     fn cef_browser_host_create_browser_sync(window_info: *const cef_window_info_t,

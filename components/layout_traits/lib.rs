@@ -10,8 +10,7 @@ extern crate msg;
 extern crate net_traits;
 extern crate profile_traits;
 extern crate script_traits;
-extern crate url;
-extern crate util;
+extern crate servo_url;
 extern crate webrender_traits;
 
 // This module contains traits in layout used generically
@@ -20,34 +19,32 @@ extern crate webrender_traits;
 //   that these modules won't have to depend on layout.
 
 use gfx::font_cache_thread::FontCacheThread;
-use gfx::paint_thread::LayoutToPaintMsg;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
-use msg::constellation_msg::PipelineId;
+use msg::constellation_msg::{FrameId, PipelineId};
 use net_traits::image_cache_thread::ImageCacheThread;
 use profile_traits::{mem, time};
+use script_traits::{ConstellationControlMsg, LayoutControlMsg};
 use script_traits::LayoutMsg as ConstellationMsg;
-use script_traits::{LayoutControlMsg, ConstellationControlMsg};
-use std::sync::mpsc::{Sender, Receiver};
-use url::Url;
-use util::ipc::OptionalIpcSender;
+use servo_url::ServoUrl;
+use std::sync::mpsc::{Receiver, Sender};
 
 // A static method creating a layout thread
 // Here to remove the compositor -> layout dependency
 pub trait LayoutThreadFactory {
     type Message;
     fn create(id: PipelineId,
-              url: Url,
+              top_level_frame_id: Option<FrameId>,
+              url: ServoUrl,
               is_iframe: bool,
               chan: (Sender<Self::Message>, Receiver<Self::Message>),
               pipeline_port: IpcReceiver<LayoutControlMsg>,
               constellation_chan: IpcSender<ConstellationMsg>,
               script_chan: IpcSender<ConstellationControlMsg>,
-              layout_to_paint_chan: OptionalIpcSender<LayoutToPaintMsg>,
               image_cache_thread: ImageCacheThread,
               font_cache_thread: FontCacheThread,
               time_profiler_chan: time::ProfilerChan,
               mem_profiler_chan: mem::ProfilerChan,
-              content_process_shutdown_chan: IpcSender<()>,
-              webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+              content_process_shutdown_chan: Option<IpcSender<()>>,
+              webrender_api_sender: webrender_traits::RenderApiSender,
               layout_threads: usize);
 }

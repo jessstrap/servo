@@ -6,7 +6,6 @@ use dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementM
 use dom::bindings::codegen::Bindings::NodeListBinding::NodeListMethods;
 use dom::bindings::codegen::Bindings::RadioNodeListBinding;
 use dom::bindings::codegen::Bindings::RadioNodeListBinding::RadioNodeListMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::reflect_dom_object;
@@ -32,17 +31,13 @@ impl RadioNodeList {
     #[allow(unrooted_must_root)]
     pub fn new(window: &Window, list_type: NodeListType) -> Root<RadioNodeList> {
         reflect_dom_object(box RadioNodeList::new_inherited(list_type),
-                           GlobalRef::Window(window),
+                           window,
                            RadioNodeListBinding::Wrap)
     }
 
     pub fn new_simple_list<T>(window: &Window, iter: T) -> Root<RadioNodeList>
                               where T: Iterator<Item=Root<Node>> {
         RadioNodeList::new(window, NodeListType::Simple(iter.map(|r| JS::from_ref(&*r)).collect()))
-    }
-
-    pub fn empty(window: &Window) -> Root<RadioNodeList> {
-        RadioNodeList::new(window, NodeListType::Simple(vec![]))
     }
 
     // FIXME: This shouldn't need to be implemented here since NodeList (the parent of
@@ -105,7 +100,7 @@ impl RadioNodeListMethods for RadioNodeList {
     // https://github.com/servo/servo/issues/5875
     //
     // https://dom.spec.whatwg.org/#dom-nodelist-item
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<Node>> {
-        self.node_list.IndexedGetter(index, found)
+    fn IndexedGetter(&self, index: u32) -> Option<Root<Node>> {
+        self.node_list.IndexedGetter(index)
     }
 }

@@ -4,24 +4,26 @@
 
 use dom::bindings::codegen::Bindings::NavigatorBinding;
 use dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
-use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, MutNullableHeap, Root};
-use dom::bindings::reflector::{Reflector, Reflectable, reflect_dom_object};
+use dom::bindings::js::{MutNullableJS, Root};
+use dom::bindings::reflector::{Reflector, DomObject, reflect_dom_object};
 use dom::bindings::str::DOMString;
 use dom::bluetooth::Bluetooth;
 use dom::mimetypearray::MimeTypeArray;
 use dom::navigatorinfo;
 use dom::pluginarray::PluginArray;
 use dom::serviceworkercontainer::ServiceWorkerContainer;
+use dom::vr::VR;
 use dom::window::Window;
+use script_traits::WebVREventMsg;
 
 #[dom_struct]
 pub struct Navigator {
     reflector_: Reflector,
-    bluetooth: MutNullableHeap<JS<Bluetooth>>,
-    plugins: MutNullableHeap<JS<PluginArray>>,
-    mime_types: MutNullableHeap<JS<MimeTypeArray>>,
-    serviceWorker: MutNullableHeap<JS<ServiceWorkerContainer>>,
+    bluetooth: MutNullableJS<Bluetooth>,
+    plugins: MutNullableJS<PluginArray>,
+    mime_types: MutNullableJS<MimeTypeArray>,
+    service_worker: MutNullableJS<ServiceWorkerContainer>,
+    vr: MutNullableJS<VR>
 }
 
 impl Navigator {
@@ -31,13 +33,14 @@ impl Navigator {
             bluetooth: Default::default(),
             plugins: Default::default(),
             mime_types: Default::default(),
-            serviceWorker: Default::default(),
+            service_worker: Default::default(),
+            vr: Default::default(),
         }
     }
 
     pub fn new(window: &Window) -> Root<Navigator> {
         reflect_dom_object(box Navigator::new_inherited(),
-                           GlobalRef::Window(window),
+                           window,
                            NavigatorBinding::Wrap)
     }
 }
@@ -80,7 +83,7 @@ impl NavigatorMethods for Navigator {
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-navigator-bluetooth
     fn Bluetooth(&self) -> Root<Bluetooth> {
-        self.bluetooth.or_init(|| Bluetooth::new(self.global().r()))
+        self.bluetooth.or_init(|| Bluetooth::new(&self.global()))
     }
 
     // https://html.spec.whatwg.org/multipage/#navigatorlanguage
@@ -90,12 +93,12 @@ impl NavigatorMethods for Navigator {
 
     // https://html.spec.whatwg.org/multipage/#dom-navigator-plugins
     fn Plugins(&self) -> Root<PluginArray> {
-        self.plugins.or_init(|| PluginArray::new(self.global().r()))
+        self.plugins.or_init(|| PluginArray::new(&self.global()))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-navigator-mimetypes
     fn MimeTypes(&self) -> Root<MimeTypeArray> {
-        self.mime_types.or_init(|| MimeTypeArray::new(self.global().r()))
+        self.mime_types.or_init(|| MimeTypeArray::new(&self.global()))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-navigator-javaenabled
@@ -103,8 +106,28 @@ impl NavigatorMethods for Navigator {
         false
     }
 
-    // https://slightlyoff.github.io/ServiceWorker/spec/service_worker/#navigator-service-worker-attribute
+    // https://w3c.github.io/ServiceWorker/#navigator-service-worker-attribute
     fn ServiceWorker(&self) -> Root<ServiceWorkerContainer> {
-        self.serviceWorker.or_init(|| ServiceWorkerContainer::new(self.global().r()))
+        self.service_worker.or_init(|| {
+            ServiceWorkerContainer::new(&self.global())
+        })
     }
+
+    // https://html.spec.whatwg.org/multipage/#dom-navigator-cookieenabled
+    fn CookieEnabled(&self) -> bool {
+        true
+    }
+
+    #[allow(unrooted_must_root)]
+    // https://w3c.github.io/webvr/#interface-navigator
+    fn Vr(&self) -> Root<VR> {
+        self.vr.or_init(|| VR::new(&self.global()))
+    }
+}
+
+impl Navigator {
+     pub fn handle_webvr_event(&self, event: WebVREventMsg) {
+         self.vr.get().expect("Shouldn't arrive here with an empty VR instance")
+                      .handle_webvr_event(event);
+     }
 }

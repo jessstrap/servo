@@ -4,33 +4,78 @@
 
 //! Restyle hints: an optimization to avoid unnecessarily matching selectors.
 
+#![deny(missing_docs)]
+
+use Atom;
+use dom::TElement;
 use element_state::*;
-use selector_impl::{ElementExt, TheSelectorImpl, NonTSPseudoClass, AttrValue};
-use selectors::matching::StyleRelations;
-use selectors::matching::matches_complex_selector;
-use selectors::parser::{AttrSelector, Combinator, ComplexSelector, SimpleSelector, SelectorImpl};
+#[cfg(feature = "gecko")]
+use gecko_bindings::structs::nsRestyleHint;
+#[cfg(feature = "servo")]
+use heapsize::HeapSizeOf;
+use selector_parser::{AttrValue, NonTSPseudoClass, Snapshot, SelectorImpl};
 use selectors::{Element, MatchAttr};
+use selectors::matching::{MatchingReason, StyleRelations};
+use selectors::matching::matches_complex_selector;
+use selectors::parser::{AttrSelector, Combinator, ComplexSelector, SimpleSelector};
 use std::clone::Clone;
 use std::sync::Arc;
-use string_cache::Atom;
 
-/// When the ElementState of an element (like IN_HOVER_STATE) changes, certain
-/// pseudo-classes (like :hover) may require us to restyle that element, its
-/// siblings, and/or its descendants. Similarly, when various attributes of an
-/// element change, we may also need to restyle things with id, class, and
-/// attribute selectors. Doing this conservatively is expensive, and so we use
-/// RestyleHints to short-circuit work we know is unnecessary.
 bitflags! {
-    pub flags RestyleHint: u8 {
-        #[doc = "Rerun selector matching on the element."]
+    /// When the ElementState of an element (like IN_HOVER_STATE) changes,
+    /// certain pseudo-classes (like :hover) may require us to restyle that
+    /// element, its siblings, and/or its descendants. Similarly, when various
+    /// attributes of an element change, we may also need to restyle things with
+    /// id, class, and attribute selectors. Doing this conservatively is
+    /// expensive, and so we use RestyleHints to short-circuit work we know is
+    /// unnecessary.
+    pub flags RestyleHint: u32 {
+        /// Rerun selector matching on the element.
         const RESTYLE_SELF = 0x01,
-        #[doc = "Rerun selector matching on all of the element's descendants."]
-        // NB: In Gecko, we have RESTYLE_SUBTREE which is inclusive of self, but heycam isn't aware
-        // of a good reason for that.
+
+        /// Rerun selector matching on all of the element's descendants.
+        ///
+        /// NB: In Gecko, we have RESTYLE_SUBTREE which is inclusive of self,
+        /// but heycam isn't aware of a good reason for that.
         const RESTYLE_DESCENDANTS = 0x02,
-        #[doc = "Rerun selector matching on all later siblings of the element and all of their descendants."]
+
+        /// Rerun selector matching on all later siblings of the element and all
+        /// of their descendants.
         const RESTYLE_LATER_SIBLINGS = 0x08,
+
+        /// Don't re-run selector-matching on the element, only the style
+        /// attribute has changed, and this change didn't have any other
+        /// dependencies.
+        const RESTYLE_STYLE_ATTRIBUTE = 0x10,
     }
+}
+
+impl RestyleHint {
+    /// The subset hints that affect the styling of a single element during the
+    /// traversal.
+    pub fn for_self() -> Self {
+        RESTYLE_SELF | RESTYLE_STYLE_ATTRIBUTE
+    }
+}
+
+#[cfg(feature = "gecko")]
+impl From<nsRestyleHint> for RestyleHint {
+    fn from(raw: nsRestyleHint) -> Self {
+        use std::mem;
+        let raw_bits: u32 = unsafe { mem::transmute(raw) };
+        // FIXME(bholley): Finish aligning the binary representations here and
+        // then .expect() the result of the checked version.
+        if Self::from_bits(raw_bits).is_none() {
+            error!("stylo: dropping unsupported restyle hint bits");
+        }
+
+        Self::from_bits_truncate(raw_bits)
+    }
+}
+
+#[cfg(feature = "servo")]
+impl HeapSizeOf for RestyleHint {
+    fn heap_size_of_children(&self) -> usize { 0 }
 }
 
 /// In order to compute restyle hints, we perform a selector match against a
@@ -53,7 +98,7 @@ bitflags! {
 /// still need to take the ElementWrapper approach for attribute-dependent
 /// style. So we do it the same both ways for now to reduce complexity, but it's
 /// worth measuring the performance impact (if any) of the mStateMask approach.
-pub trait ElementSnapshot : Sized + MatchAttr<Impl=TheSelectorImpl> {
+pub trait ElementSnapshot : Sized + MatchAttr<Impl=SelectorImpl> {
     /// The state of the snapshot, if any.
     fn state(&self) -> Option<ElementState>;
 
@@ -75,30 +120,32 @@ pub trait ElementSnapshot : Sized + MatchAttr<Impl=TheSelectorImpl> {
 }
 
 struct ElementWrapper<'a, E>
-    where E: ElementExt
+    where E: TElement,
 {
     element: E,
-    snapshot: Option<&'a E::Snapshot>,
+    snapshot: Option<&'a Snapshot>,
 }
 
 impl<'a, E> ElementWrapper<'a, E>
-    where E: ElementExt
+    where E: TElement,
 {
+    /// Trivially constructs an `ElementWrapper` without a snapshot.
     pub fn new(el: E) -> ElementWrapper<'a, E> {
         ElementWrapper { element: el, snapshot: None }
     }
 
-    pub fn new_with_snapshot(el: E, snapshot: &'a E::Snapshot) -> ElementWrapper<'a, E> {
+    /// Trivially constructs an `ElementWrapper` with a snapshot.
+    pub fn new_with_snapshot(el: E, snapshot: &'a Snapshot) -> ElementWrapper<'a, E> {
         ElementWrapper { element: el, snapshot: Some(snapshot) }
     }
 }
 
 impl<'a, E> MatchAttr for ElementWrapper<'a, E>
-    where E: ElementExt,
+    where E: TElement,
 {
-    type Impl = TheSelectorImpl;
+    type Impl = SelectorImpl;
 
-    fn match_attr_has(&self, attr: &AttrSelector<TheSelectorImpl>) -> bool {
+    fn match_attr_has(&self, attr: &AttrSelector<SelectorImpl>) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
                 => snapshot.match_attr_has(attr),
@@ -107,7 +154,7 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
     }
 
     fn match_attr_equals(&self,
-                         attr: &AttrSelector<TheSelectorImpl>,
+                         attr: &AttrSelector<SelectorImpl>,
                          value: &AttrValue) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
@@ -117,7 +164,7 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
     }
 
     fn match_attr_equals_ignore_ascii_case(&self,
-                                           attr: &AttrSelector<TheSelectorImpl>,
+                                           attr: &AttrSelector<SelectorImpl>,
                                            value: &AttrValue) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
@@ -127,7 +174,7 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
     }
 
     fn match_attr_includes(&self,
-                           attr: &AttrSelector<TheSelectorImpl>,
+                           attr: &AttrSelector<SelectorImpl>,
                            value: &AttrValue) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
@@ -137,7 +184,7 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
     }
 
     fn match_attr_dash(&self,
-                       attr: &AttrSelector<TheSelectorImpl>,
+                       attr: &AttrSelector<SelectorImpl>,
                        value: &AttrValue) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
@@ -147,7 +194,7 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
     }
 
     fn match_attr_prefix(&self,
-                         attr: &AttrSelector<TheSelectorImpl>,
+                         attr: &AttrSelector<SelectorImpl>,
                          value: &AttrValue) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
@@ -157,7 +204,7 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
     }
 
     fn match_attr_substring(&self,
-                            attr: &AttrSelector<TheSelectorImpl>,
+                            attr: &AttrSelector<SelectorImpl>,
                             value: &AttrValue) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
@@ -167,7 +214,7 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
     }
 
     fn match_attr_suffix(&self,
-                         attr: &AttrSelector<TheSelectorImpl>,
+                         attr: &AttrSelector<SelectorImpl>,
                          value: &AttrValue) -> bool {
         match self.snapshot {
             Some(snapshot) if snapshot.has_attrs()
@@ -178,10 +225,10 @@ impl<'a, E> MatchAttr for ElementWrapper<'a, E>
 }
 
 impl<'a, E> Element for ElementWrapper<'a, E>
-    where E: ElementExt<Impl=TheSelectorImpl>
+    where E: TElement,
 {
     fn match_non_ts_pseudo_class(&self, pseudo_class: NonTSPseudoClass) -> bool {
-        let flag = TheSelectorImpl::pseudo_class_state_flag(&pseudo_class);
+        let flag = SelectorImpl::pseudo_class_state_flag(&pseudo_class);
         if flag == ElementState::empty() {
             self.element.match_non_ts_pseudo_class(pseudo_class)
         } else {
@@ -216,11 +263,11 @@ impl<'a, E> Element for ElementWrapper<'a, E>
         self.element.is_html_element_in_html_document()
     }
 
-    fn get_local_name(&self) -> &<Self::Impl as SelectorImpl>::BorrowedLocalName {
+    fn get_local_name(&self) -> &<Self::Impl as ::selectors::SelectorImpl>::BorrowedLocalName {
         self.element.get_local_name()
     }
 
-    fn get_namespace(&self) -> &<Self::Impl as SelectorImpl>::BorrowedNamespaceUrl {
+    fn get_namespace(&self) -> &<Self::Impl as ::selectors::SelectorImpl>::BorrowedNamespaceUrl {
         self.element.get_namespace()
     }
 
@@ -258,14 +305,14 @@ impl<'a, E> Element for ElementWrapper<'a, E>
     }
 }
 
-fn selector_to_state(sel: &SimpleSelector<TheSelectorImpl>) -> ElementState {
+fn selector_to_state(sel: &SimpleSelector<SelectorImpl>) -> ElementState {
     match *sel {
-        SimpleSelector::NonTSPseudoClass(ref pc) => TheSelectorImpl::pseudo_class_state_flag(pc),
+        SimpleSelector::NonTSPseudoClass(ref pc) => SelectorImpl::pseudo_class_state_flag(pc),
         _ => ElementState::empty(),
     }
 }
 
-fn is_attr_selector(sel: &SimpleSelector<TheSelectorImpl>) -> bool {
+fn is_attr_selector(sel: &SimpleSelector<SelectorImpl>) -> bool {
     match *sel {
         SimpleSelector::ID(_) |
         SimpleSelector::Class(_) |
@@ -333,27 +380,59 @@ impl Sensitivities {
 #[derive(Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 struct Dependency {
-    selector: Arc<ComplexSelector<TheSelectorImpl>>,
-    combinator: Option<Combinator>,
+    #[cfg_attr(feature = "servo", ignore_heap_size_of = "Arc")]
+    selector: Arc<ComplexSelector<SelectorImpl>>,
+    hint: RestyleHint,
     sensitivities: Sensitivities,
 }
 
+/// A set of dependencies for a given stylist.
+///
+/// Note that there are measurable perf wins from storing them separately
+/// depending on what kind of change they affect, and its also not a big deal to
+/// do it, since the dependencies are per-document.
 #[derive(Debug)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct DependencySet {
-    deps: Vec<Dependency>,
+    /// Dependencies only affected by state.
+    state_deps: Vec<Dependency>,
+    /// Dependencies only affected by attributes.
+    attr_deps: Vec<Dependency>,
+    /// Dependencies affected by both.
+    common_deps: Vec<Dependency>,
 }
 
 impl DependencySet {
+    fn add_dependency(&mut self, dep: Dependency) {
+        let affects_attrs = dep.sensitivities.attrs;
+        let affects_states = !dep.sensitivities.states.is_empty();
+
+        if affects_attrs && affects_states {
+            self.common_deps.push(dep)
+        } else if affects_attrs {
+            self.attr_deps.push(dep)
+        } else {
+            self.state_deps.push(dep)
+        }
+    }
+
+    /// Create an empty `DependencySet`.
     pub fn new() -> Self {
-        DependencySet { deps: Vec::new() }
+        DependencySet {
+            state_deps: vec![],
+            attr_deps: vec![],
+            common_deps: vec![],
+        }
     }
 
+    /// Return the total number of dependencies that this set contains.
     pub fn len(&self) -> usize {
-        self.deps.len()
+        self.common_deps.len() + self.attr_deps.len() + self.state_deps.len()
     }
 
-    pub fn note_selector(&mut self, selector: &Arc<ComplexSelector<TheSelectorImpl>>) {
+    /// Create the needed dependencies that a given selector creates, and add
+    /// them to the set.
+    pub fn note_selector(&mut self, selector: &Arc<ComplexSelector<SelectorImpl>>) {
         let mut cur = selector;
         let mut combinator: Option<Combinator> = None;
         loop {
@@ -365,9 +444,9 @@ impl DependencySet {
                 }
             }
             if !sensitivities.is_empty() {
-                self.deps.push(Dependency {
+                self.add_dependency(Dependency {
                     selector: cur.clone(),
-                    combinator: combinator,
+                    hint: combinator_to_restyle_hint(combinator),
                     sensitivities: sensitivities,
                 });
             }
@@ -382,39 +461,84 @@ impl DependencySet {
         }
     }
 
+    /// Clear this dependency set.
     pub fn clear(&mut self) {
-        self.deps.clear();
+        self.common_deps.clear();
+        self.attr_deps.clear();
+        self.state_deps.clear();
     }
-}
 
-impl DependencySet {
-    pub fn compute_hint<E>(&self, el: &E,
-                           snapshot: &E::Snapshot,
-                           current_state: ElementState)
+    /// Compute a restyle hint given an element and a snapshot, per the rules
+    /// explained in the rest of the documentation.
+    pub fn compute_hint<E>(&self,
+                           el: &E,
+                           snapshot: &Snapshot)
                            -> RestyleHint
-    where E: ElementExt + Clone
+        where E: TElement + Clone,
     {
-        debug!("About to calculate restyle hint for element. Deps: {}",
-               self.deps.len());
-
-        let state_changes = snapshot.state().map_or_else(ElementState::empty, |old_state| current_state ^ old_state);
+        let current_state = el.get_state();
+        let state_changes = snapshot.state()
+                                    .map_or_else(ElementState::empty, |old_state| current_state ^ old_state);
         let attrs_changed = snapshot.has_attrs();
+
+        if state_changes.is_empty() && !attrs_changed {
+            return RestyleHint::empty();
+        }
+
         let mut hint = RestyleHint::empty();
-        for dep in &self.deps {
-            if state_changes.intersects(dep.sensitivities.states) || (attrs_changed && dep.sensitivities.attrs) {
-                let old_el: ElementWrapper<E> = ElementWrapper::new_with_snapshot(el.clone(), snapshot);
+        let snapshot_el = ElementWrapper::new_with_snapshot(el.clone(), snapshot);
+
+        Self::compute_partial_hint(&self.common_deps, el, &snapshot_el,
+                                   &state_changes, attrs_changed, &mut hint);
+
+        if !state_changes.is_empty() {
+            Self::compute_partial_hint(&self.state_deps, el, &snapshot_el,
+                                       &state_changes, attrs_changed, &mut hint);
+        }
+
+        if attrs_changed {
+            Self::compute_partial_hint(&self.attr_deps, el, &snapshot_el,
+                                       &state_changes, attrs_changed, &mut hint);
+        }
+
+        debug!("Calculated restyle hint: {:?}. (Element={:?}, State={:?}, Snapshot={:?}, {} Deps)",
+               hint, el, current_state, snapshot, self.len());
+        trace!("Deps: {:?}", self);
+
+        hint
+    }
+
+    fn compute_partial_hint<E>(deps: &[Dependency],
+                               element: &E,
+                               snapshot: &ElementWrapper<E>,
+                               state_changes: &ElementState,
+                               attrs_changed: bool,
+                               hint: &mut RestyleHint)
+        where E: TElement,
+    {
+        if hint.is_all() {
+            return;
+        }
+        for dep in deps {
+            debug_assert!((!state_changes.is_empty() && !dep.sensitivities.states.is_empty()) ||
+                          (attrs_changed && dep.sensitivities.attrs),
+                          "Testing a known ineffective dependency?");
+            if (attrs_changed || state_changes.intersects(dep.sensitivities.states)) && !hint.intersects(dep.hint) {
                 let matched_then =
-                    matches_complex_selector(&*dep.selector, &old_el, None, &mut StyleRelations::empty());
+                    matches_complex_selector(&dep.selector, snapshot, None,
+                                             &mut StyleRelations::empty(),
+                                             MatchingReason::Other);
                 let matches_now =
-                    matches_complex_selector(&*dep.selector, el, None, &mut StyleRelations::empty());
+                    matches_complex_selector(&dep.selector, element, None,
+                                             &mut StyleRelations::empty(),
+                                             MatchingReason::Other);
                 if matched_then != matches_now {
-                    hint.insert(combinator_to_restyle_hint(dep.combinator));
-                    if hint.is_all() {
-                        break
-                    }
+                    hint.insert(dep.hint);
+                }
+                if hint.is_all() {
+                    break;
                 }
             }
         }
-        hint
     }
 }

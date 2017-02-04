@@ -9,8 +9,7 @@ use dom::bindings::codegen::Bindings::NodeFilterBinding::NodeFilterConstants;
 use dom::bindings::codegen::Bindings::NodeIteratorBinding;
 use dom::bindings::codegen::Bindings::NodeIteratorBinding::NodeIteratorMethods;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, MutHeap, Root};
+use dom::bindings::js::{JS, MutJS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::document::Document;
 use dom::node::Node;
@@ -22,7 +21,7 @@ pub struct NodeIterator {
     reflector_: Reflector,
     root_node: JS<Node>,
     #[ignore_heap_size_of = "Defined in rust-mozjs"]
-    reference_node: MutHeap<JS<Node>>,
+    reference_node: MutJS<Node>,
     pointer_before_reference_node: Cell<bool>,
     what_to_show: u32,
     #[ignore_heap_size_of = "Can't measure due to #6870"]
@@ -36,7 +35,7 @@ impl NodeIterator {
         NodeIterator {
             reflector_: Reflector::new(),
             root_node: JS::from_ref(root_node),
-            reference_node: MutHeap::new(root_node),
+            reference_node: MutJS::new(root_node),
             pointer_before_reference_node: Cell::new(true),
             what_to_show: what_to_show,
             filter: filter
@@ -48,7 +47,7 @@ impl NodeIterator {
                            what_to_show: u32,
                            filter: Filter) -> Root<NodeIterator> {
         reflect_dom_object(box NodeIterator::new_inherited(root_node, what_to_show, filter),
-                           GlobalRef::Window(document.window()),
+                           document.window(),
                            NodeIteratorBinding::Wrap)
     }
 
@@ -80,7 +79,6 @@ impl NodeIteratorMethods for NodeIterator {
         match self.filter {
             Filter::None => None,
             Filter::Callback(ref nf) => Some((*nf).clone()),
-            Filter::Native(_) => panic!("Cannot convert native node filter to DOM NodeFilter")
         }
     }
 
@@ -108,12 +106,12 @@ impl NodeIteratorMethods for NodeIterator {
             before_node = false;
 
             // Step 3-2.
-            let result = try!(self.accept_node(node.r()));
+            let result = try!(self.accept_node(&node));
 
             // Step 3-3.
             if result == NodeFilterConstants::FILTER_ACCEPT {
                 // Step 4.
-                self.reference_node.set(node.r());
+                self.reference_node.set(&node);
                 self.pointer_before_reference_node.set(before_node);
 
                 return Ok(Some(node));
@@ -123,12 +121,12 @@ impl NodeIteratorMethods for NodeIterator {
         // Step 3-1.
         for following_node in node.following_nodes(&self.root_node) {
             // Step 3-2.
-            let result = try!(self.accept_node(following_node.r()));
+            let result = try!(self.accept_node(&following_node));
 
             // Step 3-3.
             if result == NodeFilterConstants::FILTER_ACCEPT {
                 // Step 4.
-                self.reference_node.set(following_node.r());
+                self.reference_node.set(&following_node);
                 self.pointer_before_reference_node.set(before_node);
 
                 return Ok(Some(following_node));
@@ -152,12 +150,12 @@ impl NodeIteratorMethods for NodeIterator {
             before_node = true;
 
             // Step 3-2.
-            let result = try!(self.accept_node(node.r()));
+            let result = try!(self.accept_node(&node));
 
             // Step 3-3.
             if result == NodeFilterConstants::FILTER_ACCEPT {
                 // Step 4.
-                self.reference_node.set(node.r());
+                self.reference_node.set(&node);
                 self.pointer_before_reference_node.set(before_node);
 
                 return Ok(Some(node));
@@ -167,12 +165,12 @@ impl NodeIteratorMethods for NodeIterator {
         // Step 3-1.
         for preceding_node in node.preceding_nodes(&self.root_node) {
             // Step 3-2.
-            let result = try!(self.accept_node(preceding_node.r()));
+            let result = try!(self.accept_node(&preceding_node));
 
             // Step 3-3.
             if result == NodeFilterConstants::FILTER_ACCEPT {
                 // Step 4.
-                self.reference_node.set(preceding_node.r());
+                self.reference_node.set(&preceding_node);
                 self.pointer_before_reference_node.set(before_node);
 
                 return Ok(Some(preceding_node));
@@ -201,7 +199,6 @@ impl NodeIterator {
         // Step 3-5.
         match self.filter {
             Filter::None => Ok(NodeFilterConstants::FILTER_ACCEPT),
-            Filter::Native(f) => Ok((f)(node)),
             Filter::Callback(ref callback) => callback.AcceptNode_(self, node, Rethrow)
         }
     }
@@ -211,6 +208,5 @@ impl NodeIterator {
 #[derive(JSTraceable)]
 pub enum Filter {
     None,
-    Native(fn (node: &Node) -> u16),
     Callback(Rc<NodeFilter>)
 }

@@ -8,30 +8,44 @@
 
 ${helpers.single_keyword("border-collapse", "separate collapse",
                          gecko_constant_prefix="NS_STYLE_BORDER",
-                         animatable=False)}
+                         animatable=False,
+                         spec="https://drafts.csswg.org/css-tables/#propdef-border-collapse")}
 ${helpers.single_keyword("empty-cells", "show hide",
                          gecko_constant_prefix="NS_STYLE_TABLE_EMPTY_CELLS",
-                         animatable=False)}
+                         animatable=False,
+                         spec="https://drafts.csswg.org/css-tables/#propdef-empty-cells")}
 ${helpers.single_keyword("caption-side", "top bottom",
                          extra_gecko_values="right left top-outside bottom-outside",
-                         animatable=False)}
+                         animatable=False,
+                         spec="https://drafts.csswg.org/css-tables/#propdef-caption-side")}
 
-<%helpers:longhand name="border-spacing" animatable="False">
+<%helpers:longhand name="border-spacing" animatable="False"
+                   spec="https://drafts.csswg.org/css-tables/#propdef-border-spacing">
     use app_units::Au;
-    use values::LocalToCss;
-    use values::HasViewportPercentage;
-
-    use cssparser::ToCss;
     use std::fmt;
+    use style_traits::ToCss;
+    use values::HasViewportPercentage;
 
     pub mod computed_value {
         use app_units::Au;
+        use properties::animated_properties::Interpolate;
 
         #[derive(Clone, Copy, Debug, PartialEq, RustcEncodable)]
         #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
         pub struct T {
             pub horizontal: Au,
             pub vertical: Au,
+        }
+
+        /// https://drafts.csswg.org/css-transitions/#animtype-simple-list
+        impl Interpolate for T {
+            #[inline]
+            fn interpolate(&self, other: &Self, time: f64) -> Result<Self, ()> {
+                Ok(T {
+                    horizontal: try!(self.horizontal.interpolate(&other.horizontal, time)),
+                    vertical: try!(self.vertical.interpolate(&other.vertical, time)),
+                })
+            }
         }
     }
 
@@ -82,24 +96,37 @@ ${helpers.single_keyword("caption-side", "top bottom",
                 vertical: self.vertical.to_computed_value(context),
             }
         }
+
+        #[inline]
+        fn from_computed_value(computed: &computed_value::T) -> Self {
+            SpecifiedValue {
+                horizontal: ToComputedValue::from_computed_value(&computed.horizontal),
+                vertical: ToComputedValue::from_computed_value(&computed.vertical),
+            }
+        }
     }
 
     pub fn parse(_: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue,()> {
-        let mut lengths = [ None, None ];
-        for i in 0..2 {
-            match specified::Length::parse_non_negative(input) {
-                Err(()) => break,
-                Ok(length) => lengths[i] = Some(length),
+        let mut first = None;
+        let mut second = None;
+        match specified::Length::parse_non_negative(input) {
+            Err(()) => (),
+            Ok(length) => {
+                first = Some(length);
+                match specified::Length::parse_non_negative(input) {
+                    Err(()) => (),
+                    Ok(length) => second = Some(length),
+                }
             }
         }
         if input.next().is_ok() {
             return Err(())
         }
-        match (lengths[0], lengths[1]) {
+        match (first, second) {
             (None, None) => Err(()),
             (Some(length), None) => {
                 Ok(SpecifiedValue {
-                    horizontal: length,
+                    horizontal: length.clone(),
                     vertical: length,
                 })
             }

@@ -9,7 +9,7 @@ use dom::bindings::codegen::Bindings::HTMLTableSectionElementBinding::HTMLTableS
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::error::{ErrorResult, Fallible};
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, LayoutJS, MutNullableHeap, Root, RootedReference};
+use dom::bindings::js::{LayoutJS, MutNullableJS, Root, RootedReference};
 use dom::bindings::str::DOMString;
 use dom::document::Document;
 use dom::element::{Element, RawLayoutElementHelpers};
@@ -21,7 +21,7 @@ use dom::htmltableheadercellelement::HTMLTableHeaderCellElement;
 use dom::htmltablesectionelement::HTMLTableSectionElement;
 use dom::node::{Node, window_from_node};
 use dom::virtualmethods::VirtualMethods;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 use style::attr::AttrValue;
 
 #[derive(JSTraceable)]
@@ -36,22 +36,22 @@ impl CollectionFilter for CellsFilter {
 #[dom_struct]
 pub struct HTMLTableRowElement {
     htmlelement: HTMLElement,
-    cells: MutNullableHeap<JS<HTMLCollection>>,
+    cells: MutNullableJS<HTMLCollection>,
 }
 
 impl HTMLTableRowElement {
-    fn new_inherited(localName: Atom, prefix: Option<DOMString>, document: &Document)
+    fn new_inherited(local_name: LocalName, prefix: Option<DOMString>, document: &Document)
                      -> HTMLTableRowElement {
         HTMLTableRowElement {
-            htmlelement: HTMLElement::new_inherited(localName, prefix, document),
+            htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             cells: Default::default(),
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom, prefix: Option<DOMString>, document: &Document)
+    pub fn new(local_name: LocalName, prefix: Option<DOMString>, document: &Document)
                -> Root<HTMLTableRowElement> {
-        Node::reflect_node(box HTMLTableRowElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLTableRowElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLTableRowElementBinding::Wrap)
     }
@@ -77,7 +77,7 @@ impl HTMLTableRowElementMethods for HTMLTableRowElement {
         self.cells.or_init(|| {
             let window = window_from_node(self);
             let filter = box CellsFilter;
-            HTMLCollection::create(window.r(), self.upcast(), filter)
+            HTMLCollection::create(&window, self.upcast(), filter)
         })
     }
 
@@ -87,7 +87,7 @@ impl HTMLTableRowElementMethods for HTMLTableRowElement {
         node.insert_cell_or_row(
             index,
             || self.Cells(),
-            || HTMLTableDataCellElement::new(atom!("td"), None, node.owner_doc().r()))
+            || HTMLTableDataCellElement::new(local_name!("td"), None, &node.owner_doc()))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-tr-deletecell
@@ -145,7 +145,7 @@ impl HTMLTableRowElementLayoutHelpers for LayoutJS<HTMLTableRowElement> {
     fn get_background_color(&self) -> Option<RGBA> {
         unsafe {
             (&*self.upcast::<Element>().unsafe_get())
-                .get_attr_for_layout(&ns!(), &atom!("bgcolor"))
+                .get_attr_for_layout(&ns!(), &local_name!("bgcolor"))
                 .and_then(AttrValue::as_color)
                 .cloned()
         }
@@ -157,9 +157,9 @@ impl VirtualMethods for HTMLTableRowElement {
         Some(self.upcast::<HTMLElement>() as &VirtualMethods)
     }
 
-    fn parse_plain_attribute(&self, local_name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, local_name: &LocalName, value: DOMString) -> AttrValue {
         match *local_name {
-            atom!("bgcolor") => AttrValue::from_legacy_color(value.into()),
+            local_name!("bgcolor") => AttrValue::from_legacy_color(value.into()),
             _ => self.super_type().unwrap().parse_plain_attribute(local_name, value),
         }
     }

@@ -7,16 +7,16 @@ use core_graphics::data_provider::CGDataProvider;
 use core_graphics::font::CGFont;
 use core_text;
 use core_text::font::CTFont;
-use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::de::{Error, Visitor};
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Error as IoError};
 use std::ops::Deref;
 use std::sync::Mutex;
-use string_cache::Atom;
-use url::Url;
 
 /// Platform specific font representation for mac.
 /// The identifier is a PostScript font name. The
@@ -41,12 +41,12 @@ unsafe impl Send for FontTemplateData {}
 unsafe impl Sync for FontTemplateData {}
 
 impl FontTemplateData {
-    pub fn new(identifier: Atom, font_data: Option<Vec<u8>>) -> FontTemplateData {
-        FontTemplateData {
+    pub fn new(identifier: Atom, font_data: Option<Vec<u8>>) -> Result<FontTemplateData, IoError> {
+        Ok(FontTemplateData {
             ctfont: CachedCTFont(Mutex::new(HashMap::new())),
             identifier: identifier.to_owned(),
             font_data: font_data
-        }
+        })
     }
 
     /// Retrieves the Core Text font instance, instantiating it if necessary.
@@ -81,18 +81,17 @@ impl FontTemplateData {
     /// operation (depending on the platform) which performs synchronous disk I/O
     /// and should never be done lightly.
     pub fn bytes(&self) -> Vec<u8> {
-        match self.bytes_if_in_memory() {
-            Some(font_data) => return font_data,
-            None => {}
+        if let Some(font_data) = self.bytes_if_in_memory() {
+            return font_data;
         }
 
-        let path = Url::parse(&*self.ctfont(0.0)
+        let path = ServoUrl::parse(&*self.ctfont(0.0)
                                     .expect("No Core Text font available!")
                                     .url()
                                     .expect("No URL for Core Text font!")
                                     .get_string()
                                     .to_string()).expect("Couldn't parse Core Text font URL!")
-                                                 .to_file_path()
+                                                 .as_url().unwrap().to_file_path()
                                                  .expect("Core Text font didn't name a path!");
         let mut bytes = Vec::new();
         File::open(path).expect("Couldn't open font file!").read_to_end(&mut bytes).unwrap();
@@ -144,4 +143,3 @@ impl Deserialize for CachedCTFont {
         deserializer.deserialize_option(NoneOptionVisitor)
     }
 }
-

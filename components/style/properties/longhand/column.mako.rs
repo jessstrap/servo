@@ -7,84 +7,21 @@
 <% data.new_style_struct("Column", inherited=False) %>
 
 // FIXME: This prop should be animatable.
-<%helpers:longhand name="column-width" experimental="True" animatable="False">
-    use cssparser::ToCss;
-    use std::fmt;
-    use values::LocalToCss;
-    use values::HasViewportPercentage;
+${helpers.predefined_type("column-width",
+                          "length::LengthOrAuto",
+                          "Either::Second(Auto)",
+                          parse_method="parse_non_negative_length",
+                          extra_prefixes="moz",
+                          animatable=False,
+                          experimental=True,
+                          spec="https://drafts.csswg.org/css-multicol/#propdef-column-width")}
 
-    impl HasViewportPercentage for SpecifiedValue {
-        fn has_viewport_percentage(&self) -> bool {
-            match *self {
-                SpecifiedValue::Specified(length) => length.has_viewport_percentage(),
-                _ => false
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-    pub enum SpecifiedValue {
-        Auto,
-        Specified(specified::Length),
-    }
-
-    impl ToCss for SpecifiedValue {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-            match *self {
-                SpecifiedValue::Auto => dest.write_str("auto"),
-                SpecifiedValue::Specified(l) => l.to_css(dest),
-            }
-        }
-    }
-
-    pub mod computed_value {
-        use app_units::Au;
-        #[derive(Debug, Clone, PartialEq)]
-        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-        pub struct T(pub Option<Au>);
-    }
-
-    impl ToCss for computed_value::T {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-            match self.0 {
-                None => dest.write_str("auto"),
-                Some(l) => l.to_css(dest),
-            }
-        }
-    }
-
-    #[inline]
-    pub fn get_initial_value() -> computed_value::T {
-        computed_value::T(None)
-    }
-
-    impl ToComputedValue for SpecifiedValue {
-        type ComputedValue = computed_value::T;
-
-        #[inline]
-        fn to_computed_value(&self, context: &Context) -> computed_value::T {
-            match *self {
-                SpecifiedValue::Auto => computed_value::T(None),
-                SpecifiedValue::Specified(l) =>
-                    computed_value::T(Some(l.to_computed_value(context)))
-            }
-        }
-    }
-
-    pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
-        if input.try(|input| input.expect_ident_matching("auto")).is_ok() {
-            Ok(SpecifiedValue::Auto)
-        } else {
-            specified::Length::parse_non_negative(input).map(SpecifiedValue::Specified)
-        }
-    }
-</%helpers:longhand>
 
 // FIXME: This prop should be animatable.
-<%helpers:longhand name="column-count" experimental="True" animatable="False">
-    use cssparser::ToCss;
+<%helpers:longhand name="column-count" experimental="True" animatable="False" extra_prefixes="moz"
+                   spec="https://drafts.csswg.org/css-multicol/#propdef-column-count">
     use std::fmt;
+    use style_traits::ToCss;
     use values::NoViewportPercentage;
 
     impl NoViewportPercentage for SpecifiedValue {}
@@ -136,6 +73,15 @@
                     computed_value::T(Some(count))
             }
         }
+
+        #[inline]
+        fn from_computed_value(computed: &computed_value::T) -> Self {
+            match *computed {
+                computed_value::T(None) => SpecifiedValue::Auto,
+                computed_value::T(Some(count)) =>
+                    SpecifiedValue::Specified(count)
+            }
+        }
     }
 
     pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
@@ -153,76 +99,65 @@
 </%helpers:longhand>
 
 // FIXME: This prop should be animatable.
-<%helpers:longhand name="column-gap" experimental="True" animatable="False">
-    use cssparser::ToCss;
+${helpers.predefined_type("column-gap",
+                          "length::LengthOrNormal",
+                          "Either::Second(Normal)",
+                          parse_method='parse_non_negative_length',
+                          extra_prefixes="moz",
+                          experimental=True,
+                          animatable=False,
+                          spec="https://drafts.csswg.org/css-multicol/#propdef-column-gap")}
+
+${helpers.single_keyword("column-fill", "auto balance", extra_prefixes="moz",
+                         products="gecko", animatable=False,
+                         spec="https://drafts.csswg.org/css-multicol/#propdef-column-gap")}
+
+// https://drafts.csswg.org/css-multicol-1/#propdef-column-rule-width
+<%helpers:longhand name="column-rule-width" products="gecko" animatable="True" extra_prefixes="moz"
+                   spec="https://drafts.csswg.org/css-multicol/#propdef-column-rule-width">
+    use app_units::Au;
     use std::fmt;
-    use values::LocalToCss;
+    use style_traits::ToCss;
     use values::HasViewportPercentage;
-
-    impl HasViewportPercentage for SpecifiedValue {
-        fn has_viewport_percentage(&self) -> bool {
-            match *self {
-                SpecifiedValue::Specified(length) => length.has_viewport_percentage(),
-                _ => false
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-    pub enum SpecifiedValue {
-        Normal,
-        Specified(specified::Length),
-    }
-
-    impl ToCss for SpecifiedValue {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-            match *self {
-                SpecifiedValue::Normal => dest.write_str("normal"),
-                SpecifiedValue::Specified(l) => l.to_css(dest),
-            }
-        }
-    }
+    use values::specified::BorderWidth;
 
     pub mod computed_value {
         use app_units::Au;
-        #[derive(Debug, Clone, PartialEq)]
-        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-        pub struct T(pub Option<Au>);
+        pub type T = Au;
     }
 
-    impl ToCss for computed_value::T {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-            match self.0 {
-                None => dest.write_str("normal"),
-                Some(l) => l.to_css(dest),
-            }
-        }
-    }
+    pub type SpecifiedValue = BorderWidth;
 
     #[inline]
     pub fn get_initial_value() -> computed_value::T {
-        computed_value::T(None)
+        Au::from_px(3) // medium
     }
 
-    impl ToComputedValue for SpecifiedValue {
-        type ComputedValue = computed_value::T;
-
-        #[inline]
-        fn to_computed_value(&self, context: &Context) -> computed_value::T {
-            match *self {
-                SpecifiedValue::Normal => computed_value::T(None),
-                SpecifiedValue::Specified(l) =>
-                    computed_value::T(Some(l.to_computed_value(context)))
-            }
-        }
+    #[inline]
+    pub fn get_initial_specified_value() -> SpecifiedValue {
+        BorderWidth::Medium
     }
 
-    pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
-        if input.try(|input| input.expect_ident_matching("normal")).is_ok() {
-            Ok(SpecifiedValue::Normal)
-        } else {
-            specified::Length::parse_non_negative(input).map(SpecifiedValue::Specified)
-        }
+    pub fn parse(context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
+        BorderWidth::parse(context, input)
     }
 </%helpers:longhand>
+
+// https://drafts.csswg.org/css-multicol-1/#crc
+${helpers.predefined_type("column-rule-color", "CSSColor",
+                          "::cssparser::Color::CurrentColor",
+                          products="gecko", animatable=True, extra_prefixes="moz",
+                          complex_color=True, need_clone=True,
+                          spec="https://drafts.csswg.org/css-multicol/#propdef-column-rule-color")}
+
+// It's not implemented in servo or gecko yet.
+${helpers.single_keyword("column-span", "none all",
+                         products="none", animatable=False,
+                         spec="https://drafts.csswg.org/css-multicol/#propdef-column-span")}
+
+${helpers.single_keyword("column-rule-style",
+                         "none hidden dotted dashed solid double groove ridge inset outset",
+                         products="gecko", extra_prefixes="moz",
+                         gecko_constant_prefix="NS_STYLE_BORDER_STYLE",
+                         animatable=False,
+                         spec="https://drafts.csswg.org/css-multicol/#propdef-column-rule-style")}

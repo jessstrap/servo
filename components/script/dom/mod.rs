@@ -32,8 +32,8 @@
 //! * rooting pointers on the stack:
 //!   the [`Root`](bindings/js/struct.Root.html) smart pointer;
 //! * tracing pointers in member fields: the [`JS`](bindings/js/struct.JS.html),
-//!   [`MutNullableHeap`](bindings/js/struct.MutNullableHeap.html) and
-//!   [`MutHeap`](bindings/js/struct.MutHeap.html) smart pointers and
+//!   [`MutNullableJS`](bindings/js/struct.MutNullableJS.html) and
+//!   [`MutJS`](bindings/js/struct.MutJS.html) smart pointers and
 //!   [the tracing implementation](bindings/trace/index.html);
 //! * rooting pointers from across thread boundaries or in channels: the
 //!   [`Trusted`](bindings/refcounted/struct.Trusted.html) smart pointer;
@@ -126,7 +126,7 @@
 //! not allowed. In particular, any mutable fields use `Cell` or `DOMRefCell`
 //! to manage their mutability.
 //!
-//! `Reflector` and `Reflectable`
+//! `Reflector` and `DomObject`
 //! =============================
 //!
 //! Every DOM object has a `Reflector` as its first (transitive) member field.
@@ -136,7 +136,7 @@
 //! the DOM object in the reflector, and initializes the pointer to the reflector
 //! in the `Reflector` field.
 //!
-//! The `Reflectable` trait provides a `reflector()` method that returns the
+//! The `DomObject` trait provides a `reflector()` method that returns the
 //! DOM object's `Reflector`. It is implemented automatically for DOM structs
 //! through the `#[dom_struct]` attribute.
 //!
@@ -217,13 +217,10 @@ pub mod abstractworkerglobalscope;
 pub mod activation;
 pub mod attr;
 pub mod beforeunloadevent;
-mod create;
-#[allow(unsafe_code)]
-#[deny(missing_docs, non_snake_case)]
 pub mod bindings;
 pub mod blob;
 pub mod bluetooth;
-pub mod bluetoothadvertisingdata;
+pub mod bluetoothadvertisingevent;
 pub mod bluetoothcharacteristicproperties;
 pub mod bluetoothdevice;
 pub mod bluetoothremotegattcharacteristic;
@@ -240,9 +237,24 @@ pub mod client;
 pub mod closeevent;
 pub mod comment;
 pub mod console;
+mod create;
 pub mod crypto;
 pub mod css;
+pub mod cssconditionrule;
+pub mod cssfontfacerule;
+pub mod cssgroupingrule;
+pub mod cssimportrule;
+pub mod csskeyframerule;
+pub mod csskeyframesrule;
+pub mod cssmediarule;
+pub mod cssnamespacerule;
+pub mod cssrule;
+pub mod cssrulelist;
 pub mod cssstyledeclaration;
+pub mod cssstylerule;
+pub mod cssstylesheet;
+pub mod csssupportsrule;
+pub mod cssviewportrule;
 pub mod customevent;
 pub mod dedicatedworkerglobalscope;
 pub mod document;
@@ -250,6 +262,8 @@ pub mod documentfragment;
 pub mod documenttype;
 pub mod domexception;
 pub mod domimplementation;
+pub mod dommatrix;
+pub mod dommatrixreadonly;
 pub mod domparser;
 pub mod dompoint;
 pub mod dompointreadonly;
@@ -262,9 +276,10 @@ pub mod domtokenlist;
 pub mod element;
 pub mod errorevent;
 pub mod event;
-pub mod eventdispatcher;
 pub mod eventsource;
 pub mod eventtarget;
+pub mod extendableevent;
+pub mod extendablemessageevent;
 pub mod file;
 pub mod filelist;
 pub mod filereader;
@@ -272,6 +287,7 @@ pub mod filereadersync;
 pub mod focusevent;
 pub mod forcetouchevent;
 pub mod formdata;
+pub mod globalscope;
 pub mod hashchangeevent;
 pub mod headers;
 pub mod history;
@@ -320,6 +336,7 @@ pub mod htmlobjectelement;
 pub mod htmlolistelement;
 pub mod htmloptgroupelement;
 pub mod htmloptionelement;
+pub mod htmloptionscollection;
 pub mod htmloutputelement;
 pub mod htmlparagraphelement;
 pub mod htmlparamelement;
@@ -351,6 +368,9 @@ pub mod imagedata;
 pub mod keyboardevent;
 pub mod location;
 pub mod mediaerror;
+pub mod medialist;
+pub mod mediaquerylist;
+pub mod mediaquerylistevent;
 pub mod messageevent;
 pub mod mimetype;
 pub mod mimetypearray;
@@ -369,28 +389,37 @@ pub mod pluginarray;
 pub mod popstateevent;
 pub mod processinginstruction;
 pub mod progressevent;
+pub mod promise;
+pub mod promisenativehandler;
 pub mod radionodelist;
 pub mod range;
 pub mod request;
+pub mod response;
 pub mod screen;
 pub mod serviceworker;
 pub mod serviceworkercontainer;
 pub mod serviceworkerglobalscope;
 pub mod serviceworkerregistration;
-pub mod servohtmlparser;
-pub mod servoxmlparser;
+pub mod servoparser;
 pub mod storage;
 pub mod storageevent;
 pub mod stylesheet;
 pub mod stylesheetlist;
+pub mod svgelement;
+pub mod svggraphicselement;
+pub mod svgsvgelement;
 pub mod testbinding;
+pub mod testbindingiterable;
+pub mod testbindingpairiterable;
 pub mod testbindingproxy;
+pub mod testrunner;
 pub mod text;
 pub mod textdecoder;
 pub mod textencoder;
 pub mod touch;
 pub mod touchevent;
 pub mod touchlist;
+pub mod transitionevent;
 pub mod treewalker;
 pub mod uievent;
 pub mod url;
@@ -401,6 +430,15 @@ pub mod validation;
 pub mod validitystate;
 pub mod values;
 pub mod virtualmethods;
+pub mod vr;
+pub mod vrdisplay;
+pub mod vrdisplaycapabilities;
+pub mod vrdisplayevent;
+pub mod vreyeparameters;
+pub mod vrfieldofview;
+pub mod vrframedata;
+pub mod vrpose;
+pub mod vrstageparameters;
 pub mod webgl_validations;
 pub mod webglactiveinfo;
 pub mod webglbuffer;

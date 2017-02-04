@@ -6,14 +6,14 @@ use dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use dom::bindings::codegen::Bindings::PageTransitionEventBinding;
 use dom::bindings::codegen::Bindings::PageTransitionEventBinding::PageTransitionEventMethods;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::reflect_dom_object;
 use dom::bindings::str::DOMString;
 use dom::event::Event;
+use dom::window::Window;
+use servo_atoms::Atom;
 use std::cell::Cell;
-use string_cache::Atom;
 
 // https://html.spec.whatwg.org/multipage/#pagetransitionevent
 #[dom_struct]
@@ -30,19 +30,19 @@ impl PageTransitionEvent {
         }
     }
 
-    pub fn new_uninitialized(global: GlobalRef) -> Root<PageTransitionEvent> {
+    pub fn new_uninitialized(window: &Window) -> Root<PageTransitionEvent> {
         reflect_dom_object(box PageTransitionEvent::new_inherited(),
-                           global,
+                           window,
                            PageTransitionEventBinding::Wrap)
     }
 
-    pub fn new(global: GlobalRef,
+    pub fn new(window: &Window,
                type_: Atom,
                bubbles: bool,
                cancelable: bool,
                persisted: bool)
                -> Root<PageTransitionEvent> {
-        let ev = PageTransitionEvent::new_uninitialized(global);
+        let ev = PageTransitionEvent::new_uninitialized(window);
         ev.persisted.set(persisted);
         {
             let event = ev.upcast::<Event>();
@@ -51,11 +51,11 @@ impl PageTransitionEvent {
         ev
     }
 
-    pub fn Constructor(global: GlobalRef,
+    pub fn Constructor(window: &Window,
                        type_: DOMString,
                        init: &PageTransitionEventBinding::PageTransitionEventInit)
                        -> Fallible<Root<PageTransitionEvent>> {
-        Ok(PageTransitionEvent::new(global,
+        Ok(PageTransitionEvent::new(window,
                               Atom::from(type_),
                               init.parent.bubbles,
                               init.parent.cancelable,

@@ -12,6 +12,11 @@ pub fn expand_reflector(cx: &mut ExtCtxt, span: Span, _: &MetaItem, annotatable:
                         push: &mut FnMut(Annotatable)) {
     if let &Annotatable::Item(ref item) = annotatable {
         if let ItemKind::Struct(ref def, _) = item.node {
+            if def.fields().is_empty() {
+                cx.span_err(span, "#[dom_struct] should have a reflector or \
+                                   parent dom struct as its first field");
+                return;
+            }
             let struct_name = item.ident;
             // This path has to be hardcoded, unfortunately, since we can't resolve paths at expansion time
             match def.fields().iter().find(
@@ -20,31 +25,41 @@ pub fn expand_reflector(cx: &mut ExtCtxt, span: Span, _: &MetaItem, annotatable:
                 Some(f) => {
                     let field_name = f.ident;
                     let impl_item = quote_item!(cx,
-                        impl ::dom::bindings::reflector::Reflectable for $struct_name {
+                        impl ::dom::bindings::reflector::DomObject for $struct_name {
                             fn reflector<'a>(&'a self) -> &'a ::dom::bindings::reflector::Reflector {
                                 &self.$field_name
                             }
+                        }
+                    );
+                    let impl_item_mut = quote_item!(cx,
+                        impl ::dom::bindings::reflector::MutDomObject for $struct_name {
                             fn init_reflector(&mut self, obj: *mut ::js::jsapi::JSObject) {
                                 self.$field_name.set_jsobject(obj);
                             }
                         }
                     );
-                    impl_item.map(|it| push(Annotatable::Item(it)))
+                    impl_item.map(|it| push(Annotatable::Item(it)));
+                    impl_item_mut.map(|it| push(Annotatable::Item(it)))
                 },
                 // Or just call it on the first field (supertype).
                 None => {
                     let field_name = def.fields()[0].ident;
                     let impl_item = quote_item!(cx,
-                        impl ::dom::bindings::reflector::Reflectable for $struct_name {
+                        impl ::dom::bindings::reflector::DomObject for $struct_name {
                             fn reflector<'a>(&'a self) -> &'a ::dom::bindings::reflector::Reflector {
                                 self.$field_name.reflector()
                             }
+                        }
+                    );
+                    let impl_item_mut = quote_item!(cx,
+                        impl ::dom::bindings::reflector::MutDomObject for $struct_name {
                             fn init_reflector(&mut self, obj: *mut ::js::jsapi::JSObject) {
                                 self.$field_name.init_reflector(obj);
                             }
                         }
                     );
-                    impl_item.map(|it| push(Annotatable::Item(it)))
+                    impl_item.map(|it| push(Annotatable::Item(it)));
+                    impl_item_mut.map(|it| push(Annotatable::Item(it)))
                 }
             };
 
@@ -54,7 +69,7 @@ pub fn expand_reflector(cx: &mut ExtCtxt, span: Span, _: &MetaItem, annotatable:
                     unsafe fn to_jsval(&self,
                                        cx: *mut ::js::jsapi::JSContext,
                                        rval: ::js::jsapi::MutableHandleValue) {
-                        let object = ::dom::bindings::reflector::Reflectable::reflector(self).get_jsobject();
+                        let object = ::dom::bindings::reflector::DomObject::reflector(self).get_jsobject();
                         object.to_jsval(cx, rval)
                     }
                 }

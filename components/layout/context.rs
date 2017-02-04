@@ -4,72 +4,94 @@
 
 //! Data needed by the layout thread.
 
-// for thread_local
-#![allow(unsafe_code)]
-
-use app_units::Au;
-use euclid::Rect;
 use fnv::FnvHasher;
 use gfx::display_list::WebRenderImageInfo;
 use gfx::font_cache_thread::FontCacheThread;
 use gfx::font_context::FontContext;
-use gfx_traits::LayerId;
 use heapsize::HeapSizeOf;
-use ipc_channel::ipc::{self, IpcSharedMemory};
+use ipc_channel::ipc;
 use net_traits::image::base::Image;
 use net_traits::image_cache_thread::{ImageCacheChan, ImageCacheThread, ImageResponse, ImageState};
 use net_traits::image_cache_thread::{ImageOrMetadataAvailable, UsePlaceholder};
+use parking_lot::RwLock;
+use servo_config::opts;
+use servo_url::ServoUrl;
+use std::borrow::{Borrow, BorrowMut};
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, RwLock};
-use style::context::{LocalStyleContext, StyleContext, SharedStyleContext};
-use url::Url;
-use util::opts;
+use std::sync::{Arc, Mutex};
+use style::context::{SharedStyleContext, ThreadLocalStyleContext};
+use style::dom::TElement;
 
-struct LocalLayoutContext {
-    style_context: LocalStyleContext,
-
-    font_context: RefCell<FontContext>,
+/// TLS data scoped to the traversal.
+pub struct ScopedThreadLocalLayoutContext<E: TElement> {
+    pub style_context: ThreadLocalStyleContext<E>,
 }
 
-impl HeapSizeOf for LocalLayoutContext {
-    // FIXME(njn): measure other fields eventually.
+impl<E: TElement> ScopedThreadLocalLayoutContext<E> {
+    pub fn new(shared: &SharedLayoutContext) -> Self {
+        ScopedThreadLocalLayoutContext {
+            style_context: ThreadLocalStyleContext::new(&shared.style_context),
+        }
+    }
+}
+
+impl<E: TElement> Borrow<ThreadLocalStyleContext<E>> for ScopedThreadLocalLayoutContext<E> {
+    fn borrow(&self) -> &ThreadLocalStyleContext<E> {
+        &self.style_context
+    }
+}
+
+impl<E: TElement> BorrowMut<ThreadLocalStyleContext<E>> for ScopedThreadLocalLayoutContext<E> {
+    fn borrow_mut(&mut self) -> &mut ThreadLocalStyleContext<E> {
+        &mut self.style_context
+    }
+}
+
+/// TLS data that persists across traversals.
+pub struct PersistentThreadLocalLayoutContext {
+    // FontContext uses Rc all over the place and so isn't Send, which means we
+    // can't use ScopedTLS for it. There's also no reason to scope it to the
+    // traversal, and performance is probably better if we don't.
+    pub font_context: RefCell<FontContext>,
+}
+
+impl PersistentThreadLocalLayoutContext {
+    pub fn new(shared: &SharedLayoutContext) -> Rc<Self> {
+        let font_cache_thread = shared.font_cache_thread.lock().unwrap().clone();
+        Rc::new(PersistentThreadLocalLayoutContext {
+            font_context: RefCell::new(FontContext::new(font_cache_thread)),
+        })
+    }
+}
+
+impl HeapSizeOf for PersistentThreadLocalLayoutContext {
     fn heap_size_of_children(&self) -> usize {
         self.font_context.heap_size_of_children()
     }
 }
 
-thread_local!(static LOCAL_CONTEXT_KEY: RefCell<Option<Rc<LocalLayoutContext>>> = RefCell::new(None));
+thread_local!(static LOCAL_CONTEXT_KEY: RefCell<Option<Rc<PersistentThreadLocalLayoutContext>>> = RefCell::new(None));
 
-pub fn heap_size_of_local_context() -> usize {
-    LOCAL_CONTEXT_KEY.with(|r| {
-        r.borrow().clone().map_or(0, |context| context.heap_size_of_children())
-    })
-}
-
-// Keep this implementation in sync with the one in ports/geckolib/traversal.rs.
-fn create_or_get_local_context(shared_layout_context: &SharedLayoutContext)
-                               -> Rc<LocalLayoutContext> {
+fn create_or_get_persistent_context(shared: &SharedLayoutContext)
+                                    -> Rc<PersistentThreadLocalLayoutContext> {
     LOCAL_CONTEXT_KEY.with(|r| {
         let mut r = r.borrow_mut();
         if let Some(context) = r.clone() {
-            if shared_layout_context.style_context.screen_size_changed {
-                context.style_context.applicable_declarations_cache.borrow_mut().evict_all();
-            }
             context
         } else {
-            let font_cache_thread = shared_layout_context.font_cache_thread.lock().unwrap().clone();
-            let local_style_data = shared_layout_context.style_context.local_context_creation_data.lock().unwrap();
-
-            let context = Rc::new(LocalLayoutContext {
-                style_context: LocalStyleContext::new(&local_style_data),
-                font_context: RefCell::new(FontContext::new(font_cache_thread)),
-            });
+            let context = PersistentThreadLocalLayoutContext::new(shared);
             *r = Some(context.clone());
             context
         }
+    })
+}
+
+pub fn heap_size_of_persistent_local_context() -> usize {
+    LOCAL_CONTEXT_KEY.with(|r| {
+        r.borrow().clone().map_or(0, |context| context.heap_size_of_children())
     })
 }
 
@@ -79,7 +101,7 @@ pub struct SharedLayoutContext {
     pub style_context: SharedStyleContext,
 
     /// The shared image cache thread.
-    pub image_cache_thread: ImageCacheThread,
+    pub image_cache_thread: Mutex<ImageCacheThread>,
 
     /// A channel for the image cache to send responses to.
     pub image_cache_sender: Mutex<ImageCacheChan>,
@@ -87,38 +109,34 @@ pub struct SharedLayoutContext {
     /// Interface to the font cache thread.
     pub font_cache_thread: Mutex<FontCacheThread>,
 
-    /// The visible rects for each layer, as reported to us by the compositor.
-    pub visible_rects: Arc<HashMap<LayerId, Rect<Au>, BuildHasherDefault<FnvHasher>>>,
-
     /// A cache of WebRender image info.
-    pub webrender_image_cache: Arc<RwLock<HashMap<(Url, UsePlaceholder),
+    pub webrender_image_cache: Arc<RwLock<HashMap<(ServoUrl, UsePlaceholder),
                                                   WebRenderImageInfo,
                                                   BuildHasherDefault<FnvHasher>>>>,
 }
 
 pub struct LayoutContext<'a> {
     pub shared: &'a SharedLayoutContext,
-    cached_local_layout_context: Rc<LocalLayoutContext>,
+    pub persistent: Rc<PersistentThreadLocalLayoutContext>,
 }
 
-impl<'a> StyleContext<'a> for LayoutContext<'a> {
-    fn shared_context(&self) -> &'a SharedStyleContext {
-        &self.shared.style_context
-    }
-
-    fn local_context(&self) -> &LocalStyleContext {
-        &self.cached_local_layout_context.style_context
+impl<'a> LayoutContext<'a> {
+    pub fn new(shared: &'a SharedLayoutContext) -> Self
+    {
+        LayoutContext {
+            shared: shared,
+            persistent: create_or_get_persistent_context(shared),
+        }
     }
 }
 
 impl<'a> LayoutContext<'a> {
-    pub fn new(shared_layout_context: &'a SharedLayoutContext) -> LayoutContext<'a> {
-        let local_context = create_or_get_local_context(shared_layout_context);
-
-        LayoutContext {
-            shared: shared_layout_context,
-            cached_local_layout_context: local_context,
-        }
+    // FIXME(bholley): The following two methods are identical and should be merged.
+    // shared_context() is the appropriate name, but it involves renaming a lot of
+    // calls.
+    #[inline(always)]
+    pub fn shared_context(&self) -> &SharedStyleContext {
+        &self.shared.style_context
     }
 
     #[inline(always)]
@@ -128,15 +146,18 @@ impl<'a> LayoutContext<'a> {
 
     #[inline(always)]
     pub fn font_context(&self) -> RefMut<FontContext> {
-        self.cached_local_layout_context.font_context.borrow_mut()
+        self.persistent.font_context.borrow_mut()
     }
+}
 
-    fn get_or_request_image_synchronously(&self, url: Url, use_placeholder: UsePlaceholder)
+impl SharedLayoutContext {
+    fn get_or_request_image_synchronously(&self, url: ServoUrl, use_placeholder: UsePlaceholder)
                                           -> Option<Arc<Image>> {
         debug_assert!(opts::get().output_file.is_some() || opts::get().exit_after_load);
 
         // See if the image is already available
-        let result = self.shared.image_cache_thread.find_image(url.clone(), use_placeholder);
+        let result = self.image_cache_thread.lock().unwrap()
+                                            .find_image(url.clone(), use_placeholder);
 
         match result {
             Ok(image) => return Some(image),
@@ -150,7 +171,7 @@ impl<'a> LayoutContext<'a> {
         // If we are emitting an output file, then we need to block on
         // image load or we risk emitting an output file missing the image.
         let (sync_tx, sync_rx) = ipc::channel().unwrap();
-        self.shared.image_cache_thread.request_image(url, ImageCacheChan(sync_tx), None);
+        self.image_cache_thread.lock().unwrap().request_image(url, ImageCacheChan(sync_tx), None);
         loop {
             match sync_rx.recv() {
                 Err(_) => return None,
@@ -166,7 +187,7 @@ impl<'a> LayoutContext<'a> {
         }
     }
 
-    pub fn get_or_request_image_or_meta(&self, url: Url, use_placeholder: UsePlaceholder)
+    pub fn get_or_request_image_or_meta(&self, url: ServoUrl, use_placeholder: UsePlaceholder)
                                 -> Option<ImageOrMetadataAvailable> {
         // If we are emitting an output file, load the image synchronously.
         if opts::get().output_file.is_some() || opts::get().exit_after_load {
@@ -174,16 +195,18 @@ impl<'a> LayoutContext<'a> {
                        .map(|img| ImageOrMetadataAvailable::ImageAvailable(img));
         }
         // See if the image is already available
-        let result = self.shared.image_cache_thread.find_image_or_metadata(url.clone(),
-                                                                           use_placeholder);
+        let result = self.image_cache_thread.lock().unwrap()
+                                            .find_image_or_metadata(url.clone(),
+                                                                    use_placeholder);
         match result {
             Ok(image_or_metadata) => Some(image_or_metadata),
             // Image failed to load, so just return nothing
             Err(ImageState::LoadError) => None,
             // Not yet requested, async mode - request image or metadata from the cache
             Err(ImageState::NotRequested) => {
-                let sender = self.shared.image_cache_sender.lock().unwrap().clone();
-                self.shared.image_cache_thread.request_image_and_metadata(url, sender, None);
+                let sender = self.image_cache_sender.lock().unwrap().clone();
+                self.image_cache_thread.lock().unwrap()
+                                       .request_image_and_metadata(url, sender, None);
                 None
             }
             // Image has been requested, is still pending. Return no image for this paint loop.
@@ -193,38 +216,25 @@ impl<'a> LayoutContext<'a> {
     }
 
     pub fn get_webrender_image_for_url(&self,
-                                       url: &Url,
-                                       use_placeholder: UsePlaceholder,
-                                       fetch_image_data_as_well: bool)
-                                       -> Option<(WebRenderImageInfo, Option<IpcSharedMemory>)> {
-        if !fetch_image_data_as_well {
-            let webrender_image_cache = self.shared.webrender_image_cache.read().unwrap();
-            if let Some(existing_webrender_image) =
-                    webrender_image_cache.get(&((*url).clone(), use_placeholder)) {
-                return Some(((*existing_webrender_image).clone(), None))
-            }
+                                       url: ServoUrl,
+                                       use_placeholder: UsePlaceholder)
+                                       -> Option<WebRenderImageInfo> {
+        if let Some(existing_webrender_image) = self.webrender_image_cache
+                                                    .read()
+                                                    .get(&(url.clone(), use_placeholder)) {
+            return Some((*existing_webrender_image).clone())
         }
 
-        match self.get_or_request_image_or_meta((*url).clone(), use_placeholder) {
+        match self.get_or_request_image_or_meta(url.clone(), use_placeholder) {
             Some(ImageOrMetadataAvailable::ImageAvailable(image)) => {
                 let image_info = WebRenderImageInfo::from_image(&*image);
                 if image_info.key.is_none() {
-                    let bytes = if !fetch_image_data_as_well {
-                        None
-                    } else {
-                        Some(image.bytes.clone())
-                    };
-                    Some((image_info, bytes))
-                } else if !fetch_image_data_as_well {
-                    let mut webrender_image_cache = self.shared
-                                                        .webrender_image_cache
-                                                        .write()
-                                                        .unwrap();
-                    webrender_image_cache.insert(((*url).clone(), use_placeholder),
-                                                 image_info);
-                    Some((image_info, None))
+                    Some(image_info)
                 } else {
-                    Some((image_info, Some(image.bytes.clone())))
+                    let mut webrender_image_cache = self.webrender_image_cache.write();
+                    webrender_image_cache.insert((url, use_placeholder),
+                                                 image_info);
+                    Some(image_info)
                 }
             }
             None | Some(ImageOrMetadataAvailable::MetadataAvailable(_)) => None,

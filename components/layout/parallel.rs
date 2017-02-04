@@ -10,17 +10,16 @@
 
 use context::{LayoutContext, SharedLayoutContext};
 use flow::{self, Flow, MutableFlowUtils, PostorderFlowTraversal, PreorderFlowTraversal};
-use flow_ref::{self, FlowRef};
+use flow_ref::FlowRef;
 use profile_traits::time::{self, TimerMetadata, profile};
+use rayon;
+use servo_config::opts;
 use std::mem;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use style::dom::UnsafeNode;
-use style::parallel::run_queue_with_custom_work_data_type;
-use style::parallel::{CHUNK_SIZE, WorkQueueData};
-use style::workqueue::{WorkQueue, WorkUnit, WorkerProxy};
-use traversal::AssignBSizes;
+use style::parallel::CHUNK_SIZE;
 use traversal::{AssignISizes, BubbleISizes};
-use util::opts;
+use traversal::AssignBSizes;
 
 pub use style::parallel::traverse_dom;
 
@@ -50,12 +49,10 @@ pub fn borrowed_flow_to_unsafe_flow(flow: &Flow) -> UnsafeFlow {
     }
 }
 
-pub type UnsafeFlowList = (Box<Vec<UnsafeNode>>, usize);
+pub type ChunkedFlowTraversalFunction<'scope> =
+    extern "Rust" fn(Box<[UnsafeFlow]>, &rayon::Scope<'scope>, &'scope SharedLayoutContext);
 
-pub type ChunkedFlowTraversalFunction =
-    extern "Rust" fn(UnsafeFlowList, &mut WorkerProxy<SharedLayoutContext, UnsafeFlowList>);
-
-pub type FlowTraversalFunction = extern "Rust" fn(UnsafeFlow, &SharedLayoutContext);
+pub type FlowTraversalFunction = extern "Rust" fn(UnsafeFlow, &LayoutContext);
 
 /// Information that we need stored in each flow.
 pub struct FlowParallelInfo {
@@ -133,27 +130,37 @@ trait ParallelPostorderFlowTraversal : PostorderFlowTraversal {
 
 /// A parallel top-down flow traversal.
 trait ParallelPreorderFlowTraversal : PreorderFlowTraversal {
-    fn run_parallel(&self,
-                    unsafe_flows: UnsafeFlowList,
-                    proxy: &mut WorkerProxy<SharedLayoutContext, UnsafeFlowList>);
+    fn run_parallel<'scope>(&self,
+                            unsafe_flows: &[UnsafeFlow],
+                            scope: &rayon::Scope<'scope>,
+                            shared: &'scope SharedLayoutContext);
 
     fn should_record_thread_ids(&self) -> bool;
 
     #[inline(always)]
-    fn run_parallel_helper(&self,
-                           unsafe_flows: UnsafeFlowList,
-                           proxy: &mut WorkerProxy<SharedLayoutContext, UnsafeFlowList>,
-                           top_down_func: ChunkedFlowTraversalFunction,
-                           bottom_up_func: FlowTraversalFunction) {
-        let mut discovered_child_flows = Vec::new();
-        for unsafe_flow in *unsafe_flows.0 {
+    fn run_parallel_helper<'scope>(&self,
+                                   unsafe_flows: &[UnsafeFlow],
+                                   scope: &rayon::Scope<'scope>,
+                                   shared: &'scope SharedLayoutContext,
+                                   top_down_func: ChunkedFlowTraversalFunction<'scope>,
+                                   bottom_up_func: FlowTraversalFunction)
+    {
+        let mut discovered_child_flows = vec![];
+        let context = LayoutContext::new(&shared);
+
+        for unsafe_flow in unsafe_flows {
             let mut had_children = false;
             unsafe {
                 // Get a real flow.
-                let flow: &mut Flow = mem::transmute(unsafe_flow);
+                let flow: &mut Flow = mem::transmute(*unsafe_flow);
 
                 if self.should_record_thread_ids() {
-                    flow::mut_base(flow).thread_id = proxy.worker_index();
+                    // FIXME(emilio): With the switch to rayon we can no longer
+                    // access a thread id from here easily. Either instrument
+                    // rayon (the unstable feature) to get a worker thread
+                    // identifier, or remove all the layout tinting mode.
+                    //
+                    // flow::mut_base(flow).thread_id = proxy.worker_index();
                 }
 
                 if self.should_process(flow) {
@@ -170,25 +177,29 @@ trait ParallelPreorderFlowTraversal : PreorderFlowTraversal {
 
             // If there were no more children, start assigning block-sizes.
             if !had_children {
-                bottom_up_func(unsafe_flow, proxy.user_data())
+                bottom_up_func(*unsafe_flow, &context)
             }
         }
 
         for chunk in discovered_child_flows.chunks(CHUNK_SIZE) {
-            proxy.push(WorkUnit {
-                fun: top_down_func,
-                data: (box chunk.iter().cloned().collect(), 0),
+            let nodes = chunk.iter().cloned().collect::<Vec<_>>().into_boxed_slice();
+
+            scope.spawn(move |scope| {
+                top_down_func(nodes, scope, shared);
             });
         }
     }
 }
 
 impl<'a> ParallelPreorderFlowTraversal for AssignISizes<'a> {
-    fn run_parallel(&self,
-                    unsafe_flows: UnsafeFlowList,
-                    proxy: &mut WorkerProxy<SharedLayoutContext, UnsafeFlowList>) {
+    fn run_parallel<'scope>(&self,
+                                  unsafe_flows: &[UnsafeFlow],
+                                  scope: &rayon::Scope<'scope>,
+                                  shared: &'scope SharedLayoutContext)
+    {
         self.run_parallel_helper(unsafe_flows,
-                                 proxy,
+                                 scope,
+                                 shared,
                                  assign_inline_sizes,
                                  assign_block_sizes_and_store_overflow)
     }
@@ -200,44 +211,44 @@ impl<'a> ParallelPreorderFlowTraversal for AssignISizes<'a> {
 
 impl<'a> ParallelPostorderFlowTraversal for AssignBSizes<'a> {}
 
-fn assign_inline_sizes(unsafe_flows: UnsafeFlowList,
-                       proxy: &mut WorkerProxy<SharedLayoutContext, UnsafeFlowList>) {
-    let shared_layout_context = proxy.user_data();
+fn assign_inline_sizes<'scope>(unsafe_flows: Box<[UnsafeFlow]>,
+                               scope: &rayon::Scope<'scope>,
+                               shared: &'scope SharedLayoutContext) {
     let assign_inline_sizes_traversal = AssignISizes {
-        shared_context: &shared_layout_context.style_context,
+        shared_context: &shared.style_context,
     };
-    assign_inline_sizes_traversal.run_parallel(unsafe_flows, proxy)
+    assign_inline_sizes_traversal.run_parallel(&unsafe_flows, scope, shared)
 }
 
 fn assign_block_sizes_and_store_overflow(
         unsafe_flow: UnsafeFlow,
-        shared_layout_context: &SharedLayoutContext) {
-    let layout_context = LayoutContext::new(shared_layout_context);
+        context: &LayoutContext) {
     let assign_block_sizes_traversal = AssignBSizes {
-        layout_context: &layout_context,
+        layout_context: context,
     };
     assign_block_sizes_traversal.run_parallel(unsafe_flow)
 }
 
 pub fn traverse_flow_tree_preorder(
-        root: &mut FlowRef,
+        root: &mut Flow,
         profiler_metadata: Option<TimerMetadata>,
         time_profiler_chan: time::ProfilerChan,
-        shared_layout_context: &SharedLayoutContext,
-        queue: &mut WorkQueue<SharedLayoutContext, WorkQueueData>) {
+        shared: &SharedLayoutContext,
+        queue: &rayon::ThreadPool) {
     if opts::get().bubble_inline_sizes_separately {
-        let layout_context = LayoutContext::new(shared_layout_context);
-        let bubble_inline_sizes = BubbleISizes { layout_context: &layout_context };
-        flow_ref::deref_mut(root).traverse_postorder(&bubble_inline_sizes);
+        let context = LayoutContext::new(shared);
+        let bubble_inline_sizes = BubbleISizes { layout_context: &context };
+        root.traverse_postorder(&bubble_inline_sizes);
     }
 
-    run_queue_with_custom_work_data_type(queue, |queue| {
-        profile(time::ProfilerCategory::LayoutParallelWarmup, profiler_metadata,
-                time_profiler_chan, || {
-            queue.push(WorkUnit {
-                fun: assign_inline_sizes,
-                data: (box vec![mut_owned_flow_to_unsafe_flow(root)], 0),
-            })
+    let nodes = vec![borrowed_flow_to_unsafe_flow(root)].into_boxed_slice();
+
+    queue.install(move || {
+        rayon::scope(move |scope| {
+            profile(time::ProfilerCategory::LayoutParallelWarmup,
+                    profiler_metadata, time_profiler_chan, move || {
+                assign_inline_sizes(nodes, scope, &shared);
+            });
         });
-    }, shared_layout_context);
+    });
 }

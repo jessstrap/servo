@@ -75,7 +75,7 @@ For more exhaustive documentation:
 
 ## Cargo and Crates
 
-A Rust library is called a crate. Servo uses plenty of crates. These crates are dependencies. They are listed in files called `Cargo.toml`. Servo is split in components and ports (see `components` and `ports` directories). Each has its own dependencies, and each has its own `Cargo.toml` file.
+A Rust library is called a crate. Servo uses plenty of crates. These crates are dependencies. They are listed in files called `Cargo.toml`. Servo is split into components and ports (see `components` and `ports` directories). Each has its own dependencies, and each has its own `Cargo.toml` file.
 
 `Cargo.toml` files list the dependencies. You can edit this file.
 
@@ -94,7 +94,7 @@ name = "stb_image"
 source = "git+https://github.com/servo/rust-stb-image#f4c5380cd586bfe16326e05e2518aa044397894b"
 ```
 
-This file should not be edited by hand. In a normal Rust project, to update the git revision, you would use `cargo update -p stb_image`, but in Servo, use `./mach cargo-update -p stb_image`.
+This file should not be edited by hand. In a normal Rust project, to update the git revision, you would use `cargo update -p stb_image`, but in Servo, use `./mach cargo-update -p stb_image`. Other arguments to cargo are also understood, e.g. use --precise '0.2.3' to update that crate to version 0.2.3.
 
 See [Cargo's documentation about Cargo.toml and Cargo.lock files](http://doc.crates.io/guide.html#cargotoml-vs-cargolock).
 
@@ -108,28 +108,37 @@ This is how my projects are laid out:
 
 ```
 ~/my-projects/servo/
-~/my-projects/cocoa-rs/
-~/my-projects/glutin/
+~/my-projects/mozjs/
+```
+Both folder are git repositories. 
+
+To make it so that servo uses `~/my-projects/mozjs/`, first ascertain which version of the crate Servo is using and whether it is a git dependency or one from crates.io.  
+
+Both information can be found using, in this example, `/mach cargo pkgid mozjs_sys`(`mozjs_sys` is the actual crate name, which doesn't necessarily match the repo folder name).
+
+If the output is in the format `https://github.com/servo/mozjs#mozjs_sys:0.0.0`, you are dealing with a git dependency and you will have to edit the `~/my-projects/servo/Cargo.toml` file and add at the bottom:
+
+``` toml
+[replace]
+"https://github.com/servo/mozjs#mozjs_sys:0.0.0" = { path = '../mozjs' }
 ```
 
-These are all git repositories.
+If the output is in the format `https://github.com/rust-lang/crates.io-index#mozjs_sys#0.0.0`, you are dealing with a crates.io dependency and you will have to edit the `~/my-projects/servo/Cargo.toml` in the following way:
 
-To make it so that servo uses `~/my-projects/cocoa-rs/` and `~/my-projects/glutin/` , create a `~/my-projects/servo/.cargo/config` file:
-
-``` shell
-$ cat ~/my-projects/servo/.cargo/config
-paths = ['../glutin', '../cocoa-rs']
+``` toml
+[replace]
+"mozjs_sys:0.0.0" = { path = '../mozjs' }
 ```
 
-This will tell any cargo project to not use the online version of the dependency, but your local clone.
+Both will tell any cargo project to not use the online version of the dependency, but your local clone.
 
-For more details about overriding dependencies, see [Cargo's documentation](http://doc.crates.io/guide.html#overriding-dependencies).
+For more details about overriding dependencies, see [Cargo's documentation](http://doc.crates.io/specifying-dependencies.html#overriding-dependencies).
 
 ## Debugging
 
 ### Logging:
 
-Before starting the debugger right away, you might want get some information about what's happening, how, and when. Luckily, Servo comes with plenty of logs that will help us. Type these 2 commands:
+Before starting the debugger right away, you might want to get some information about what's happening, how, and when. Luckily, Servo comes with plenty of logs that will help us. Type these 2 commands:
 
 ``` shell
 ./mach run -d -- --help
@@ -174,7 +183,7 @@ You will want to add your own logs. Luckily, many structures [implement the `fmt
 println!("foobar: {:?}", foobar)
 ```
 
-usually just works. If it doesn't, maybe foobar's properties implement the right trait.
+usually just works. If it doesn't, maybe some of foobar's properties don't implement the right trait.
 
 ### Debugger
 
@@ -259,6 +268,10 @@ If you need to create a new test file, it should be located in `tests/wpt/mozill
 ```
 ./mach test-wpt --manifest-update
 ```
+
+### Debugging a test
+
+See the [debugging guide](./debugging.md) to get started in how to debug Servo.
 
 ## Documentation:
 

@@ -7,15 +7,14 @@ use dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
 use dom::bindings::codegen::Bindings::NamedNodeMapBinding;
 use dom::bindings::codegen::Bindings::NamedNodeMapBinding::NamedNodeMapMethods;
 use dom::bindings::error::{Error, Fallible};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
 use dom::bindings::xmlname::namespace_from_domstring;
 use dom::element::Element;
 use dom::window::Window;
+use html5ever_atoms::LocalName;
 use std::ascii::AsciiExt;
-use string_cache::Atom;
 
 #[dom_struct]
 pub struct NamedNodeMap {
@@ -33,7 +32,7 @@ impl NamedNodeMap {
 
     pub fn new(window: &Window, elem: &Element) -> Root<NamedNodeMap> {
         reflect_dom_object(box NamedNodeMap::new_inherited(elem),
-                           GlobalRef::Window(window), NamedNodeMapBinding::Wrap)
+                           window, NamedNodeMapBinding::Wrap)
     }
 }
 
@@ -57,7 +56,7 @@ impl NamedNodeMapMethods for NamedNodeMap {
     fn GetNamedItemNS(&self, namespace: Option<DOMString>, local_name: DOMString)
                      -> Option<Root<Attr>> {
         let ns = namespace_from_domstring(namespace);
-        self.owner.get_attribute(&ns, &Atom::from(local_name))
+        self.owner.get_attribute(&ns, &LocalName::from(local_name))
     }
 
     // https://dom.spec.whatwg.org/#dom-namednodemap-setnameditem
@@ -80,22 +79,18 @@ impl NamedNodeMapMethods for NamedNodeMap {
     fn RemoveNamedItemNS(&self, namespace: Option<DOMString>, local_name: DOMString)
                       -> Fallible<Root<Attr>> {
         let ns = namespace_from_domstring(namespace);
-        self.owner.remove_attribute(&ns, &Atom::from(local_name))
+        self.owner.remove_attribute(&ns, &LocalName::from(local_name))
             .ok_or(Error::NotFound)
     }
 
     // https://dom.spec.whatwg.org/#dom-namednodemap-item
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<Attr>> {
-        let item = self.Item(index);
-        *found = item.is_some();
-        item
+    fn IndexedGetter(&self, index: u32) -> Option<Root<Attr>> {
+        self.Item(index)
     }
 
     // check-tidy: no specs after this line
-    fn NamedGetter(&self, name: DOMString, found: &mut bool) -> Option<Root<Attr>> {
-        let item = self.GetNamedItem(name);
-        *found = item.is_some();
-        item
+    fn NamedGetter(&self, name: DOMString) -> Option<Root<Attr>> {
+        self.GetNamedItem(name)
     }
 
     // https://heycam.github.io/webidl/#dfn-supported-property-names

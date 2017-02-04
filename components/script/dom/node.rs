@@ -7,8 +7,6 @@
 use app_units::Au;
 use devtools_traits::NodeInfo;
 use document_loader::DocumentLoader;
-use dom::attr::Attr;
-use dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use dom::bindings::codegen::Bindings::CharacterDataBinding::CharacterDataMethods;
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
@@ -20,32 +18,38 @@ use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::codegen::UnionTypes::NodeOrString;
 use dom::bindings::conversions::{self, DerivedFrom};
 use dom::bindings::error::{Error, ErrorResult, Fallible};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::{Castable, CharacterDataTypeId, ElementTypeId};
 use dom::bindings::inheritance::{EventTargetTypeId, HTMLElementTypeId, NodeTypeId};
+use dom::bindings::inheritance::{SVGElementTypeId, SVGGraphicsElementTypeId};
+use dom::bindings::js::{JS, LayoutJS, MutNullableJS};
 use dom::bindings::js::Root;
 use dom::bindings::js::RootedReference;
-use dom::bindings::js::{JS, LayoutJS, MutNullableHeap};
-use dom::bindings::reflector::{Reflectable, reflect_dom_object};
+use dom::bindings::reflector::{DomObject, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
 use dom::bindings::xmlname::namespace_from_domstring;
 use dom::characterdata::{CharacterData, LayoutCharacterDataHelpers};
-use dom::document::{Document, DocumentSource, IsHTMLDocument};
+use dom::cssstylesheet::CSSStyleSheet;
+use dom::document::{Document, DocumentSource, HasBrowsingContext, IsHTMLDocument};
 use dom::documentfragment::DocumentFragment;
 use dom::documenttype::DocumentType;
 use dom::element::{Element, ElementCreator};
 use dom::eventtarget::EventTarget;
+use dom::globalscope::GlobalScope;
 use dom::htmlbodyelement::HTMLBodyElement;
-use dom::htmlcanvaselement::LayoutHTMLCanvasElementHelpers;
+use dom::htmlcanvaselement::{HTMLCanvasElement, LayoutHTMLCanvasElementHelpers};
 use dom::htmlcollection::HTMLCollection;
 use dom::htmlelement::HTMLElement;
 use dom::htmliframeelement::{HTMLIFrameElement, HTMLIFrameElementLayoutMethods};
 use dom::htmlimageelement::{HTMLImageElement, LayoutHTMLImageElementHelpers};
 use dom::htmlinputelement::{HTMLInputElement, LayoutHTMLInputElementHelpers};
+use dom::htmllinkelement::HTMLLinkElement;
+use dom::htmlmetaelement::HTMLMetaElement;
+use dom::htmlstyleelement::HTMLStyleElement;
 use dom::htmltextareaelement::{HTMLTextAreaElement, LayoutHTMLTextAreaElementHelpers};
 use dom::nodelist::NodeList;
 use dom::processinginstruction::ProcessingInstruction;
 use dom::range::WeakRangeVec;
+use dom::svgsvgelement::{SVGSVGElement, LayoutSVGSVGElementHelpers};
 use dom::text::Text;
 use dom::virtualmethods::{VirtualMethods, vtable_for};
 use dom::window::Window;
@@ -53,19 +57,19 @@ use euclid::point::Point2D;
 use euclid::rect::Rect;
 use euclid::size::Size2D;
 use heapsize::{HeapSizeOf, heap_size_of};
-use html5ever::tree_builder::QuirksMode;
+use html5ever_atoms::{Prefix, Namespace, QualName};
 use js::jsapi::{JSContext, JSObject, JSRuntime};
 use libc::{self, c_void, uintptr_t};
 use msg::constellation_msg::PipelineId;
-use parse::html::parse_html_fragment;
 use ref_slice::ref_slice;
+use script_layout_interface::{HTMLCanvasData, OpaqueStyleAndLayoutData, SVGSVGData};
+use script_layout_interface::{LayoutElementType, LayoutNodeType, TrustedNodeAddress};
 use script_layout_interface::message::Msg;
-use script_layout_interface::{HTMLCanvasData, OpaqueStyleAndLayoutData};
-use script_layout_interface::{LayoutNodeType, LayoutElementType, TrustedNodeAddress};
+use script_traits::DocumentActivity;
 use script_traits::UntrustedNodeAddress;
-use selectors::matching::matches;
-use selectors::parser::Selector;
-use selectors::parser::parse_author_origin_selector_list_from_str;
+use selectors::matching::{MatchingReason, matches};
+use selectors::parser::SelectorList;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::cell::{Cell, UnsafeCell};
 use std::cmp::max;
@@ -73,11 +77,12 @@ use std::default::Default;
 use std::iter;
 use std::mem;
 use std::ops::Range;
-use string_cache::{Atom, Namespace, QualName};
+use std::sync::Arc;
+use style::context::QuirksMode;
 use style::dom::OpaqueNode;
-use style::selector_impl::ServoSelectorImpl;
-use url::Url;
-use util::thread_state;
+use style::selector_parser::{SelectorImpl, SelectorParser};
+use style::stylesheets::Stylesheet;
+use style::thread_state;
 use uuid::Uuid;
 
 //
@@ -91,25 +96,25 @@ pub struct Node {
     eventtarget: EventTarget,
 
     /// The parent of this node.
-    parent_node: MutNullableHeap<JS<Node>>,
+    parent_node: MutNullableJS<Node>,
 
     /// The first child of this node.
-    first_child: MutNullableHeap<JS<Node>>,
+    first_child: MutNullableJS<Node>,
 
     /// The last child of this node.
-    last_child: MutNullableHeap<JS<Node>>,
+    last_child: MutNullableJS<Node>,
 
     /// The next sibling of this node.
-    next_sibling: MutNullableHeap<JS<Node>>,
+    next_sibling: MutNullableJS<Node>,
 
     /// The previous sibling of this node.
-    prev_sibling: MutNullableHeap<JS<Node>>,
+    prev_sibling: MutNullableJS<Node>,
 
     /// The document that this node belongs to.
-    owner_doc: MutNullableHeap<JS<Document>>,
+    owner_doc: MutNullableJS<Document>,
 
     /// The live list of children return by .childNodes.
-    child_list: MutNullableHeap<JS<NodeList>>,
+    child_list: MutNullableJS<NodeList>,
 
     /// The live count of children of this node.
     children_count: Cell<u32>,
@@ -141,12 +146,7 @@ bitflags! {
     pub flags NodeFlags: u8 {
         #[doc = "Specifies whether this node is in a document."]
         const IS_IN_DOC = 0x01,
-        #[doc = "Specifies whether this node _must_ be reflowed regardless of style differences."]
-        const HAS_CHANGED = 0x02,
         #[doc = "Specifies whether this node needs style recalc on next reflow."]
-        const IS_DIRTY = 0x04,
-        #[doc = "Specifies whether this node has descendants (inclusive of itself) which \
-                 have changed since the last reflow."]
         const HAS_DIRTY_DESCENDANTS = 0x08,
         // TODO: find a better place to keep this (#4105)
         // https://critic.hoppipolla.co.uk/showcomment?chain=8873
@@ -167,7 +167,7 @@ bitflags! {
 
 impl NodeFlags {
     pub fn new() -> NodeFlags {
-        HAS_CHANGED | IS_DIRTY | HAS_DIRTY_DESCENDANTS
+        NodeFlags::empty()
     }
 }
 
@@ -216,7 +216,7 @@ impl Node {
                     },
                     Some(ref prev_sibling) => {
                         prev_sibling.next_sibling.set(Some(new_child));
-                        new_child.prev_sibling.set(Some(prev_sibling.r()));
+                        new_child.prev_sibling.set(Some(&prev_sibling));
                     },
                 }
                 before.prev_sibling.set(Some(new_child));
@@ -243,6 +243,8 @@ impl Node {
         let parent_in_doc = self.is_in_doc();
         for node in new_child.traverse_preorder() {
             node.set_flag(IS_IN_DOC, parent_in_doc);
+            // Out-of-document elements never have the descendants flag set.
+            debug_assert!(!node.get_flag(HAS_DIRTY_DESCENDANTS));
             vtable_for(&&*node).bind_to_tree(parent_in_doc);
         }
         let document = new_child.owner_doc();
@@ -281,7 +283,8 @@ impl Node {
         self.children_count.set(self.children_count.get() - 1);
 
         for node in child.traverse_preorder() {
-            node.set_flag(IS_IN_DOC, false);
+            // Out-of-document elements never have the descendants flag set.
+            node.set_flag(IS_IN_DOC | HAS_DIRTY_DESCENDANTS, false);
             vtable_for(&&*node).unbind_from_tree(&context);
             node.style_and_layout_data.get().map(|d| node.dispose(d));
         }
@@ -296,12 +299,12 @@ impl Node {
 }
 
 pub struct QuerySelectorIterator {
-    selectors: Vec<Selector<ServoSelectorImpl>>,
+    selectors: SelectorList<SelectorImpl>,
     iterator: TreeIterator,
 }
 
 impl<'a> QuerySelectorIterator {
-     fn new(iter: TreeIterator, selectors: Vec<Selector<ServoSelectorImpl>>)
+     fn new(iter: TreeIterator, selectors: SelectorList<SelectorImpl>)
                   -> QuerySelectorIterator {
         QuerySelectorIterator {
             selectors: selectors,
@@ -314,12 +317,12 @@ impl<'a> Iterator for QuerySelectorIterator {
     type Item = Root<Node>;
 
     fn next(&mut self) -> Option<Root<Node>> {
-        let selectors = &self.selectors;
+        let selectors = &self.selectors.0;
         // TODO(cgaebel): Is it worth it to build a bloom filter here
         // (instead of passing `None`)? Probably.
         self.iterator.by_ref().filter_map(|node| {
             if let Some(element) = Root::downcast(node) {
-                if matches(selectors, &element, None) {
+                if matches(selectors, &element, None, MatchingReason::Other) {
                     return Some(Root::upcast(element));
                 }
             }
@@ -420,32 +423,8 @@ impl Node {
         self.flags.set(flags);
     }
 
-    pub fn has_changed(&self) -> bool {
-        self.get_flag(HAS_CHANGED)
-    }
-
-    pub fn set_has_changed(&self, state: bool) {
-        self.set_flag(HAS_CHANGED, state)
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.get_flag(IS_DIRTY)
-    }
-
-    pub fn set_is_dirty(&self, state: bool) {
-        self.set_flag(IS_DIRTY, state)
-    }
-
     pub fn has_dirty_descendants(&self) -> bool {
         self.get_flag(HAS_DIRTY_DESCENDANTS)
-    }
-
-    pub fn set_has_dirty_descendants(&self, state: bool) {
-        self.set_flag(HAS_DIRTY_DESCENDANTS, state)
-    }
-
-    pub fn force_dirty_ancestors(&self, damage: NodeDamage) {
-        self.dirty_impl(damage, true)
     }
 
     pub fn rev_version(&self) {
@@ -462,30 +441,18 @@ impl Node {
     }
 
     pub fn dirty(&self, damage: NodeDamage) {
-        self.dirty_impl(damage, false)
-    }
-
-    pub fn dirty_impl(&self, damage: NodeDamage, force_ancestors: bool) {
-        // 0. Set version counter
         self.rev_version();
-
-        // 1. Dirty self.
-        match damage {
-            NodeDamage::NodeStyleDamaged => {}
-            NodeDamage::OtherNodeDamage => self.set_has_changed(true),
+        if !self.is_in_doc() {
+            return;
         }
 
-        if self.is_dirty() && !force_ancestors {
-            return
-        }
-
-        self.set_flag(IS_DIRTY, true);
-
-        // 4. Dirty ancestors.
-        for ancestor in self.ancestors() {
-            if !force_ancestors && ancestor.has_dirty_descendants() { break }
-            ancestor.set_has_dirty_descendants(true);
-        }
+        match self.type_id() {
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text) =>
+                self.parent_node.get().unwrap().downcast::<Element>().unwrap().restyle(damage),
+            NodeTypeId::Element(_) =>
+                self.downcast::<Element>().unwrap().restyle(damage),
+            _ => {},
+        };
     }
 
     /// The maximum version number of this node's descendants, including itself
@@ -515,7 +482,7 @@ impl Node {
     }
 
     pub fn is_ancestor_of(&self, parent: &Node) -> bool {
-        parent.ancestors().any(|ancestor| ancestor.r() == self)
+        parent.ancestors().any(|ancestor| &*ancestor == self)
     }
 
     pub fn following_siblings(&self) -> NodeSiblingIterator {
@@ -551,15 +518,22 @@ impl Node {
     }
 
     pub fn is_parent_of(&self, child: &Node) -> bool {
-        child.parent_node.get().map_or(false, |ref parent| parent.r() == self)
+        child.parent_node.get().map_or(false, |parent| &*parent == self)
     }
 
     pub fn to_trusted_node_address(&self) -> TrustedNodeAddress {
         TrustedNodeAddress(&*self as *const Node as *const libc::c_void)
     }
 
-    pub fn bounding_content_box(&self) -> Rect<Au> {
-        window_from_node(self).content_box_query(self.to_trusted_node_address())
+    /// Returns the rendered bounding content box if the element is rendered,
+    /// and none otherwise.
+    pub fn bounding_content_box(&self) -> Option<Rect<Au>> {
+        window_from_node(self)
+            .content_box_query(self.to_trusted_node_address())
+    }
+
+    pub fn bounding_content_box_or_zero(&self) -> Rect<Au> {
+        self.bounding_content_box().unwrap_or_else(Rect::zero)
     }
 
     pub fn content_boxes(&self) -> Vec<Rect<Au>> {
@@ -690,7 +664,7 @@ impl Node {
         let node = try!(doc.node_from_nodes_and_strings(nodes));
         // Step 2.
         let first_child = self.first_child.get();
-        Node::pre_insert(node.r(), self, first_child.r()).map(|_| ())
+        Node::pre_insert(&node, self, first_child.r()).map(|_| ())
     }
 
     // https://dom.spec.whatwg.org/#dom-parentnode-append
@@ -699,19 +673,19 @@ impl Node {
         let doc = self.owner_doc();
         let node = try!(doc.node_from_nodes_and_strings(nodes));
         // Step 2.
-        self.AppendChild(node.r()).map(|_| ())
+        self.AppendChild(&node).map(|_| ())
     }
 
     // https://dom.spec.whatwg.org/#dom-parentnode-queryselector
     pub fn query_selector(&self, selectors: DOMString) -> Fallible<Option<Root<Element>>> {
         // Step 1.
-        match parse_author_origin_selector_list_from_str(&selectors) {
+        match SelectorParser::parse_author_origin_no_namespace(&selectors) {
             // Step 2.
             Err(()) => Err(Error::Syntax),
             // Step 3.
-            Ok(ref selectors) => {
+            Ok(selectors) => {
                 Ok(self.traverse_preorder().filter_map(Root::downcast).find(|element| {
-                    matches(selectors, element, None)
+                    matches(&selectors.0, element, None, MatchingReason::Other)
                 }))
             }
         }
@@ -724,7 +698,7 @@ impl Node {
     pub fn query_selector_iter(&self, selectors: DOMString)
                                   -> Fallible<QuerySelectorIterator> {
         // Step 1.
-        match parse_author_origin_selector_list_from_str(&selectors) {
+        match SelectorParser::parse_author_origin_no_namespace(&selectors) {
             // Step 2.
             Err(()) => Err(Error::Syntax),
             // Step 3.
@@ -742,7 +716,7 @@ impl Node {
     pub fn query_selector_all(&self, selectors: DOMString) -> Fallible<Root<NodeList>> {
         let window = window_from_node(self);
         let iter = try!(self.query_selector_iter(selectors));
-        Ok(NodeList::new_simple_list(window.r(), iter))
+        Ok(NodeList::new_simple_list(&window, iter))
     }
 
     pub fn ancestors(&self) -> AncestorIterator {
@@ -769,6 +743,10 @@ impl Node {
         self.owner_doc().is_html_document()
     }
 
+    pub fn is_in_doc_with_browsing_context(&self) -> bool {
+        self.is_in_doc() && self.owner_doc().browsing_context().is_some()
+    }
+
     pub fn children(&self) -> NodeSiblingIterator {
         NodeSiblingIterator {
             current: self.GetFirstChild(),
@@ -787,7 +765,7 @@ impl Node {
 
     pub fn remove_self(&self) {
         if let Some(ref parent) = self.GetParentNode() {
-            Node::remove(self, parent.r(), SuppressObserver::Unsuppressed);
+            Node::remove(self, &parent, SuppressObserver::Unsuppressed);
         }
     }
 
@@ -796,10 +774,10 @@ impl Node {
     }
 
     pub fn summarize(&self) -> NodeInfo {
-        let USVString(baseURI) = self.BaseURI();
+        let USVString(base_uri) = self.BaseURI();
         NodeInfo {
             uniqueId: self.unique_id(),
-            baseURI: baseURI,
+            baseURI: base_uri,
             parent: self.GetParentNode().map_or("".to_owned(), |node| node.unique_id()),
             nodeType: self.NodeType(),
             namespaceURI: String::new(), //FIXME
@@ -822,24 +800,11 @@ impl Node {
         }
     }
 
-    // https://dvcs.w3.org/hg/innerhtml/raw-file/tip/index.html#dfn-concept-parse-fragment
-    pub fn parse_fragment(&self, markup: DOMString) -> Fallible<Root<DocumentFragment>> {
-        let context_document = document_from_node(self);
-        let fragment = DocumentFragment::new(context_document.r());
-        if context_document.is_html_document() {
-            parse_html_fragment(self.upcast(), markup, fragment.upcast());
-        } else {
-            // FIXME: XML case
-            unimplemented!();
-        }
-        Ok(fragment)
-    }
-
     /// Used by `HTMLTableSectionElement::InsertRow` and `HTMLTableRowElement::InsertCell`
     pub fn insert_cell_or_row<F, G, I>(&self, index: i32, get_items: F, new_child: G) -> Fallible<Root<HTMLElement>>
         where F: Fn() -> Root<HTMLCollection>,
               G: Fn() -> Root<I>,
-              I: DerivedFrom<Node> + DerivedFrom<HTMLElement> + Reflectable,
+              I: DerivedFrom<Node> + DerivedFrom<HTMLElement> + DomObject,
     {
         if index < -1 {
             return Err(Error::IndexSize);
@@ -847,22 +812,23 @@ impl Node {
 
         let tr = new_child();
 
-        let after_node = if index == -1 {
-            None
-        } else {
-            match get_items().elements_iter()
-                             .map(Root::upcast::<Node>)
-                             .map(Some)
-                             .chain(iter::once(None))
-                             .nth(index as usize) {
-                None => return Err(Error::IndexSize),
-                Some(node) => node,
-            }
-        };
 
         {
             let tr_node = tr.upcast::<Node>();
-            try!(self.InsertBefore(tr_node, after_node.r()));
+            if index == -1 {
+                try!(self.InsertBefore(tr_node, None));
+            } else {
+                let items = get_items();
+                let node = match items.elements_iter()
+                                      .map(Root::upcast::<Node>)
+                                      .map(Some)
+                                      .chain(iter::once(None))
+                                      .nth(index as usize) {
+                    None => return Err(Error::IndexSize),
+                    Some(node) => node,
+                };
+                try!(self.InsertBefore(tr_node, node.r()));
+            }
         }
 
         Ok(Root::upcast::<HTMLElement>(tr))
@@ -893,6 +859,30 @@ impl Node {
 
         element.upcast::<Node>().remove_self();
         Ok(())
+    }
+
+    pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
+        if let Some(node) = self.downcast::<HTMLStyleElement>() {
+            node.get_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLLinkElement>() {
+            node.get_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLMetaElement>() {
+            node.get_stylesheet()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_cssom_stylesheet(&self) -> Option<Root<CSSStyleSheet>> {
+        if let Some(node) = self.downcast::<HTMLStyleElement>() {
+            node.get_cssom_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLLinkElement>() {
+            node.get_cssom_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLMetaElement>() {
+            node.get_cssom_stylesheet()
+        } else {
+            None
+        }
     }
 }
 
@@ -950,11 +940,13 @@ pub trait LayoutNodeHelpers {
 
     unsafe fn get_style_and_layout_data(&self) -> Option<OpaqueStyleAndLayoutData>;
     unsafe fn init_style_and_layout_data(&self, OpaqueStyleAndLayoutData);
+    unsafe fn take_style_and_layout_data(&self) -> OpaqueStyleAndLayoutData;
 
     fn text_content(&self) -> String;
     fn selection(&self) -> Option<Range<usize>>;
-    fn image_url(&self) -> Option<Url>;
+    fn image_url(&self) -> Option<ServoUrl>;
     fn canvas_data(&self) -> Option<HTMLCanvasData>;
+    fn svg_data(&self) -> Option<SVGSVGData>;
     fn iframe_pipeline_id(&self) -> PipelineId;
     fn opaque(&self) -> OpaqueNode;
 }
@@ -1048,6 +1040,14 @@ impl LayoutNodeHelpers for LayoutJS<Node> {
         (*self.unsafe_get()).style_and_layout_data.set(Some(val));
     }
 
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn take_style_and_layout_data(&self) -> OpaqueStyleAndLayoutData {
+        let val = (*self.unsafe_get()).style_and_layout_data.get().unwrap();
+        (*self.unsafe_get()).style_and_layout_data.set(None);
+        val
+    }
+
     #[allow(unsafe_code)]
     fn text_content(&self) -> String {
         if let Some(text) = self.downcast::<Text>() {
@@ -1079,7 +1079,7 @@ impl LayoutNodeHelpers for LayoutJS<Node> {
     }
 
     #[allow(unsafe_code)]
-    fn image_url(&self) -> Option<Url> {
+    fn image_url(&self) -> Option<ServoUrl> {
         unsafe {
             self.downcast::<HTMLImageElement>()
                 .expect("not an image!")
@@ -1088,8 +1088,13 @@ impl LayoutNodeHelpers for LayoutJS<Node> {
     }
 
     fn canvas_data(&self) -> Option<HTMLCanvasData> {
-        self.downcast()
+        self.downcast::<HTMLCanvasElement>()
             .map(|canvas| canvas.data())
+    }
+
+    fn svg_data(&self) -> Option<SVGSVGData> {
+        self.downcast::<SVGSVGElement>()
+            .map(|svg| svg.data())
     }
 
     fn iframe_pipeline_id(&self) -> PipelineId {
@@ -1339,13 +1344,15 @@ pub enum CloneChildrenFlag {
 fn as_uintptr<T>(t: &T) -> uintptr_t { t as *const T as uintptr_t }
 
 impl Node {
-    pub fn reflect_node<N: DerivedFrom<Node> + Reflectable>
-            (node:      Box<N>,
-             document:  &Document,
-             wrap_fn:   extern "Rust" fn(*mut JSContext, GlobalRef, Box<N>) -> Root<N>)
-             -> Root<N> {
+    pub fn reflect_node<N>(
+            node: Box<N>,
+            document: &Document,
+            wrap_fn: unsafe extern "Rust" fn(*mut JSContext, &GlobalScope, Box<N>) -> Root<N>)
+            -> Root<N>
+        where N: DerivedFrom<Node> + DomObject
+    {
         let window = document.window();
-        reflect_dom_object(node, GlobalRef::Window(window), wrap_fn)
+        reflect_dom_object(node, window, wrap_fn)
     }
 
     pub fn new_inherited(doc: &Document) -> Node {
@@ -1367,7 +1374,7 @@ impl Node {
             last_child: Default::default(),
             next_sibling: Default::default(),
             prev_sibling: Default::default(),
-            owner_doc: MutNullableHeap::new(doc),
+            owner_doc: MutNullableJS::new(doc),
             child_list: Default::default(),
             children_count: Cell::new(0u32),
             flags: Cell::new(flags),
@@ -1492,7 +1499,7 @@ impl Node {
                     match child {
                         Some(child) => {
                             if parent.children()
-                                     .take_while(|c| c.r() != child)
+                                     .take_while(|c| &**c != child)
                                      .any(|c| c.is::<Element>())
                             {
                                 return Err(Error::HierarchyRequest);
@@ -1530,7 +1537,7 @@ impl Node {
 
         // Step 4.
         let document = document_from_node(parent);
-        Node::adopt(node, document.r());
+        Node::adopt(node, &document);
 
         // Step 5.
         Node::insert(node, parent, reference_child, SuppressObserver::Unsuppressed);
@@ -1635,7 +1642,7 @@ impl Node {
     fn pre_remove(child: &Node, parent: &Node) -> Fallible<Root<Node>> {
         // Step 1.
         match child.GetParentNode() {
-            Some(ref node) if node.r() != parent => return Err(Error::NotFound),
+            Some(ref node) if &**node != parent => return Err(Error::NotFound),
             None => return Err(Error::NotFound),
             _ => ()
         }
@@ -1649,7 +1656,7 @@ impl Node {
 
     // https://dom.spec.whatwg.org/#concept-node-remove
     fn remove(node: &Node, parent: &Node, suppress_observers: SuppressObserver) {
-        assert!(node.GetParentNode().map_or(false, |node_parent| node_parent.r() == parent));
+        assert!(node.GetParentNode().map_or(false, |node_parent| &*node_parent == parent));
         let cached_index = {
             if parent.ranges.is_empty() {
                 None
@@ -1698,11 +1705,12 @@ impl Node {
                 let doctype = node.downcast::<DocumentType>().unwrap();
                 let doctype = DocumentType::new(doctype.name().clone(),
                                                 Some(doctype.public_id().clone()),
-                                                Some(doctype.system_id().clone()), document.r());
+                                                Some(doctype.system_id().clone()),
+                                                &document);
                 Root::upcast::<Node>(doctype)
             },
             NodeTypeId::DocumentFragment => {
-                let doc_fragment = DocumentFragment::new(document.r());
+                let doc_fragment = DocumentFragment::new(&document);
                 Root::upcast::<Node>(doc_fragment)
             },
             NodeTypeId::CharacterData(_) => {
@@ -1718,10 +1726,13 @@ impl Node {
                 };
                 let window = document.window();
                 let loader = DocumentLoader::new(&*document.loader());
-                let document = Document::new(window, None,
-                                             Some((*document.url()).clone()),
+                let document = Document::new(window, HasBrowsingContext::No,
+                                             Some(document.url()),
+                                             // https://github.com/whatwg/dom/issues/378
+                                             document.origin().alias(),
                                              is_html_doc, None,
-                                             None, DocumentSource::NotFromParser, loader,
+                                             None, DocumentActivity::Inactive,
+                                             DocumentSource::NotFromParser, loader,
                                              None, None);
                 Root::upcast::<Node>(document)
             },
@@ -1732,8 +1743,8 @@ impl Node {
                     local: element.local_name().clone()
                 };
                 let element = Element::create(name,
-                    element.prefix().as_ref().map(|p| Atom::from(&**p)),
-                    document.r(), ElementCreator::ScriptCreated);
+                    element.prefix().map(|p| Prefix::from(&**p)),
+                    &document, ElementCreator::ScriptCreated);
                 Root::upcast::<Node>(element)
             },
         };
@@ -1741,7 +1752,7 @@ impl Node {
         // Step 3.
         let document = match copy.downcast::<Document>() {
             Some(doc) => Root::from_ref(doc),
-            None => Root::from_ref(document.r()),
+            None => Root::from_ref(&*document),
         };
         assert!(copy.owner_doc() == document);
 
@@ -1762,21 +1773,21 @@ impl Node {
                                                  attr.value().clone(),
                                                  attr.name().clone(),
                                                  attr.namespace().clone(),
-                                                 attr.prefix().clone());
+                                                 attr.prefix().cloned());
                 }
             },
             _ => ()
         }
 
         // Step 5: cloning steps.
-        vtable_for(&node).cloning_steps(copy.r(), maybe_doc, clone_children);
+        vtable_for(&node).cloning_steps(&copy, maybe_doc, clone_children);
 
         // Step 6.
         if clone_children == CloneChildrenFlag::CloneChildren {
             for child in node.children() {
-                let child_copy = Node::clone(child.r(), Some(document.r()),
+                let child_copy = Node::clone(&child, Some(&document),
                                              clone_children);
-                let _inserted_node = Node::pre_insert(child_copy.r(), copy.r(), None);
+                let _inserted_node = Node::pre_insert(&child_copy, &copy, None);
             }
         }
 
@@ -1784,12 +1795,16 @@ impl Node {
         copy
     }
 
+    /// https://html.spec.whatwg.org/multipage/#child-text-content
+    pub fn child_text_content(&self) -> DOMString {
+        Node::collect_text_contents(self.children())
+    }
+
     pub fn collect_text_contents<T: Iterator<Item=Root<Node>>>(iterator: T) -> DOMString {
         let mut content = String::new();
         for node in iterator {
-            match node.downcast::<Text>() {
-                Some(ref text) => content.push_str(&text.upcast::<CharacterData>().data()),
-                None => (),
+            if let Some(ref text) = node.downcast::<Text>() {
+                content.push_str(&text.upcast::<CharacterData>().data());
             }
         }
         DOMString::from(content)
@@ -1798,72 +1813,27 @@ impl Node {
     pub fn namespace_to_string(namespace: Namespace) -> Option<DOMString> {
         match namespace {
             ns!() => None,
-            // FIXME(ajeffrey): convert directly from &Atom to DOMString
-            Namespace(ref ns) => Some(DOMString::from(&**ns))
+            // FIXME(ajeffrey): convert directly from Namespace to DOMString
+            _ => Some(DOMString::from(&*namespace))
         }
     }
 
     // https://dom.spec.whatwg.org/#locate-a-namespace
     pub fn locate_namespace(node: &Node, prefix: Option<DOMString>) -> Namespace {
-        fn attr_defines_namespace(attr: &Attr,
-                                  prefix: &Option<Atom>) -> bool {
-            *attr.namespace() == ns!(xmlns) &&
-                match (attr.prefix(), prefix) {
-                    (&Some(ref attr_prefix), &Some(ref prefix)) =>
-                        attr_prefix == &atom!("xmlns") &&
-                            attr.local_name() == prefix,
-                    (&None, &None) => *attr.local_name() == atom!("xmlns"),
-                    _ => false
-                }
-        }
-
         match node.type_id() {
             NodeTypeId::Element(_) => {
-                let element = node.downcast::<Element>().unwrap();
-                // Step 1.
-                if *element.namespace() != ns!() && *element.prefix() == prefix {
-                    return element.namespace().clone()
-                }
-
-                // FIXME(ajeffrey): directly convert DOMString to Atom
-                let prefix_atom = prefix.as_ref().map(|s| Atom::from(&**s));
-
-                // Step 2.
-                let attrs = element.attrs();
-                let namespace_attr = attrs.iter().find(|attr| {
-                    attr_defines_namespace(attr, &prefix_atom)
-                });
-
-                // Steps 2.1-2.
-                if let Some(attr) = namespace_attr {
-                    return namespace_from_domstring(Some(attr.Value()));
-                }
-
-                match node.GetParentElement() {
-                    // Step 3.
-                    None => ns!(),
-                    // Step 4.
-                    Some(parent) => Node::locate_namespace(parent.upcast(), prefix)
-                }
+                node.downcast::<Element>().unwrap().locate_namespace(prefix)
             },
             NodeTypeId::Document(_) => {
-                match node.downcast::<Document>().unwrap().GetDocumentElement().r() {
-                    // Step 1.
-                    None => ns!(),
-                    // Step 2.
-                    Some(document_element) => {
-                        Node::locate_namespace(document_element.upcast(), prefix)
-                    }
-                }
+                node.downcast::<Document>().unwrap()
+                    .GetDocumentElement().as_ref()
+                    .map_or(ns!(), |elem| elem.locate_namespace(prefix))
             },
-            NodeTypeId::DocumentType => ns!(),
-            NodeTypeId::DocumentFragment => ns!(),
-            _ => match node.GetParentElement() {
-                     // Step 1.
-                     None => ns!(),
-                     // Step 2.
-                     Some(parent) => Node::locate_namespace(parent.upcast(), prefix)
-                 }
+            NodeTypeId::DocumentType | NodeTypeId::DocumentFragment => ns!(),
+            _ => {
+                node.GetParentElement().as_ref()
+                    .map_or(ns!(), |elem| elem.locate_namespace(prefix))
+            }
         }
     }
 }
@@ -1924,8 +1894,8 @@ impl NodeMethods for Node {
         }
     }
 
-    // https://dom.spec.whatwg.org/#dom-node-rootnode
-    fn RootNode(&self) -> Root<Node> {
+    // https://dom.spec.whatwg.org/#dom-node-getrootnode
+    fn GetRootNode(&self) -> Root<Node> {
         self.inclusive_ancestors().last().unwrap()
     }
 
@@ -2111,12 +2081,12 @@ impl NodeMethods for Node {
                 NodeTypeId::DocumentType => {
                     if self.children()
                            .any(|c| c.is_doctype() &&
-                                c.r() != child)
+                                &*c != child)
                     {
                         return Err(Error::HierarchyRequest);
                     }
                     if self.children()
-                           .take_while(|c| c.r() != child)
+                           .take_while(|c| &**c != child)
                            .any(|c| c.is::<Element>())
                     {
                         return Err(Error::HierarchyRequest);
@@ -2141,7 +2111,7 @@ impl NodeMethods for Node {
 
         // Step 10.
         let document = document_from_node(self);
-        Node::adopt(node, document.r());
+        Node::adopt(node, &document);
 
         let removed_child = if node != child {
             // Step 11.
@@ -2227,7 +2197,7 @@ impl NodeMethods for Node {
             let element = node.downcast::<Element>().unwrap();
             let other_element = other.downcast::<Element>().unwrap();
             (*element.namespace() == *other_element.namespace()) &&
-            (*element.prefix() == *other_element.prefix()) &&
+            (element.prefix() == other_element.prefix()) &&
             (*element.local_name() == *other_element.local_name()) &&
             (element.attrs().len() == other_element.attrs().len())
         }
@@ -2284,7 +2254,7 @@ impl NodeMethods for Node {
 
             // Step 6.
             this.children().zip(node.children()).all(|(child, other_child)| {
-                is_equal_node(child.r(), other_child.r())
+                is_equal_node(&child, &other_child)
             })
         }
         match maybe_node {
@@ -2296,8 +2266,8 @@ impl NodeMethods for Node {
     }
 
     // https://dom.spec.whatwg.org/#dom-node-issamenode
-    fn IsSameNode(&self, otherNode: Option<&Node>) -> bool {
-        match otherNode {
+    fn IsSameNode(&self, other_node: Option<&Node>) -> bool {
+        match other_node {
             Some(node) => self == node,
             None => false,
         }
@@ -2312,7 +2282,7 @@ impl NodeMethods for Node {
             let mut lastself = Root::from_ref(self);
             let mut lastother = Root::from_ref(other);
             for ancestor in self.ancestors() {
-                if ancestor.r() == other {
+                if &*ancestor == other {
                     // step 4.
                     return NodeConstants::DOCUMENT_POSITION_CONTAINS +
                            NodeConstants::DOCUMENT_POSITION_PRECEDING;
@@ -2320,7 +2290,7 @@ impl NodeMethods for Node {
                 lastself = ancestor;
             }
             for ancestor in other.ancestors() {
-                if ancestor.r() == self {
+                if &*ancestor == self {
                     // step 5.
                     return NodeConstants::DOCUMENT_POSITION_CONTAINED_BY +
                            NodeConstants::DOCUMENT_POSITION_FOLLOWING;
@@ -2344,11 +2314,11 @@ impl NodeMethods for Node {
             }
 
             for child in lastself.traverse_preorder() {
-                if child.r() == other {
+                if &*child == other {
                     // step 6.
                     return NodeConstants::DOCUMENT_POSITION_PRECEDING;
                 }
-                if child.r() == self {
+                if &*child == self {
                     // step 7.
                     return NodeConstants::DOCUMENT_POSITION_FOLLOWING;
                 }
@@ -2414,11 +2384,11 @@ impl NodeMethods for Node {
     }
 }
 
-pub fn document_from_node<T: DerivedFrom<Node> + Reflectable>(derived: &T) -> Root<Document> {
+pub fn document_from_node<T: DerivedFrom<Node> + DomObject>(derived: &T) -> Root<Document> {
     derived.upcast().owner_doc()
 }
 
-pub fn window_from_node<T: DerivedFrom<Node> + Reflectable>(derived: &T) -> Root<Window> {
+pub fn window_from_node<T: DerivedFrom<Node> + DomObject>(derived: &T) -> Root<Window> {
     let document = document_from_node(derived);
     Root::from_ref(document.window())
 }
@@ -2607,7 +2577,7 @@ struct UniqueId {
     cell: UnsafeCell<Option<Box<Uuid>>>,
 }
 
-no_jsmanaged_fields!(UniqueId);
+unsafe_no_jsmanaged_fields!(UniqueId);
 
 impl HeapSizeOf for UniqueId {
     #[allow(unsafe_code)]
@@ -2643,20 +2613,11 @@ impl Into<LayoutNodeType> for NodeTypeId {
     #[inline(always)]
     fn into(self) -> LayoutNodeType {
         match self {
-            NodeTypeId::CharacterData(CharacterDataTypeId::Comment) =>
-                LayoutNodeType::Comment,
-            NodeTypeId::Document(..) =>
-                LayoutNodeType::Document,
-            NodeTypeId::DocumentFragment =>
-                LayoutNodeType::DocumentFragment,
-            NodeTypeId::DocumentType =>
-                LayoutNodeType::DocumentType,
             NodeTypeId::Element(e) =>
                 LayoutNodeType::Element(e.into()),
-            NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) =>
-                LayoutNodeType::ProcessingInstruction,
             NodeTypeId::CharacterData(CharacterDataTypeId::Text) =>
                 LayoutNodeType::Text,
+            x => unreachable!("Layout should not traverse nodes of type {:?}", x),
         }
     }
 }
@@ -2687,7 +2648,10 @@ impl Into<LayoutElementType> for ElementTypeId {
                 LayoutElementType::HTMLTableSectionElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTextAreaElement) =>
                 LayoutElementType::HTMLTextAreaElement,
+            ElementTypeId::SVGElement(SVGElementTypeId::SVGGraphicsElement(SVGGraphicsElementTypeId::SVGSVGElement)) =>
+                LayoutElementType::SVGSVGElement,
             _ => LayoutElementType::Element,
         }
     }
 }
+

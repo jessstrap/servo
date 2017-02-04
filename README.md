@@ -1,6 +1,6 @@
 # The Servo Parallel Browser Engine Project
 
-[![Linux Build Status](https://img.shields.io/travis/servo/servo/master.svg?label=Linux%20build)](https://travis-ci.org/servo/servo)  [![Windows Build Status](https://img.shields.io/appveyor/ci/servo/servo/master.svg?label=Windows%20build)](https://ci.appveyor.com/project/servo/servo/branch/master)
+[![Linux Build Status](https://img.shields.io/travis/servo/servo/master.svg?label=Linux%20build)](https://travis-ci.org/servo/servo)  [![Windows Build Status](https://img.shields.io/appveyor/ci/servo/servo/master.svg?label=Windows%20build)](https://ci.appveyor.com/project/servo/servo/branch/master)  [![Changelog #228](https://img.shields.io/badge/changelog-%23228-9E978E.svg)](https://changelog.com/podcast/228)
 
 Servo is a prototype web browser engine written in the
 [Rust](https://github.com/rust-lang/rust) language. It is currently developed on
@@ -19,51 +19,47 @@ Please select your operating system:
 * [Debian-based Linuxes](#on-debian-based-linuxes)
 * [Fedora](#on-fedora)
 * [Arch Linux](#on-arch-linux)
+* [openSUSE](#on-opensuse-linux)
 * [Gentoo Linux](#on-gentoo-linux)
-* [Microsoft Windows](#on-windows)
+* [Microsoft Windows (MSVC)](#on-windows-msvc)
+* [Microsoft Windows (mingw)](#on-windows-mingw)
 * [Android](#cross-compilation-for-android)
 
 #### OS X
 #### On OS X (homebrew)
 
 ``` sh
-brew install automake pkg-config python cmake
+brew install automake pkg-config python cmake yasm
 pip install virtualenv
 ```
 #### On OS X (MacPorts)
 
 ``` sh
-sudo port install python27 py27-virtualenv cmake
+sudo port install python27 py27-virtualenv cmake yasm
 ```
-#### On OS X 10.11 (El Capitan), you also have to install openssl
+#### On OS X >= 10.11 (El Capitan), you also have to install OpenSSL
 
 ``` sh
 brew install openssl
-brew link --force openssl
-```
 
-If you get this error during the brew link step:
-```sh
-Warning: Refusing to link: openssl
-```
-followed by a compile error not being able to find one or more
-openssl/ include files, you may want to try:
-```sh
-export DEP_OPENSSL_INCLUDE=/usr/local/include
+export OPENSSL_INCLUDE_DIR="$(brew --prefix openssl)/include"
+export OPENSSL_LIB_DIR="$(brew --prefix openssl)/lib"
+
 ./mach build ...
 ```
 
-If you've already partially compiled servo but forgot to do this step, run ./mach clean, link openssl, and recompile.
+If you've already partially compiled servo but forgot to do this step, run `./mach clean`, set the shell variables, and recompile.
 
 #### On Debian-based Linuxes
 
 ``` sh
-sudo apt-get install git curl freeglut3-dev autoconf \
+sudo apt install git curl freeglut3-dev autoconf \
     libfreetype6-dev libgl1-mesa-dri libglib2.0-dev xorg-dev \
     gperf g++ build-essential cmake virtualenv python-pip \
-    libssl-dev libbz2-dev libosmesa6-dev libxmu6 libxmu-dev \
+    libssl1.0-dev libbz2-dev libosmesa6-dev libxmu6 libxmu-dev \
     libglu1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev
 ```
+
 If you are on **Ubuntu 14.04** and encountered errors on installing these dependencies involving `libcheese`, see [#6158](https://github.com/servo/servo/issues/6158) for a workaround.
 
 If `virtualenv` does not exist, try `python-virtualenv`.
@@ -76,6 +72,13 @@ sudo dnf install curl freeglut-devel libtool gcc-c++ libXi-devel \
     fontconfig-devel cabextract ttmkfdir python python-virtualenv python-pip expat-devel \
     rpm-build openssl-devel cmake bzip2-devel libXcursor-devel libXmu-devel mesa-libOSMesa-devel \
     dbus-devel
+```
+#### On openSUSE Linux
+``` sh
+sudo zypper install libX11-devel libexpat-devel libbz2-devel Mesa-libEGL-devel Mesa-libGL-devel cabextract cmake \
+    dbus-1-devel fontconfig-devel freetype-devel gcc-c++ git glib2-devel gperf \
+    harfbuzz-devel libOSMesa-devel libXcursor-devel libXi-devel libXmu-devel libXrandr-devel libopenssl-devel \
+    python-pip python-virtualenv rpm-build glu-devel
 ```
 #### On Arch Linux
 
@@ -90,14 +93,33 @@ sudo emerge net-misc/curl media-libs/freeglut \
     dev-python/virtualenv dev-python/pip dev-libs/openssl \
     x11-libs/libXmu media-libs/glu x11-base/xorg-server
 ```
-#### On Windows
+#### On Windows MSVC
+
+Install Git for Windows (https://git-scm.com/download/win). DO allow it to add git.exe to the PATH (default
+settings for the installer are fine).
+
+Install Visual Studio 2015 Community Edition (https://www.visualstudio.com/). You MUST add "Visual C++" to the
+list of installed components. It is not on by default.
+
+Install Python for Windows (https://www.python.org/downloads/release/python-2711/). The windows x86-64 MSI installer is fine.
+You should change the installation to install the "Add python.exe to Path" feature.
+
+Install virtualenv.
+
+In a normal Windows Shell (cmd.exe or "Command Prompt" from the start menu), do:
+```
+pip install virtualenv
+```
+If this does not work, you may need to reboot for the changed PATH settings (by the python installer) to take effect.
+
+#### On Windows mingw
 
 Download Python for Windows [here](https://www.python.org/downloads/release/python-2711/). This is
 required for the SpiderMonkey build on Windows.
 
 Install MSYS2 from [here](https://msys2.github.io/). After you have done so, open an MSYS shell
 window and update the core libraries and install new packages. The extra step at the end is to
-downgrate GCC to 5.4, as the GCC6 versions in mingw currently fail to compile some of our
+downgrade GCC to 5.4, as the GCC6 versions in mingw currently fail to compile some of our
 dependencies. We are upgrading to a gcc-free build on Windows as soon as possible:
 
 ```sh
@@ -114,16 +136,14 @@ pacman -U --noconfirm $GCC_URL-$GCC_EXT $GCC_URL-ada-$GCC_EXT \
 easy_install-2.7 pip virtualenv
 ```
 
-Open a new MSYS shell window as Administrator and remove the Python binaries (they
-are not compatible with our `mach` driver script yet, unfortunately):
+Add the following line to the end of `.profile` in your home directory:
 
-```sh
-cd /mingw64/bin
-mv python2.exe python2-mingw64.exe
-mv python2.7.exe python2.7-mingw64.exe
+```
+export PATH=/c/Python27:$PATH
 ```
 
-Now, open a MINGW64 (not MSYS!) shell window, and you should be able to build servo as usual!
+Now, open a MINGW64 (not MSYS!) shell window, and you should be able to build
+servo as usual!
 
 #### Cross-compilation for Android
 
@@ -154,6 +174,13 @@ git clone https://github.com/servo/servo
 cd servo
 ./mach build --dev
 ./mach run tests/html/about-mozilla.html
+```
+
+Or on Windows MSVC, in a normal Command Prompt (cmd.exe):
+``` cmd
+git clone https://github.com/servo/servo
+cd servo
+mach.bat build --dev
 ```
 
 For benchmarking, performance testing, or
@@ -205,8 +232,8 @@ URL with servo).
 
 ### Keyboard Shortcuts
 
-- `Ctrl--` zooms out
-- `Ctrl-=` zooms in
+- `Ctrl`+`-` zooms out
+- `Ctrl`+`=` zooms in
 - `Alt`+`left arrow` goes backwards in the history
 - `Alt`+`right arrow` goes forwards in the history
 - `Esc` exits servo

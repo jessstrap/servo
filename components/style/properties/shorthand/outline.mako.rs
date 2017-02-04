@@ -4,9 +4,11 @@
 
 <%namespace name="helpers" file="/helpers.mako.rs" />
 
-<%helpers:shorthand name="outline" sub_properties="outline-color outline-style outline-width">
+<%helpers:shorthand name="outline" sub_properties="outline-color outline-style outline-width"
+                    spec="https://drafts.csswg.org/css-ui/#propdef-outline">
     use properties::longhands::outline_width;
     use values::specified;
+    use parser::Parse;
 
     pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
         let _unused = context;
@@ -16,7 +18,7 @@
         let mut any = false;
         loop {
             if color.is_none() {
-                if let Ok(value) = input.try(specified::CSSColor::parse) {
+                if let Ok(value) = input.try(|i| specified::CSSColor::parse(context, i)) {
                     color = Some(value);
                     any = true;
                     continue
@@ -49,8 +51,8 @@
         }
     }
 
-    impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    impl<'a> LonghandsToSerialize<'a>  {
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             try!(self.outline_width.to_css(dest));
             try!(write!(dest, " "));
 
@@ -74,7 +76,7 @@
 <%helpers:shorthand name="-moz-outline-radius" sub_properties="${' '.join(
     '-moz-outline-radius-%s' % corner
     for corner in ['topleft', 'topright', 'bottomright', 'bottomleft']
-)}" products="gecko">
+)}" products="gecko" spec="Nonstandard (https://developer.mozilla.org/en-US/docs/Web/CSS/-moz-outline-radius)">
     use properties::shorthands;
 
     pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
@@ -89,8 +91,8 @@
     }
 
     // TODO: Border radius for the radius shorthand is not implemented correctly yet
-    impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    impl<'a> LonghandsToSerialize<'a>  {
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             try!(self._moz_outline_radius_topleft.to_css(dest));
             try!(write!(dest, " "));
 

@@ -9,18 +9,18 @@ use flow::{self, Flow};
 use gfx::display_list::OpaqueNode;
 use ipc_channel::ipc::IpcSender;
 use msg::constellation_msg::PipelineId;
-use script_layout_interface::restyle_damage::RestyleDamage;
-use script_traits::{AnimationState, LayoutMsg as ConstellationMsg};
+use script_traits::{AnimationState, ConstellationControlMsg, LayoutMsg as ConstellationMsg};
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use style::animation::{Animation, update_style_for_animation};
-use style::dom::TRestyleDamage;
+use style::selector_parser::RestyleDamage;
 use style::timer::Timer;
 
 /// Processes any new animations that were discovered after style recalculation.
 /// Also expire any old animations that have completed, inserting them into
 /// `expired_animations`.
 pub fn update_animation_state(constellation_chan: &IpcSender<ConstellationMsg>,
+                              script_chan: &IpcSender<ConstellationControlMsg>,
                               running_animations: &mut HashMap<OpaqueNode, Vec<Animation>>,
                               expired_animations: &mut HashMap<OpaqueNode, Vec<Animation>>,
                               new_animations_receiver: &Receiver<Animation>,
@@ -70,7 +70,7 @@ pub fn update_animation_state(constellation_chan: &IpcSender<ConstellationMsg>,
         let mut animations_still_running = vec![];
         for mut running_animation in running_animations.drain(..) {
             let still_running = !running_animation.is_expired() && match running_animation {
-                Animation::Transition(_, started_at, ref frame, _expired) => {
+                Animation::Transition(_, _, started_at, ref frame, _expired) => {
                     now < started_at + frame.duration
                 }
                 Animation::Keyframes(_, _, ref mut state) => {
@@ -83,6 +83,14 @@ pub fn update_animation_state(constellation_chan: &IpcSender<ConstellationMsg>,
             if still_running {
                 animations_still_running.push(running_animation);
                 continue
+            }
+
+            if let Animation::Transition(_, unsafe_node, _, ref frame, _) = running_animation {
+                script_chan.send(ConstellationControlMsg::TransitionEnd(unsafe_node,
+                                                                        frame.property_animation
+                                                                             .property_name().into(),
+                                                                        frame.duration))
+                           .unwrap();
             }
 
             expired_animations.entry(*key)
@@ -105,7 +113,7 @@ pub fn update_animation_state(constellation_chan: &IpcSender<ConstellationMsg>,
     for new_running_animation in new_running_animations {
         running_animations.entry(*new_running_animation.node())
                           .or_insert_with(Vec::new)
-                          .push(new_running_animation);
+                          .push(new_running_animation)
     }
 
     let animation_state = if running_animations.is_empty() {
@@ -114,14 +122,15 @@ pub fn update_animation_state(constellation_chan: &IpcSender<ConstellationMsg>,
         AnimationState::AnimationsPresent
     };
 
-    constellation_chan.send(ConstellationMsg::ChangeRunningAnimationsState(pipeline_id, animation_state))
+    constellation_chan.send(ConstellationMsg::ChangeRunningAnimationsState(pipeline_id,
+                                                                           animation_state))
                       .unwrap();
 }
 
 /// Recalculates style for a set of animations. This does *not* run with the DOM
 /// lock held.
-// NB: This is specific for ServoSelectorImpl, since the layout context and the
-// flows are ServoSelectorImpl specific too. If that goes away at some point,
+// NB: This is specific for SelectorImpl, since the layout context and the
+// flows are SelectorImpl specific too. If that goes away at some point,
 // this should be made generic.
 pub fn recalc_style_for_animations(context: &SharedLayoutContext,
                                    flow: &mut Flow,

@@ -6,51 +6,51 @@ use dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use dom::bindings::codegen::Bindings::StorageEventBinding;
 use dom::bindings::codegen::Bindings::StorageEventBinding::StorageEventMethods;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, MutNullableHeap, Root, RootedReference};
+use dom::bindings::js::{MutNullableJS, Root, RootedReference};
 use dom::bindings::reflector::reflect_dom_object;
 use dom::bindings::str::DOMString;
 use dom::event::{Event, EventBubbles, EventCancelable};
+use dom::globalscope::GlobalScope;
 use dom::storage::Storage;
 use dom::window::Window;
-use string_cache::Atom;
+use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct StorageEvent {
     event: Event,
     key: Option<DOMString>,
-    oldValue: Option<DOMString>,
-    newValue: Option<DOMString>,
+    old_value: Option<DOMString>,
+    new_value: Option<DOMString>,
     url: DOMString,
-    storageArea: MutNullableHeap<JS<Storage>>
+    storage_area: MutNullableJS<Storage>
 }
 
 
 impl StorageEvent {
     pub fn new_inherited(key: Option<DOMString>,
-                         oldValue: Option<DOMString>,
-                         newValue: Option<DOMString>,
+                         old_value: Option<DOMString>,
+                         new_value: Option<DOMString>,
                          url: DOMString,
-                         storageArea: Option<&Storage>) -> StorageEvent {
+                         storage_area: Option<&Storage>) -> StorageEvent {
         StorageEvent {
             event: Event::new_inherited(),
             key: key,
-            oldValue: oldValue,
-            newValue: newValue,
+            old_value: old_value,
+            new_value: new_value,
             url: url,
-            storageArea: MutNullableHeap::new(storageArea)
+            storage_area: MutNullableJS::new(storage_area)
         }
     }
 
     pub fn new_uninitialized(window: &Window,
                              url: DOMString) -> Root<StorageEvent> {
         reflect_dom_object(box StorageEvent::new_inherited(None, None, None, url, None),
-                           GlobalRef::Window(window),
+                           window,
                            StorageEventBinding::Wrap)
     }
 
-    pub fn new(global: GlobalRef,
+    pub fn new(global: &GlobalScope,
                type_: Atom,
                bubbles: EventBubbles,
                cancelable: EventCancelable,
@@ -70,7 +70,7 @@ impl StorageEvent {
         ev
     }
 
-    pub fn Constructor(global: GlobalRef,
+    pub fn Constructor(global: &GlobalScope,
                        type_: DOMString,
                        init: &StorageEventBinding::StorageEventInit) -> Fallible<Root<StorageEvent>> {
         let key = init.key.clone();
@@ -96,12 +96,12 @@ impl StorageEventMethods for StorageEvent {
 
     // https://html.spec.whatwg.org/multipage/#dom-storageevent-oldvalue
     fn GetOldValue(&self) -> Option<DOMString> {
-        self.oldValue.clone()
+        self.old_value.clone()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-storageevent-newvalue
     fn GetNewValue(&self) -> Option<DOMString> {
-        self.newValue.clone()
+        self.new_value.clone()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-storageevent-url
@@ -111,7 +111,7 @@ impl StorageEventMethods for StorageEvent {
 
     // https://html.spec.whatwg.org/multipage/#dom-storageevent-storagearea
     fn GetStorageArea(&self) -> Option<Root<Storage>> {
-        self.storageArea.get()
+        self.storage_area.get()
     }
 
     // https://dom.spec.whatwg.org/#dom-event-istrusted

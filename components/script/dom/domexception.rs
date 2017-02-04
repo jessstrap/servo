@@ -5,10 +5,10 @@
 use dom::bindings::codegen::Bindings::DOMExceptionBinding;
 use dom::bindings::codegen::Bindings::DOMExceptionBinding::DOMExceptionConstants;
 use dom::bindings::codegen::Bindings::DOMExceptionBinding::DOMExceptionMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
+use dom::globalscope::GlobalScope;
 
 #[repr(u16)]
 #[derive(JSTraceable, Copy, Clone, Debug, HeapSizeOf)]
@@ -29,13 +29,11 @@ pub enum DOMErrorName {
     SecurityError = DOMExceptionConstants::SECURITY_ERR,
     NetworkError = DOMExceptionConstants::NETWORK_ERR,
     AbortError = DOMExceptionConstants::ABORT_ERR,
-    URLMismatchError = DOMExceptionConstants::URL_MISMATCH_ERR,
     TypeMismatchError = DOMExceptionConstants::TYPE_MISMATCH_ERR,
     QuotaExceededError = DOMExceptionConstants::QUOTA_EXCEEDED_ERR,
     TimeoutError = DOMExceptionConstants::TIMEOUT_ERR,
     InvalidNodeTypeError = DOMExceptionConstants::INVALID_NODE_TYPE_ERR,
     DataCloneError = DOMExceptionConstants::DATA_CLONE_ERR,
-    EncodingError,
 }
 
 #[dom_struct]
@@ -52,7 +50,7 @@ impl DOMException {
         }
     }
 
-    pub fn new(global: GlobalRef, code: DOMErrorName) -> Root<DOMException> {
+    pub fn new(global: &GlobalScope, code: DOMErrorName) -> Root<DOMException> {
         reflect_dom_object(box DOMException::new_inherited(code),
                            global,
                            DOMExceptionBinding::Wrap)
@@ -62,11 +60,7 @@ impl DOMException {
 impl DOMExceptionMethods for DOMException {
     // https://heycam.github.io/webidl/#dfn-DOMException
     fn Code(&self) -> u16 {
-        match self.code {
-            // https://heycam.github.io/webidl/#dfn-throw
-            DOMErrorName::EncodingError => 0,
-            code => code as u16,
-        }
+        self.code as u16
     }
 
     // https://heycam.github.io/webidl/#idl-DOMException-error-names
@@ -93,14 +87,12 @@ impl DOMExceptionMethods for DOMException {
             DOMErrorName::SecurityError => "The operation is insecure.",
             DOMErrorName::NetworkError => "A network error occurred.",
             DOMErrorName::AbortError => "The operation was aborted.",
-            DOMErrorName::URLMismatchError => "The given URL does not match another URL.",
             DOMErrorName::TypeMismatchError => "The given type does not match any expected type.",
             DOMErrorName::QuotaExceededError => "The quota has been exceeded.",
             DOMErrorName::TimeoutError => "The operation timed out.",
             DOMErrorName::InvalidNodeTypeError =>
                 "The supplied node is incorrect or has an incorrect ancestor for this operation.",
             DOMErrorName::DataCloneError => "The object can not be cloned.",
-            DOMErrorName::EncodingError => "The encoding operation (either encoded or decoding) failed."
         };
 
         DOMString::from(message)

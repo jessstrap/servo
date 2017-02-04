@@ -122,8 +122,8 @@ which has an area, and the trait provides a way to get that object's area.
 Now let's look at the `JSTraceable` trait, which we use for tracing:
 
 ```rust
-pub trait JSTraceable {
-    fn trace(&self, trc: *mut JSTracer);
+pub unsafe trait JSTraceable {
+    unsafe fn trace(&self, trc: *mut JSTracer);
 }
 ```
 
@@ -181,8 +181,8 @@ pub fn trace_reflector(tracer: *mut JSTracer, description: &str, reflector: &Ref
     }
 }
 
-impl<T: Reflectable> JSTraceable for JS<T> {
-    fn trace(&self, trc: *mut JSTracer) {
+impl<T: DomObject> JSTraceable for JS<T> {
+    unsafe fn trace(&self, trc: *mut JSTracer) {
         trace_reflector(trc, "", unsafe { (**self.ptr).reflector() });
     }
 }

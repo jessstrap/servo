@@ -2,11 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use net::chrome_loader::resolve_chrome_url;
-use url::Url;
+use net::test::resolve_chrome_url;
+use servo_url::ServoUrl;
 
-fn c(s: &str) -> Result<Url, ()> {
-    resolve_chrome_url(&Url::parse(s).unwrap())
+fn c(s: &str) -> Result<ServoUrl, ()> {
+    resolve_chrome_url(&ServoUrl::parse(s).unwrap())
 }
 
 #[test]

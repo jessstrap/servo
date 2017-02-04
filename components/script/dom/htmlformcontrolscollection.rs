@@ -6,9 +6,8 @@ use dom::bindings::codegen::Bindings::HTMLCollectionBinding::HTMLCollectionMetho
 use dom::bindings::codegen::Bindings::HTMLFormControlsCollectionBinding;
 use dom::bindings::codegen::Bindings::HTMLFormControlsCollectionBinding::HTMLFormControlsCollectionMethods;
 use dom::bindings::codegen::UnionTypes::RadioNodeListOrElement;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
-use dom::bindings::reflector::{Reflectable, reflect_dom_object};
+use dom::bindings::reflector::{DomObject, reflect_dom_object};
 use dom::bindings::str::DOMString;
 use dom::element::Element;
 use dom::htmlcollection::{CollectionFilter, HTMLCollection};
@@ -33,7 +32,7 @@ impl HTMLFormControlsCollection {
         -> Root<HTMLFormControlsCollection>
     {
         reflect_dom_object(box HTMLFormControlsCollection::new_inherited(root, filter),
-                           GlobalRef::Window(window),
+                           window,
                            HTMLFormControlsCollectionBinding::Wrap)
     }
 
@@ -51,8 +50,8 @@ impl HTMLFormControlsCollectionMethods for HTMLFormControlsCollection {
         if name.is_empty() { return None; }
 
         let mut filter_map = self.collection.elements_iter().filter_map(|elem| {
-            if elem.get_string_attribute(&atom!("name")) == name
-               || elem.get_string_attribute(&atom!("id")) == name {
+            if elem.get_string_attribute(&local_name!("name")) == name
+               || elem.get_string_attribute(&local_name!("id")) == name {
                 Some(elem)
             } else { None }
         });
@@ -67,7 +66,6 @@ impl HTMLFormControlsCollectionMethods for HTMLFormControlsCollection {
                 let once = iter::once(Root::upcast::<Node>(elem));
                 let list = once.chain(peekable.map(Root::upcast));
                 let global = self.global();
-                let global = global.r();
                 let window = global.as_window();
                 Some(RadioNodeListOrElement::RadioNodeList(RadioNodeList::new_simple_list(window, list)))
             }
@@ -77,10 +75,8 @@ impl HTMLFormControlsCollectionMethods for HTMLFormControlsCollection {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-htmlformcontrolscollection-nameditem
-    fn NamedGetter(&self, name: DOMString, found: &mut bool) -> Option<RadioNodeListOrElement> {
-        let maybe_elem = self.NamedItem(name);
-        *found = maybe_elem.is_some();
-        maybe_elem
+    fn NamedGetter(&self, name: DOMString) -> Option<RadioNodeListOrElement> {
+        self.NamedItem(name)
     }
 
     // https://html.spec.whatwg.org/multipage/#the-htmlformcontrolscollection-interface:supported-property-names
@@ -93,7 +89,7 @@ impl HTMLFormControlsCollectionMethods for HTMLFormControlsCollection {
     // https://github.com/servo/servo/issues/5875
     //
     // https://dom.spec.whatwg.org/#dom-htmlcollection-item
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<Element>> {
-        self.collection.IndexedGetter(index, found)
+    fn IndexedGetter(&self, index: u32) -> Option<Root<Element>> {
+        self.collection.IndexedGetter(index)
     }
 }

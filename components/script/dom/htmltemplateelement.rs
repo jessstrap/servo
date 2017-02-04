@@ -7,39 +7,39 @@ use dom::bindings::codegen::Bindings::HTMLTemplateElementBinding;
 use dom::bindings::codegen::Bindings::HTMLTemplateElementBinding::HTMLTemplateElementMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, MutNullableHeap, Root};
+use dom::bindings::js::{MutNullableJS, Root};
 use dom::bindings::str::DOMString;
 use dom::document::Document;
 use dom::documentfragment::DocumentFragment;
 use dom::htmlelement::HTMLElement;
 use dom::node::{CloneChildrenFlag, Node, document_from_node};
 use dom::virtualmethods::VirtualMethods;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 
 #[dom_struct]
 pub struct HTMLTemplateElement {
     htmlelement: HTMLElement,
 
     /// https://html.spec.whatwg.org/multipage/#template-contents
-    contents: MutNullableHeap<JS<DocumentFragment>>,
+    contents: MutNullableJS<DocumentFragment>,
 }
 
 impl HTMLTemplateElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLTemplateElement {
         HTMLTemplateElement {
             htmlelement:
-                HTMLElement::new_inherited(localName, prefix, document),
-            contents: MutNullableHeap::new(None),
+                HTMLElement::new_inherited(local_name, prefix, document),
+            contents: MutNullableJS::new(None),
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLTemplateElement> {
-        Node::reflect_node(box HTMLTemplateElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLTemplateElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLTemplateElementBinding::Wrap)
     }

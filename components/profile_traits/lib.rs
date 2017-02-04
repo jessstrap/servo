@@ -7,14 +7,20 @@
 //! modules won't have to depend on `profile`.
 
 #![feature(box_syntax)]
-#![feature(custom_derive, plugin)]
-#![plugin(plugins, serde_macros)]
+#![feature(plugin)]
+#![plugin(plugins)]
 
 #![deny(unsafe_code)]
 
 extern crate ipc_channel;
-extern crate serde;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate serde_derive;
+extern crate servo_config;
+extern crate signpost;
 
+#[allow(unsafe_code)]
 pub mod energy;
 pub mod mem;
 pub mod time;

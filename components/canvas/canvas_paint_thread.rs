@@ -2,22 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use azure::azure::{AzColor, AzFloat};
+use azure::azure::AzFloat;
 use azure::azure_hl::{AntialiasMode, CapStyle, CompositionOp, JoinStyle};
 use azure::azure_hl::{BackendType, DrawOptions, DrawTarget, Pattern, StrokeOptions, SurfaceFormat};
-use azure::azure_hl::{ColorPattern, DrawSurfaceOptions, Filter, PathBuilder};
+use azure::azure_hl::{Color, ColorPattern, DrawSurfaceOptions, Filter, PathBuilder};
+use azure::azure_hl::{ExtendMode, GradientStop, LinearGradientPattern, RadialGradientPattern};
+use azure::azure_hl::SurfacePattern;
 use canvas_traits::*;
+use cssparser::RGBA;
 use euclid::matrix2d::Matrix2D;
 use euclid::point::Point2D;
 use euclid::rect::Rect;
 use euclid::size::Size2D;
-use gfx_traits::color;
-use ipc_channel::ipc::IpcSharedMemory;
 use ipc_channel::ipc::{self, IpcSender};
 use num_traits::ToPrimitive;
 use std::borrow::ToOwned;
 use std::mem;
-use util::thread::spawn_named;
+use std::thread;
 use webrender_traits;
 
 impl<'a> CanvasPaintThread<'a> {
@@ -58,8 +59,8 @@ pub struct CanvasPaintThread<'a> {
     path_builder: PathBuilder,
     state: CanvasPaintState<'a>,
     saved_states: Vec<CanvasPaintState<'a>>,
-    webrender_api: Option<webrender_traits::RenderApi>,
-    webrender_image_key: Option<webrender_traits::ImageKey>,
+    webrender_api: webrender_traits::RenderApi,
+    webrender_image_key: webrender_traits::ImageKey,
 }
 
 #[derive(Clone)]
@@ -73,7 +74,7 @@ struct CanvasPaintState<'a> {
     shadow_offset_x: f64,
     shadow_offset_y: f64,
     shadow_blur: f64,
-    shadow_color: AzColor,
+    shadow_color: Color,
 }
 
 impl<'a> CanvasPaintState<'a> {
@@ -86,26 +87,26 @@ impl<'a> CanvasPaintState<'a> {
 
         CanvasPaintState {
             draw_options: DrawOptions::new(1.0, CompositionOp::Over, antialias),
-            fill_style: Pattern::Color(ColorPattern::new(color::black())),
-            stroke_style: Pattern::Color(ColorPattern::new(color::black())),
+            fill_style: Pattern::Color(ColorPattern::new(Color::black())),
+            stroke_style: Pattern::Color(ColorPattern::new(Color::black())),
             stroke_opts: StrokeOptions::new(1.0, JoinStyle::MiterOrBevel, CapStyle::Butt, 10.0, &[]),
             transform: Matrix2D::identity(),
             shadow_offset_x: 0.0,
             shadow_offset_y: 0.0,
             shadow_blur: 0.0,
-            shadow_color: color::transparent(),
+            shadow_color: Color::transparent(),
         }
     }
 }
 
 impl<'a> CanvasPaintThread<'a> {
     fn new(size: Size2D<i32>,
-           webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+           webrender_api_sender: webrender_traits::RenderApiSender,
            antialias: bool) -> CanvasPaintThread<'a> {
         let draw_target = CanvasPaintThread::create(size);
         let path_builder = draw_target.create_path_builder();
-        let webrender_api = webrender_api_sender.map(|wr| wr.create_api());
-        let webrender_image_key = webrender_api.as_ref().map(|wr| wr.alloc_image());
+        let webrender_api = webrender_api_sender.create_api();
+        let webrender_image_key = webrender_api.alloc_image();
         CanvasPaintThread {
             drawtarget: draw_target,
             path_builder: path_builder,
@@ -119,11 +120,11 @@ impl<'a> CanvasPaintThread<'a> {
     /// Creates a new `CanvasPaintThread` and returns an `IpcSender` to
     /// communicate with it.
     pub fn start(size: Size2D<i32>,
-                 webrender_api_sender: Option<webrender_traits::RenderApiSender>,
+                 webrender_api_sender: webrender_traits::RenderApiSender,
                  antialias: bool)
                  -> IpcSender<CanvasMsg> {
         let (sender, receiver) = ipc::channel::<CanvasMsg>().unwrap();
-        spawn_named("CanvasThread".to_owned(), move || {
+        thread::Builder::new().name("CanvasThread".to_owned()).spawn(move || {
             let mut painter = CanvasPaintThread::new(size, webrender_api_sender, antialias);
             loop {
                 let msg = receiver.recv();
@@ -187,7 +188,7 @@ impl<'a> CanvasPaintThread<'a> {
                             Canvas2dMsg::SetShadowOffsetX(value) => painter.set_shadow_offset_x(value),
                             Canvas2dMsg::SetShadowOffsetY(value) => painter.set_shadow_offset_y(value),
                             Canvas2dMsg::SetShadowBlur(value) => painter.set_shadow_blur(value),
-                            Canvas2dMsg::SetShadowColor(ref color) => painter.set_shadow_color(color.to_azcolor()),
+                            Canvas2dMsg::SetShadowColor(ref color) => painter.set_shadow_color(color.to_azure_style()),
                         }
                     },
                     CanvasMsg::Common(message) => {
@@ -196,6 +197,13 @@ impl<'a> CanvasPaintThread<'a> {
                             CanvasCommonMsg::Recreate(size) => painter.recreate(size),
                         }
                     },
+                    CanvasMsg::FromScript(message) => {
+                        match message {
+                            FromScriptMsg::SendPixels(chan) => {
+                                painter.send_pixels(chan)
+                            }
+                        }
+                    }
                     CanvasMsg::FromLayout(message) => {
                         match message {
                             FromLayoutMsg::SendData(chan) => {
@@ -203,10 +211,11 @@ impl<'a> CanvasPaintThread<'a> {
                             }
                         }
                     }
-                    CanvasMsg::WebGL(_) => panic!("Wrong message sent to Canvas2D thread"),
+                    CanvasMsg::WebGL(_) => panic!("Wrong WebGL message sent to Canvas2D thread"),
+                    CanvasMsg::WebVR(_) => panic!("Wrong WebVR message sent to Canvas2D thread"),
                 }
             }
-        });
+        }).expect("Thread spawning failed");
 
         sender
     }
@@ -540,22 +549,29 @@ impl<'a> CanvasPaintThread<'a> {
         self.drawtarget = CanvasPaintThread::create(size);
     }
 
+    fn send_pixels(&mut self, chan: IpcSender<Option<Vec<u8>>>) {
+        self.drawtarget.snapshot().get_data_surface().with_data(|element| {
+            chan.send(Some(element.into())).unwrap();
+        })
+    }
+
     fn send_data(&mut self, chan: IpcSender<CanvasData>) {
         self.drawtarget.snapshot().get_data_surface().with_data(|element| {
-            if let Some(ref webrender_api) = self.webrender_api {
-                let size = self.drawtarget.get_size();
-                webrender_api.update_image(self.webrender_image_key.unwrap(),
-                                           size.width as u32,
-                                           size.height as u32,
-                                           webrender_traits::ImageFormat::RGBA8,
-                                           element.into());
-            }
+            let size = self.drawtarget.get_size();
+            self.webrender_api.update_image(self.webrender_image_key,
+                                            webrender_traits::ImageDescriptor {
+                                                width: size.width as u32,
+                                                height: size.height as u32,
+                                                stride: None,
+                                                format: webrender_traits::ImageFormat::RGBA8,
+                                                is_opaque: false,
+                                            },
+                                            element.into());
 
-            let pixel_data = CanvasPixelData {
-                image_data: IpcSharedMemory::from_bytes(element),
+            let data = CanvasImageData {
                 image_key: self.webrender_image_key,
             };
-            chan.send(CanvasData::Pixels(pixel_data)).unwrap();
+            chan.send(CanvasData::Image(data)).unwrap();
         })
     }
 
@@ -667,7 +683,7 @@ impl<'a> CanvasPaintThread<'a> {
         self.state.shadow_blur = value;
     }
 
-    fn set_shadow_color(&mut self, value: AzColor) {
+    fn set_shadow_color(&mut self, value: Color) {
         self.state.shadow_color = value;
     }
 
@@ -683,9 +699,10 @@ impl<'a> CanvasPaintThread<'a> {
         let draw_target = self.drawtarget.create_similar_draw_target(&Size2D::new(source_rect.size.width as i32,
                                                                                   source_rect.size.height as i32),
                                                                      self.drawtarget.get_format());
-        let matrix = Matrix2D::identity().translate(-source_rect.origin.x as AzFloat,
-                                                    -source_rect.origin.y as AzFloat)
-                                         .mul(&self.state.transform);
+        let matrix = Matrix2D::identity()
+            .pre_translated(-source_rect.origin.x as AzFloat,
+                            -source_rect.origin.y as AzFloat)
+            .pre_mul(&self.state.transform);
         draw_target.set_transform(&matrix);
         draw_target
     }
@@ -709,9 +726,7 @@ impl<'a> CanvasPaintThread<'a> {
 
 impl<'a> Drop for CanvasPaintThread<'a> {
     fn drop(&mut self) {
-        if let Some(ref mut wr) = self.webrender_api {
-            wr.delete_image(self.webrender_image_key.unwrap());
-        }
+        self.webrender_api.delete_image(self.webrender_image_key);
     }
 }
 
@@ -787,8 +802,8 @@ fn write_image(draw_target: &DrawTarget,
         let draw_options = DrawOptions::new(global_alpha, composition_op, AntialiasMode::None);
 
         draw_target.draw_surface(source_surface,
-                                 dest_rect.to_azfloat(),
-                                 image_rect.to_azfloat(),
+                                 dest_rect.to_azure_style(),
+                                 image_rect.to_azure_style(),
                                  draw_surface_options,
                                  draw_options);
     }
@@ -847,13 +862,163 @@ impl RectToi32 for Rect<f64> {
 
 }
 
-pub trait ToAzFloat {
-    fn to_azfloat(&self) -> Rect<AzFloat>;
+pub trait ToAzureStyle {
+    type Target;
+    fn to_azure_style(self) -> Self::Target;
 }
 
-impl ToAzFloat for Rect<f64> {
-    fn to_azfloat(&self) -> Rect<AzFloat> {
+impl ToAzureStyle for Rect<f64> {
+    type Target = Rect<AzFloat>;
+
+    fn to_azure_style(self) -> Rect<AzFloat> {
         Rect::new(Point2D::new(self.origin.x as AzFloat, self.origin.y as AzFloat),
                   Size2D::new(self.size.width as AzFloat, self.size.height as AzFloat))
+    }
+}
+
+
+impl ToAzureStyle for LineCapStyle {
+    type Target = CapStyle;
+
+    fn to_azure_style(self) -> CapStyle {
+        match self {
+            LineCapStyle::Butt => CapStyle::Butt,
+            LineCapStyle::Round => CapStyle::Round,
+            LineCapStyle::Square => CapStyle::Square,
+        }
+    }
+}
+
+impl ToAzureStyle for LineJoinStyle {
+    type Target = JoinStyle;
+
+    fn to_azure_style(self) -> JoinStyle {
+        match self {
+            LineJoinStyle::Round => JoinStyle::Round,
+            LineJoinStyle::Bevel => JoinStyle::Bevel,
+            LineJoinStyle::Miter => JoinStyle::Miter,
+        }
+    }
+}
+
+impl ToAzureStyle for CompositionStyle {
+    type Target = CompositionOp;
+
+    fn to_azure_style(self) -> CompositionOp {
+        match self {
+            CompositionStyle::SrcIn    => CompositionOp::In,
+            CompositionStyle::SrcOut   => CompositionOp::Out,
+            CompositionStyle::SrcOver  => CompositionOp::Over,
+            CompositionStyle::SrcAtop  => CompositionOp::Atop,
+            CompositionStyle::DestIn   => CompositionOp::DestIn,
+            CompositionStyle::DestOut  => CompositionOp::DestOut,
+            CompositionStyle::DestOver => CompositionOp::DestOver,
+            CompositionStyle::DestAtop => CompositionOp::DestAtop,
+            CompositionStyle::Copy     => CompositionOp::Source,
+            CompositionStyle::Lighter  => CompositionOp::Add,
+            CompositionStyle::Xor      => CompositionOp::Xor,
+        }
+    }
+}
+
+impl ToAzureStyle for BlendingStyle {
+    type Target = CompositionOp;
+
+    fn to_azure_style(self) -> CompositionOp {
+        match self {
+            BlendingStyle::Multiply   => CompositionOp::Multiply,
+            BlendingStyle::Screen     => CompositionOp::Screen,
+            BlendingStyle::Overlay    => CompositionOp::Overlay,
+            BlendingStyle::Darken     => CompositionOp::Darken,
+            BlendingStyle::Lighten    => CompositionOp::Lighten,
+            BlendingStyle::ColorDodge => CompositionOp::ColorDodge,
+            BlendingStyle::ColorBurn  => CompositionOp::ColorBurn,
+            BlendingStyle::HardLight  => CompositionOp::HardLight,
+            BlendingStyle::SoftLight  => CompositionOp::SoftLight,
+            BlendingStyle::Difference => CompositionOp::Difference,
+            BlendingStyle::Exclusion  => CompositionOp::Exclusion,
+            BlendingStyle::Hue        => CompositionOp::Hue,
+            BlendingStyle::Saturation => CompositionOp::Saturation,
+            BlendingStyle::Color      => CompositionOp::Color,
+            BlendingStyle::Luminosity => CompositionOp::Luminosity,
+        }
+    }
+}
+
+impl ToAzureStyle for CompositionOrBlending {
+    type Target = CompositionOp;
+
+    fn to_azure_style(self) -> CompositionOp {
+        match self {
+            CompositionOrBlending::Composition(op) => op.to_azure_style(),
+            CompositionOrBlending::Blending(op) => op.to_azure_style(),
+        }
+    }
+}
+
+pub trait ToAzurePattern {
+    fn to_azure_pattern(&self, drawtarget: &DrawTarget) -> Option<Pattern>;
+}
+
+impl ToAzurePattern for FillOrStrokeStyle {
+    fn to_azure_pattern(&self, drawtarget: &DrawTarget) -> Option<Pattern> {
+        match *self {
+            FillOrStrokeStyle::Color(ref color) => {
+                Some(Pattern::Color(ColorPattern::new(color.to_azure_style())))
+            },
+            FillOrStrokeStyle::LinearGradient(ref linear_gradient_style) => {
+                let gradient_stops: Vec<GradientStop> = linear_gradient_style.stops.iter().map(|s| {
+                    GradientStop {
+                        offset: s.offset as AzFloat,
+                        color: s.color.to_azure_style()
+                    }
+                }).collect();
+
+                Some(Pattern::LinearGradient(LinearGradientPattern::new(
+                    &Point2D::new(linear_gradient_style.x0 as AzFloat, linear_gradient_style.y0 as AzFloat),
+                    &Point2D::new(linear_gradient_style.x1 as AzFloat, linear_gradient_style.y1 as AzFloat),
+                    drawtarget.create_gradient_stops(&gradient_stops, ExtendMode::Clamp),
+                    &Matrix2D::identity())))
+            },
+            FillOrStrokeStyle::RadialGradient(ref radial_gradient_style) => {
+                let gradient_stops: Vec<GradientStop> = radial_gradient_style.stops.iter().map(|s| {
+                    GradientStop {
+                        offset: s.offset as AzFloat,
+                        color: s.color.to_azure_style()
+                    }
+                }).collect();
+
+                Some(Pattern::RadialGradient(RadialGradientPattern::new(
+                    &Point2D::new(radial_gradient_style.x0 as AzFloat, radial_gradient_style.y0 as AzFloat),
+                    &Point2D::new(radial_gradient_style.x1 as AzFloat, radial_gradient_style.y1 as AzFloat),
+                    radial_gradient_style.r0 as AzFloat, radial_gradient_style.r1 as AzFloat,
+                    drawtarget.create_gradient_stops(&gradient_stops, ExtendMode::Clamp),
+                    &Matrix2D::identity())))
+            },
+            FillOrStrokeStyle::Surface(ref surface_style) => {
+                drawtarget.create_source_surface_from_data(&surface_style.surface_data,
+                                                           surface_style.surface_size,
+                                                           surface_style.surface_size.width * 4,
+                                                           SurfaceFormat::B8G8R8A8)
+                          .map(|source_surface| {
+                    Pattern::Surface(SurfacePattern::new(
+                        source_surface.azure_source_surface,
+                        surface_style.repeat_x,
+                        surface_style.repeat_y,
+                        &Matrix2D::identity()))
+                    })
+            }
+        }
+    }
+}
+
+impl ToAzureStyle for RGBA {
+    type Target = Color;
+
+    fn to_azure_style(self) -> Color {
+        Color::rgba(self.red as AzFloat,
+                    self.green as AzFloat,
+                    self.blue as AzFloat,
+                    self.alpha as AzFloat)
     }
 }

@@ -12,20 +12,104 @@
                                              Method("has_overline", "bool"),
                                              Method("has_line_through", "bool")]) %>
 
-${helpers.single_keyword("text-overflow", "clip ellipsis", animatable=False)}
+<%helpers:longhand name="text-overflow" animatable="False"
+                   spec="https://drafts.csswg.org/css-ui/#propdef-text-overflow">
+    use std::fmt;
+    use style_traits::ToCss;
+    use values::NoViewportPercentage;
+    use values::computed::ComputedValueAsSpecified;
+    use cssparser;
+
+    impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
+
+    #[derive(PartialEq, Eq, Clone, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+    pub enum Side {
+        Clip,
+        Ellipsis,
+        String(String),
+    }
+
+    #[derive(PartialEq, Eq, Clone, Debug)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+    pub struct SpecifiedValue {
+        pub first: Side,
+        pub second: Option<Side>
+    }
+
+    pub mod computed_value {
+        pub type T = super::SpecifiedValue;
+    }
+
+    #[inline]
+    pub fn get_initial_value() -> computed_value::T {
+        SpecifiedValue {
+            first: Side::Clip,
+            second: None
+        }
+    }
+    pub fn parse(context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
+        let first = try!(Side::parse(context, input));
+        let second = Side::parse(context, input).ok();
+        Ok(SpecifiedValue {
+            first: first,
+            second: second,
+        })
+    }
+    impl Parse for Side {
+        fn parse(_context: &ParserContext, input: &mut Parser) -> Result<Side, ()> {
+            if let Ok(ident) = input.try(|input| input.expect_ident()) {
+                match_ignore_ascii_case! { ident,
+                    "clip" => Ok(Side::Clip),
+                    "ellipsis" => Ok(Side::Ellipsis),
+                    _ => Err(())
+                }
+            } else {
+                Ok(Side::String(try!(input.expect_string()).into_owned()))
+            }
+        }
+    }
+
+    impl ToCss for Side {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+            match *self {
+                Side::Clip => dest.write_str("clip"),
+                Side::Ellipsis => dest.write_str("ellipsis"),
+                Side::String(ref s) => {
+                    cssparser::serialize_string(s, dest)
+                }
+            }
+        }
+    }
+
+    impl ToCss for SpecifiedValue {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+            try!(self.first.to_css(dest));
+            if let Some(ref second) = self.second {
+                try!(dest.write_str(" "));
+                try!(second.to_css(dest));
+            }
+            Ok(())
+        }
+    }
+</%helpers:longhand>
 
 ${helpers.single_keyword("unicode-bidi",
                          "normal embed isolate bidi-override isolate-override plaintext",
-                         animatable=False)}
+                         animatable=False,
+                         spec="https://drafts.csswg.org/css-writing-modes/#propdef-unicode-bidi")}
 
 // FIXME: This prop should be animatable.
 <%helpers:longhand name="${'text-decoration' if product == 'servo' else 'text-decoration-line'}"
                    custom_cascade="${product == 'servo'}"
-                   animatable="False">
-    use cssparser::ToCss;
+                   animatable="False"
+                   disable_when_testing="True",
+                   spec="https://drafts.csswg.org/css-text-decor/#propdef-text-decoration-line">
     use std::fmt;
-    use values::computed::ComputedValueAsSpecified;
+    use style_traits::ToCss;
     use values::NoViewportPercentage;
+    use values::computed::ComputedValueAsSpecified;
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
     impl NoViewportPercentage for SpecifiedValue {}
@@ -36,29 +120,29 @@ ${helpers.single_keyword("unicode-bidi",
         pub underline: bool,
         pub overline: bool,
         pub line_through: bool,
-        // 'blink' is accepted in the parser but ignored.
-        // Just not blinking the text is a conforming implementation per CSS 2.1.
+        pub blink: bool,
     }
 
     impl ToCss for SpecifiedValue {
         fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-            let mut space = false;
-            if self.underline {
-                try!(dest.write_str("underline"));
-                space = true;
-            }
-            if self.overline {
-                if space {
-                    try!(dest.write_str(" "));
+            let mut has_any = false;
+            macro_rules! write_value {
+                ($line:ident => $css:expr) => {
+                    if self.$line {
+                        if has_any {
+                            dest.write_str(" ")?;
+                        }
+                        dest.write_str($css)?;
+                        has_any = true;
+                    }
                 }
-                try!(dest.write_str("overline"));
-                space = true;
             }
-            if self.line_through {
-                if space {
-                    try!(dest.write_str(" "));
-                }
-                try!(dest.write_str("line-through"));
+            write_value!(underline => "underline");
+            write_value!(overline => "overline");
+            write_value!(line_through => "line-through");
+            write_value!(blink => "blink");
+            if !has_any {
+                dest.write_str("none")?;
             }
             Ok(())
         }
@@ -67,7 +151,7 @@ ${helpers.single_keyword("unicode-bidi",
         pub type T = super::SpecifiedValue;
         #[allow(non_upper_case_globals)]
         pub const none: T = super::SpecifiedValue {
-            underline: false, overline: false, line_through: false
+            underline: false, overline: false, line_through: false, blink: false
         };
     }
     #[inline] pub fn get_initial_value() -> computed_value::T {
@@ -76,12 +160,11 @@ ${helpers.single_keyword("unicode-bidi",
     /// none | [ underline || overline || line-through || blink ]
     pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
         let mut result = SpecifiedValue {
-            underline: false, overline: false, line_through: false,
+            underline: false, overline: false, line_through: false, blink: false
         };
         if input.try(|input| input.expect_ident_matching("none")).is_ok() {
             return Ok(result)
         }
-        let mut blink = false;
         let mut empty = true;
 
         while input.try(|input| {
@@ -93,8 +176,8 @@ ${helpers.single_keyword("unicode-bidi",
                                       else { empty = false; result.overline = true },
                         "line-through" => if result.line_through { return Err(()) }
                                           else { empty = false; result.line_through = true },
-                        "blink" => if blink { return Err(()) }
-                                   else { empty = false; blink = true },
+                        "blink" => if result.blink { return Err(()) }
+                                   else { empty = false; result.blink = true },
                         _ => return Err(())
                     }
                 } else {
@@ -122,10 +205,13 @@ ${helpers.single_keyword("unicode-bidi",
 ${helpers.single_keyword("text-decoration-style",
                          "solid double dotted dashed wavy -moz-none",
                          products="gecko",
-                         animatable=False)}
+                         animatable=False,
+                         spec="https://drafts.csswg.org/css-text-decor/#propdef-text-decoration-style")}
 
 ${helpers.predefined_type(
     "text-decoration-color", "CSSColor",
     "CSSParserColor::RGBA(RGBA { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 })",
+    complex_color=True,
     products="gecko",
-    animatable=True)}
+    animatable=True,
+    spec="https://drafts.csswg.org/css-text-decor/#propdef-text-decoration-color")}

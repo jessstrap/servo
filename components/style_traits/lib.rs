@@ -9,35 +9,38 @@
 #![crate_name = "style_traits"]
 #![crate_type = "rlib"]
 
-#![deny(unsafe_code)]
+#![deny(unsafe_code, missing_docs)]
 
-#![cfg_attr(feature = "servo", feature(custom_derive))]
 #![cfg_attr(feature = "servo", feature(plugin))]
-#![cfg_attr(feature = "servo", plugin(serde_macros))]
-#![cfg_attr(feature = "servo", plugin(heapsize_plugin))]
 
+extern crate app_units;
 #[macro_use]
 extern crate cssparser;
 extern crate euclid;
 #[cfg(feature = "servo")] extern crate heapsize;
+#[cfg(feature = "servo")] #[macro_use] extern crate heapsize_derive;
 extern crate rustc_serialize;
-#[cfg(feature = "servo")] extern crate serde;
+#[cfg(feature = "servo")] #[macro_use] extern crate serde_derive;
+
+/// Opaque type stored in type-unsafe work queues for parallel layout.
+/// Must be transmutable to and from `TNode`.
+pub type UnsafeNode = (usize, usize);
 
 /// One CSS "px" in the coordinate system of the "initial viewport":
 /// http://www.w3.org/TR/css-device-adapt/#initial-viewport
 ///
-/// ViewportPx is equal to ScreenPx times a "page zoom" factor controlled by the user.  This is
+/// `ViewportPx` is equal to `ScreenPx` times a "page zoom" factor controlled by the user.  This is
 /// the desktop-style "full page" zoom that enlarges content but then reflows the layout viewport
 /// so it still exactly fits the visible area.
 ///
-/// At the default zoom level of 100%, one PagePx is equal to one ScreenPx.  However, if the
+/// At the default zoom level of 100%, one `PagePx` is equal to one `ScreenPx`.  However, if the
 /// document is zoomed in or out then this scale may be larger or smaller.
 #[derive(Clone, Copy, Debug)]
 pub enum ViewportPx {}
 
 /// One CSS "px" in the root coordinate system for the content document.
 ///
-/// PagePx is equal to ViewportPx multiplied by a "viewport zoom" factor controlled by the user.
+/// `PagePx` is equal to `ViewportPx` multiplied by a "viewport zoom" factor controlled by the user.
 /// This is the mobile-style "pinch zoom" that enlarges content without reflowing it.  When the
 /// viewport zoom is not equal to 1.0, then the layout viewport is no longer the same physical size
 /// as the viewable area.
@@ -56,3 +59,4 @@ pub mod cursor;
 pub mod values;
 pub mod viewport;
 
+pub use values::{ToCss, OneOrMoreCommaSeparated};

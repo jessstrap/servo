@@ -17,7 +17,7 @@ use dom::htmllegendelement::HTMLLegendElement;
 use dom::node::{Node, window_from_node};
 use dom::validitystate::ValidityState;
 use dom::virtualmethods::VirtualMethods;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 use style::element_state::*;
 
 #[dom_struct]
@@ -26,21 +26,21 @@ pub struct HTMLFieldSetElement {
 }
 
 impl HTMLFieldSetElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLFieldSetElement {
         HTMLFieldSetElement {
             htmlelement:
                 HTMLElement::new_inherited_with_state(IN_ENABLED_STATE,
-                                                      localName, prefix, document)
+                                                      local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLFieldSetElement> {
-        Node::reflect_node(box HTMLFieldSetElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLFieldSetElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLFieldSetElementBinding::Wrap)
     }
@@ -59,13 +59,13 @@ impl HTMLFieldSetElementMethods for HTMLFieldSetElement {
         }
         let filter = box ElementsFilter;
         let window = window_from_node(self);
-        HTMLCollection::create(window.r(), self.upcast(), filter)
+        HTMLCollection::create(&window, self.upcast(), filter)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-cva-validity
     fn Validity(&self) -> Root<ValidityState> {
         let window = window_from_node(self);
-        ValidityState::new(window.r(), self.upcast())
+        ValidityState::new(&window, self.upcast())
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-fieldset-disabled
@@ -88,7 +88,7 @@ impl VirtualMethods for HTMLFieldSetElement {
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
         match attr.local_name() {
-            &atom!("disabled") => {
+            &local_name!("disabled") => {
                 let disabled_state = match mutation {
                     AttributeMutation::Set(None) => true,
                     AttributeMutation::Set(Some(_)) => {

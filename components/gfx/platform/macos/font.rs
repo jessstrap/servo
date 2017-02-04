@@ -4,10 +4,6 @@
 
 /// Implementation of Quartz (CoreGraphics) fonts.
 
-extern crate core_foundation;
-extern crate core_graphics;
-extern crate core_text;
-
 use app_units::Au;
 use byteorder::{BigEndian, ByteOrder};
 use core_foundation::base::CFIndex;
@@ -16,15 +12,15 @@ use core_foundation::string::UniChar;
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::CGRect;
 use core_text::font::CTFont;
-use core_text::font_descriptor::kCTFontDefaultOrientation;
 use core_text::font_descriptor::{SymbolicTraitAccessors, TraitAccessors};
-use font::{FontHandleMethods, FontMetrics, FontTableTag, FontTableMethods, FractionalPixel};
+use core_text::font_descriptor::kCTFontDefaultOrientation;
+use font::{FontHandleMethods, FontMetrics, FontTableMethods, FontTableTag, FractionalPixel};
 use font::{GPOS, GSUB, KERN};
 use platform::font_template::FontTemplateData;
 use platform::macos::font_context::FontContextHandle;
+use std::{fmt, ptr};
 use std::ops::Range;
 use std::sync::Arc;
-use std::{fmt, ptr};
 use style::computed_values::{font_stretch, font_weight};
 use text::glyph::GlyphId;
 
@@ -306,7 +302,7 @@ impl FontHandleMethods for FontHandle {
                                   .map(Au::from_f64_px)
                                   .unwrap_or(max_advance_width);
 
-        let metrics =  FontMetrics {
+        let metrics = FontMetrics {
             underline_size:   au_from_pt(self.ctfont.underline_thickness() as f64),
             // TODO(Issue #201): underline metrics are not reliable. Have to pull out of font table
             // directly.
@@ -317,7 +313,7 @@ impl FontHandleMethods for FontHandle {
             strikeout_size:   Au(0), // FIXME(Issue #942)
             strikeout_offset: Au(0), // FIXME(Issue #942)
             leading:          au_from_pt(leading),
-            x_height:         au_from_pt(self.ctfont.x_height() as f64),
+            x_height:         au_from_pt((self.ctfont.x_height() as f64) * scale),
             em_size:          em_size,
             ascent:           au_from_pt(ascent * scale),
             descent:          au_from_pt(descent * scale),

@@ -2,28 +2,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use bluetooth_blacklist::{Blacklist, uuid_is_blacklisted};
+use bluetooth_traits::{BluetoothRequest, BluetoothResponse, GATTType};
 use dom::bindings::codegen::Bindings::BluetoothDeviceBinding::BluetoothDeviceMethods;
 use dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding;
 use dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding::BluetoothRemoteGATTServerMethods;
-use dom::bindings::error::Error::{self, Security};
-use dom::bindings::error::{Fallible, ErrorResult};
-use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, MutHeap, Root};
-use dom::bindings::reflector::{Reflectable, Reflector, reflect_dom_object};
-use dom::bindings::str::DOMString;
+use dom::bindings::error::Error;
+use dom::bindings::error::ErrorResult;
+use dom::bindings::js::{JS, Root};
+use dom::bindings::reflector::{DomObject, Reflector, reflect_dom_object};
+use dom::bluetooth::{AsyncBluetoothListener, get_gatt_children, response_async};
 use dom::bluetoothdevice::BluetoothDevice;
-use dom::bluetoothremotegattservice::BluetoothRemoteGATTService;
 use dom::bluetoothuuid::{BluetoothServiceUUID, BluetoothUUID};
-use ipc_channel::ipc::{self, IpcSender};
-use net_traits::bluetooth_thread::BluetoothMethodMsg;
+use dom::globalscope::GlobalScope;
+use dom::promise::Promise;
+use ipc_channel::ipc::IpcSender;
+use js::jsapi::JSContext;
 use std::cell::Cell;
+use std::rc::Rc;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattserver
 #[dom_struct]
 pub struct BluetoothRemoteGATTServer {
     reflector_: Reflector,
-    device: MutHeap<JS<BluetoothDevice>>,
+    device: JS<BluetoothDevice>,
     connected: Cell<bool>,
 }
 
@@ -31,28 +32,30 @@ impl BluetoothRemoteGATTServer {
     pub fn new_inherited(device: &BluetoothDevice) -> BluetoothRemoteGATTServer {
         BluetoothRemoteGATTServer {
             reflector_: Reflector::new(),
-            device: MutHeap::new(device),
+            device: JS::from_ref(device),
             connected: Cell::new(false),
         }
     }
 
-    pub fn new(global: GlobalRef, device: &BluetoothDevice) -> Root<BluetoothRemoteGATTServer> {
+    pub fn new(global: &GlobalScope, device: &BluetoothDevice) -> Root<BluetoothRemoteGATTServer> {
         reflect_dom_object(box BluetoothRemoteGATTServer::new_inherited(device),
-        global,
-        BluetoothRemoteGATTServerBinding::Wrap)
+                           global,
+                           BluetoothRemoteGATTServerBinding::Wrap)
     }
 
-    fn get_bluetooth_thread(&self) -> IpcSender<BluetoothMethodMsg> {
-        let global_root = self.global();
-        let global_ref = global_root.r();
-        global_ref.as_window().bluetooth_thread()
+    fn get_bluetooth_thread(&self) -> IpcSender<BluetoothRequest> {
+        self.global().as_window().bluetooth_thread()
+    }
+
+    pub fn set_connected(&self, connected: bool) {
+        self.connected.set(connected);
     }
 }
 
 impl BluetoothRemoteGATTServerMethods for BluetoothRemoteGATTServer {
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-device
     fn Device(&self) -> Root<BluetoothDevice> {
-        self.device.get()
+        Root::from_ref(&self.device)
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-connected
@@ -60,94 +63,98 @@ impl BluetoothRemoteGATTServerMethods for BluetoothRemoteGATTServer {
         self.connected.get()
     }
 
+    #[allow(unrooted_must_root)]
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-connect
-    fn Connect(&self) -> Fallible<Root<BluetoothRemoteGATTServer>> {
-        let (sender, receiver) = ipc::channel().unwrap();
+    fn Connect(&self) -> Rc<Promise> {
+        // Step 1.
+        let p = Promise::new(&self.global());
+        let sender = response_async(&p, self);
+
+        // TODO: Step 3: Check if the UA is currently using the Bluetooth system.
+
+        // TODO: Step 4: Implement activeAlgorithms internal slot for BluetoothRemoteGATTServer.
+
+        // TODO: Step 5.1 - 5.2: Implement activeAlgorithms internal slot for BluetoothRemoteGATTServer.
+
+        // Note: Steps 2, 5.1.1 and 5.1.3 are in components/bluetooth/lib.rs in the gatt_server_connect function.
+        // Steps 5.2.3 - 5.2.5  are in response function.
         self.get_bluetooth_thread().send(
-            BluetoothMethodMsg::GATTServerConnect(String::from(self.Device().Id()), sender)).unwrap();
-        let server = receiver.recv().unwrap();
-        match server {
-            Ok(connected) => {
-                self.connected.set(connected);
-                Ok(Root::from_ref(self))
-            },
-            Err(error) => {
-                Err(Error::from(error))
-            },
-        }
+            BluetoothRequest::GATTServerConnect(String::from(self.Device().Id()), sender)).unwrap();
+        // Step 5: return promise.
+        return p;
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-disconnect
     fn Disconnect(&self) -> ErrorResult {
-        let (sender, receiver) = ipc::channel().unwrap();
-        self.get_bluetooth_thread().send(
-            BluetoothMethodMsg::GATTServerDisconnect(String::from(self.Device().Id()), sender)).unwrap();
-        let server = receiver.recv().unwrap();
-        match server {
-            Ok(connected) => {
-                self.connected.set(connected);
-                Ok(())
-            },
-            Err(error) => {
-                Err(Error::from(error))
-            },
+        // TODO: Step 1: Implement activeAlgorithms internal slot for BluetoothRemoteGATTServer.
+
+        // Step 2.
+        if !self.Connected() {
+            return Ok(())
         }
+
+        // Step 3.
+        self.Device().clean_up_disconnected_device();
+
+        // Step 4 - 5:
+        self.Device().garbage_collect_the_connection()
     }
 
+    #[allow(unrooted_must_root)]
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-getprimaryservice
-    fn GetPrimaryService(&self, service: BluetoothServiceUUID) -> Fallible<Root<BluetoothRemoteGATTService>> {
-        let uuid = try!(BluetoothUUID::GetService(self.global().r(), service)).to_string();
-        if uuid_is_blacklisted(uuid.as_ref(), Blacklist::All) {
-            return Err(Security)
-        }
-        let (sender, receiver) = ipc::channel().unwrap();
-        self.get_bluetooth_thread().send(
-            BluetoothMethodMsg::GetPrimaryService(String::from(self.Device().Id()), uuid, sender)).unwrap();
-        let service = receiver.recv().unwrap();
-        match service {
-            Ok(service) => {
-                Ok(BluetoothRemoteGATTService::new(self.global().r(),
-                                                   &self.device.get(),
-                                                   DOMString::from(service.uuid),
-                                                   service.is_primary,
-                                                   service.instance_id))
-            },
-            Err(error) => {
-                Err(Error::from(error))
-            },
-        }
+    fn GetPrimaryService(&self, service: BluetoothServiceUUID) -> Rc<Promise> {
+        // TODO: Step 1: Implement the Permission API and the allowedServices BluetoothDevice internal slot.
+        // Step 2.
+        get_gatt_children(self, true, BluetoothUUID::service, Some(service), String::from(self.Device().Id()),
+                          self.Device().Gatt().Connected(), GATTType::PrimaryService)
     }
 
+    #[allow(unrooted_must_root)]
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-getprimaryservices
-    fn GetPrimaryServices(&self,
-                          service: Option<BluetoothServiceUUID>)
-                          -> Fallible<Vec<Root<BluetoothRemoteGATTService>>> {
-        let mut uuid: Option<String> = None;
-        if let Some(s) = service {
-            uuid = Some(try!(BluetoothUUID::GetService(self.global().r(), s)).to_string());
-            if let Some(ref uuid) = uuid {
-                if uuid_is_blacklisted(uuid.as_ref(), Blacklist::All) {
-                    return Err(Security)
+    fn GetPrimaryServices(&self, service: Option<BluetoothServiceUUID>) -> Rc<Promise> {
+        // TODO: Step 1: Implement the Permission API and the allowedServices BluetoothDevice internal slot.
+        // Step 2.
+        get_gatt_children(self, false, BluetoothUUID::service, service, String::from(self.Device().Id()),
+                          self.Connected(), GATTType::PrimaryService)
+
+    }
+}
+
+impl AsyncBluetoothListener for BluetoothRemoteGATTServer {
+    fn handle_response(&self, response: BluetoothResponse, promise_cx: *mut JSContext, promise: &Rc<Promise>) {
+        match response {
+            // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-connect
+            BluetoothResponse::GATTServerConnect(connected) => {
+                // Step 5.2.3
+                if self.Device().is_represented_device_null() {
+                    if let Err(e) = self.Device().garbage_collect_the_connection() {
+                        return promise.reject_error(promise_cx, Error::from(e));
+                    }
+                    return promise.reject_error(promise_cx, Error::Network);
                 }
-            }
-        };
-        let (sender, receiver) = ipc::channel().unwrap();
-        self.get_bluetooth_thread().send(
-            BluetoothMethodMsg::GetPrimaryServices(String::from(self.Device().Id()), uuid, sender)).unwrap();
-        let services_vec = receiver.recv().unwrap();
-        match services_vec {
-            Ok(service_vec) => {
-                Ok(service_vec.into_iter()
-                              .map(|service| BluetoothRemoteGATTService::new(self.global().r(),
-                                                                             &self.device.get(),
-                                                                             DOMString::from(service.uuid),
-                                                                             service.is_primary,
-                                                                             service.instance_id))
-                              .collect())
+
+                // Step 5.2.4.
+                self.connected.set(connected);
+
+                // Step 5.2.5.
+                promise.resolve_native(promise_cx, self);
             },
-            Err(error) => {
-                Err(Error::from(error))
+            // https://webbluetoothcg.github.io/web-bluetooth/#getgattchildren
+            // Step 7.
+            BluetoothResponse::GetPrimaryServices(services_vec, single) => {
+                let device = self.Device();
+                if single {
+                    promise.resolve_native(promise_cx, &device.get_or_create_service(&services_vec[0], &self));
+                    return;
+                }
+                let mut services = vec!();
+                for service in services_vec {
+                    let bt_service = device.get_or_create_service(&service, &self);
+                    services.push(bt_service);
+                }
+                promise.resolve_native(promise_cx, &services);
             },
+            _ => promise.reject_error(promise_cx, Error::Type("Something went wrong...".to_owned())),
         }
     }
 }

@@ -12,9 +12,10 @@ use dom::bindings::inheritance::Castable;
 use dom::bindings::js::{LayoutJS, Root};
 use dom::bindings::str::DOMString;
 use dom::document::Document;
-use dom::element::RawLayoutElementHelpers;
 use dom::element::{AttributeMutation, Element};
+use dom::element::RawLayoutElementHelpers;
 use dom::event::{Event, EventBubbles, EventCancelable};
+use dom::globalscope::GlobalScope;
 use dom::htmlelement::HTMLElement;
 use dom::htmlfieldsetelement::HTMLFieldSetElement;
 use dom::htmlformelement::{FormControl, HTMLFormElement};
@@ -24,20 +25,21 @@ use dom::node::{document_from_node, window_from_node};
 use dom::nodelist::NodeList;
 use dom::validation::Validatable;
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
 use ipc_channel::ipc::IpcSender;
 use script_traits::ScriptMsg as ConstellationMsg;
 use std::cell::Cell;
 use std::ops::Range;
-use string_cache::Atom;
 use style::attr::AttrValue;
 use style::element_state::*;
-use textinput::{KeyReaction, Lines, TextInput, SelectionDirection};
+use textinput::{KeyReaction, Lines, SelectionDirection, TextInput};
 
 #[dom_struct]
 pub struct HTMLTextAreaElement {
     htmlelement: HTMLElement,
     #[ignore_heap_size_of = "#7193"]
     textinput: DOMRefCell<TextInput<IpcSender<ConstellationMsg>>>,
+    placeholder: DOMRefCell<DOMString>,
     // https://html.spec.whatwg.org/multipage/#concept-textarea-dirty
     value_changed: Cell<bool>,
 }
@@ -57,7 +59,12 @@ impl LayoutHTMLTextAreaElementHelpers for LayoutJS<HTMLTextAreaElement> {
     #[allow(unrooted_must_root)]
     #[allow(unsafe_code)]
     unsafe fn get_value_for_layout(self) -> String {
-        String::from((*self.unsafe_get()).textinput.borrow_for_layout().get_content())
+        let text = (*self.unsafe_get()).textinput.borrow_for_layout().get_content();
+        String::from(if text.is_empty() {
+            (*self.unsafe_get()).placeholder.borrow_for_layout().clone()
+        } else {
+            text
+        })
     }
 
     #[allow(unrooted_must_root)]
@@ -74,7 +81,7 @@ impl LayoutHTMLTextAreaElementHelpers for LayoutJS<HTMLTextAreaElement> {
     fn get_cols(self) -> u32 {
         unsafe {
             (*self.upcast::<Element>().unsafe_get())
-                .get_attr_for_layout(&ns!(), &atom!("cols"))
+                .get_attr_for_layout(&ns!(), &local_name!("cols"))
                 .map_or(DEFAULT_COLS, AttrValue::as_uint)
         }
     }
@@ -83,7 +90,7 @@ impl LayoutHTMLTextAreaElementHelpers for LayoutJS<HTMLTextAreaElement> {
     fn get_rows(self) -> u32 {
         unsafe {
             (*self.upcast::<Element>().unsafe_get())
-                .get_attr_for_layout(&ns!(), &atom!("rows"))
+                .get_attr_for_layout(&ns!(), &local_name!("rows"))
                 .map_or(DEFAULT_ROWS, AttrValue::as_uint)
         }
     }
@@ -96,27 +103,36 @@ static DEFAULT_COLS: u32 = 20;
 static DEFAULT_ROWS: u32 = 2;
 
 impl HTMLTextAreaElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLTextAreaElement {
-        let chan = document.window().constellation_chan().clone();
+        let chan = document.window().upcast::<GlobalScope>().constellation_chan().clone();
         HTMLTextAreaElement {
             htmlelement:
                 HTMLElement::new_inherited_with_state(IN_ENABLED_STATE | IN_READ_WRITE_STATE,
-                                                      localName, prefix, document),
+                                                      local_name, prefix, document),
+            placeholder: DOMRefCell::new(DOMString::new()),
             textinput: DOMRefCell::new(TextInput::new(
-                    Lines::Multiple, DOMString::new(), chan, None, SelectionDirection::None)),
+                    Lines::Multiple, DOMString::new(), chan, None, None, SelectionDirection::None)),
             value_changed: Cell::new(false),
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLTextAreaElement> {
-        Node::reflect_node(box HTMLTextAreaElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLTextAreaElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLTextAreaElementBinding::Wrap)
+    }
+
+    fn update_placeholder_shown_state(&self) {
+        let has_placeholder = !self.placeholder.borrow().is_empty();
+        let has_value = !self.textinput.borrow().is_empty();
+        let el = self.upcast::<Element>();
+        el.set_placeholder_shown_state(has_placeholder && !has_value);
+        el.set_placeholder_shown_state(has_placeholder);
     }
 }
 
@@ -262,18 +278,13 @@ impl HTMLTextAreaElementMethods for HTMLTextAreaElement {
             atom!("select"),
             EventBubbles::Bubbles,
             EventCancelable::NotCancelable,
-            window.r());
+            &window);
         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
     }
 }
 
 
 impl HTMLTextAreaElement {
-    // https://html.spec.whatwg.org/multipage/#concept-fe-mutable
-    pub fn mutable(&self) -> bool {
-        // https://html.spec.whatwg.org/multipage/#the-textarea-element:concept-fe-mutable
-        !(self.Disabled() || self.ReadOnly())
-    }
     pub fn reset(&self) {
         // https://html.spec.whatwg.org/multipage/#the-textarea-element:concept-form-reset-control
         self.SetValue(self.DefaultValue());
@@ -290,7 +301,7 @@ impl VirtualMethods for HTMLTextAreaElement {
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
         match *attr.local_name() {
-            atom!("disabled") => {
+            local_name!("disabled") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -310,7 +321,17 @@ impl VirtualMethods for HTMLTextAreaElement {
                     }
                 }
             },
-            atom!("readonly") => {
+            local_name!("placeholder") => {
+                {
+                    let mut placeholder = self.placeholder.borrow_mut();
+                    placeholder.clear();
+                    if let AttributeMutation::Set(_) = mutation {
+                        placeholder.push_str(&attr.value());
+                    }
+                }
+                self.update_placeholder_shown_state();
+            },
+            local_name!("readonly") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -333,10 +354,10 @@ impl VirtualMethods for HTMLTextAreaElement {
         self.upcast::<Element>().check_ancestors_disabled_state_for_form_control();
     }
 
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match *name {
-            atom!("cols") => AttrValue::from_limited_u32(value.into(), DEFAULT_COLS),
-            atom!("rows") => AttrValue::from_limited_u32(value.into(), DEFAULT_ROWS),
+            local_name!("cols") => AttrValue::from_limited_u32(value.into(), DEFAULT_COLS),
+            local_name!("rows") => AttrValue::from_limited_u32(value.into(), DEFAULT_ROWS),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }
@@ -374,35 +395,46 @@ impl VirtualMethods for HTMLTextAreaElement {
             document_from_node(self).request_focus(self.upcast());
         } else if event.type_() == atom!("keydown") && !event.DefaultPrevented() {
             if let Some(kevent) = event.downcast::<KeyboardEvent>() {
-                match self.textinput.borrow_mut().handle_keydown(kevent) {
+                // This can't be inlined, as holding on to textinput.borrow_mut()
+                // during self.implicit_submission will cause a panic.
+                let action = self.textinput.borrow_mut().handle_keydown(kevent);
+                match action {
                     KeyReaction::TriggerDefaultAction => (),
                     KeyReaction::DispatchInput => {
                         self.value_changed.set(true);
-
-                        if event.IsTrusted() {
-                            let window = window_from_node(self);
-                            let _ = window.user_interaction_task_source().queue_event(
-                                &self.upcast(),
-                                atom!("input"),
-                                EventBubbles::Bubbles,
-                                EventCancelable::NotCancelable,
-                                window.r());
-                        }
-
+                        self.update_placeholder_shown_state();
                         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
-                        event.PreventDefault();
+                        event.mark_as_handled();
                     }
                     KeyReaction::RedrawSelection => {
                         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
-                        event.PreventDefault();
+                        event.mark_as_handled();
                     }
                     KeyReaction::Nothing => (),
                 }
             }
+        } else if event.type_() == atom!("keypress") && !event.DefaultPrevented() {
+            if event.IsTrusted() {
+                let window = window_from_node(self);
+                let _ = window.user_interaction_task_source()
+                              .queue_event(&self.upcast(),
+                                           atom!("input"),
+                                           EventBubbles::Bubbles,
+                                           EventCancelable::NotCancelable,
+                                           &window);
+            }
         }
+    }
+
+    fn pop(&self) {
+        self.super_type().unwrap().pop();
+
+        // https://html.spec.whatwg.org/multipage/#the-textarea-element:stack-of-open-elements
+        self.reset();
     }
 }
 
 impl FormControl for HTMLTextAreaElement {}
+
 
 impl Validatable for HTMLTextAreaElement {}

@@ -5,19 +5,9 @@
 //! The high-level interface from script to constellation. Using this abstract interface helps
 //! reduce coupling between these two components.
 
-use hyper::header::Headers;
-use hyper::method::Method;
-use ipc_channel::ipc::IpcSharedMemory;
 use std::cell::Cell;
 use std::fmt;
-use url::Url;
 use webrender_traits;
-
-#[derive(Deserialize, Eq, PartialEq, Serialize, Copy, Clone, HeapSizeOf)]
-pub enum WindowSizeType {
-    Initial,
-    Resize,
-}
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Deserialize, Serialize)]
 pub enum KeyState {
@@ -166,63 +156,11 @@ bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize, HeapSizeOf)]
-pub enum PixelFormat {
-    K8,         // Luminance channel only
-    KA8,        // Luminance + alpha
-    RGB8,       // RGB, 8 bits per channel
-    RGBA8,      // RGB + alpha, 8 bits per channel
-}
-
-#[derive(Clone, Deserialize, Serialize, HeapSizeOf)]
-pub struct Image {
-    pub width: u32,
-    pub height: u32,
-    pub format: PixelFormat,
-    #[ignore_heap_size_of = "Defined in ipc-channel"]
-    pub bytes: IpcSharedMemory,
-    #[ignore_heap_size_of = "Defined in webrender_traits"]
-    pub id: Option<webrender_traits::ImageKey>,
-}
-
-/// Similar to net::resource_thread::LoadData
-/// can be passed to LoadUrl to load a page with GET/POST
-/// parameters or headers
-#[derive(Clone, Deserialize, Serialize)]
-pub struct LoadData {
-    pub url: Url,
-    #[serde(deserialize_with = "::hyper_serde::deserialize",
-            serialize_with = "::hyper_serde::serialize")]
-    pub method: Method,
-    #[serde(deserialize_with = "::hyper_serde::deserialize",
-            serialize_with = "::hyper_serde::serialize")]
-    pub headers: Headers,
-    pub data: Option<Vec<u8>>,
-    pub referrer_policy: Option<ReferrerPolicy>,
-    pub referrer_url: Option<Url>,
-}
-
-impl LoadData {
-    pub fn new(url: Url, referrer_policy: Option<ReferrerPolicy>, referrer_url: Option<Url>) -> LoadData {
-        LoadData {
-            url: url,
-            method: Method::Get,
-            headers: Headers::new(),
-            data: None,
-            referrer_policy: referrer_policy,
-            referrer_url: referrer_url,
-        }
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Copy, Hash, Debug, Deserialize, Serialize)]
 pub enum TraversalDirection {
     Forward(usize),
     Back(usize),
 }
-
-#[derive(Clone, PartialEq, Eq, Copy, Hash, Debug, Deserialize, Serialize, PartialOrd, Ord)]
-pub struct FrameId(pub u32);
 
 /// Each pipeline ID needs to be unique. However, it also needs to be possible to
 /// generate the pipeline ID from an iframe element (this simplifies a lot of other
@@ -242,7 +180,7 @@ pub struct FrameId(pub u32);
 #[derive(Clone, Copy)]
 pub struct PipelineNamespace {
     id: PipelineNamespaceId,
-    next_index: PipelineIndex,
+    index: u32,
 }
 
 impl PipelineNamespace {
@@ -251,27 +189,33 @@ impl PipelineNamespace {
             assert!(tls.get().is_none());
             tls.set(Some(PipelineNamespace {
                 id: namespace_id,
-                next_index: PipelineIndex(0),
+                index: 0,
             }));
         });
     }
 
-    fn next(&mut self) -> PipelineId {
-        let pipeline_id = PipelineId {
+    fn next_index(&mut self) -> u32 {
+        let result = self.index;
+        self.index = result + 1;
+        result
+    }
+
+    fn next_pipeline_id(&mut self) -> PipelineId {
+        PipelineId {
             namespace_id: self.id,
-            index: self.next_index,
-        };
+            index: PipelineIndex(self.next_index()),
+        }
+    }
 
-        let PipelineIndex(current_index) = self.next_index;
-        self.next_index = PipelineIndex(current_index + 1);
-
-        pipeline_id
+    fn next_frame_id(&mut self) -> FrameId {
+        FrameId {
+            namespace_id: self.id,
+            index: FrameIndex(self.next_index()),
+        }
     }
 }
 
 thread_local!(pub static PIPELINE_NAMESPACE: Cell<Option<PipelineNamespace>> = Cell::new(None));
-
-thread_local!(pub static PIPELINE_ID: Cell<Option<PipelineId>> = Cell::new(None));
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Hash, Debug, Deserialize, Serialize, HeapSizeOf)]
 pub struct PipelineNamespaceId(pub u32);
@@ -289,22 +233,10 @@ impl PipelineId {
     pub fn new() -> PipelineId {
         PIPELINE_NAMESPACE.with(|tls| {
             let mut namespace = tls.get().expect("No namespace set for this thread!");
-            let new_pipeline_id = namespace.next();
+            let new_pipeline_id = namespace.next_pipeline_id();
             tls.set(Some(namespace));
             new_pipeline_id
         })
-    }
-
-    // TODO(gw): This should be removed. It's only required because of the code
-    // that uses it in the devtools lib.rs file (which itself is a TODO). Once
-    // that is fixed, this should be removed. It also relies on the first
-    // call to PipelineId::new() returning (0,0), which is checked with an
-    // assert in handle_init_load().
-    pub fn fake_root_pipeline_id() -> PipelineId {
-        PipelineId {
-            namespace_id: PipelineNamespaceId(0),
-            index: PipelineIndex(0),
-        }
     }
 
     pub fn to_webrender(&self) -> webrender_traits::PipelineId {
@@ -312,15 +244,6 @@ impl PipelineId {
         let PipelineIndex(index) = self.index;
         webrender_traits::PipelineId(namespace_id, index)
     }
-
-    pub fn install(id: PipelineId) {
-        PIPELINE_ID.with(|tls| tls.set(Some(id)))
-    }
-
-    pub fn installed() -> Option<PipelineId> {
-        PIPELINE_ID.with(|tls| tls.get())
-    }
-
 }
 
 impl fmt::Display for PipelineId {
@@ -331,23 +254,55 @@ impl fmt::Display for PipelineId {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Copy, Hash, Debug, Deserialize, Serialize, HeapSizeOf)]
-pub struct SubpageId(pub u32);
+thread_local!(pub static TOP_LEVEL_FRAME_ID: Cell<Option<FrameId>> = Cell::new(None));
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Hash, Debug, Deserialize, Serialize, HeapSizeOf)]
+pub struct FrameIndex(pub u32);
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Hash, Debug, Deserialize, Serialize, HeapSizeOf)]
+pub struct FrameId {
+    pub namespace_id: PipelineNamespaceId,
+    pub index: FrameIndex
+}
+
+impl FrameId {
+    pub fn new() -> FrameId {
+        PIPELINE_NAMESPACE.with(|tls| {
+            let mut namespace = tls.get().expect("No namespace set for this thread!");
+            let new_frame_id = namespace.next_frame_id();
+            tls.set(Some(namespace));
+            new_frame_id
+        })
+    }
+
+    /// Each script and layout thread should have the top-level frame id installed,
+    /// since it is used by crash reporting.
+    pub fn install(id: FrameId) {
+        TOP_LEVEL_FRAME_ID.with(|tls| tls.set(Some(id)))
+    }
+
+    pub fn installed() -> Option<FrameId> {
+        TOP_LEVEL_FRAME_ID.with(|tls| tls.get())
+    }
+}
+
+impl fmt::Display for FrameId {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let PipelineNamespaceId(namespace_id) = self.namespace_id;
+        let FrameIndex(index) = self.index;
+        write!(fmt, "({},{})", namespace_id, index)
+    }
+}
+
+// We provide ids just for unit testing.
+pub const TEST_NAMESPACE: PipelineNamespaceId = PipelineNamespaceId(1234);
+pub const TEST_PIPELINE_INDEX: PipelineIndex = PipelineIndex(5678);
+pub const TEST_PIPELINE_ID: PipelineId = PipelineId { namespace_id: TEST_NAMESPACE, index: TEST_PIPELINE_INDEX };
+pub const TEST_FRAME_INDEX: FrameIndex = FrameIndex(8765);
+pub const TEST_FRAME_ID: FrameId = FrameId { namespace_id: TEST_NAMESPACE, index: TEST_FRAME_INDEX };
 
 #[derive(Clone, PartialEq, Eq, Copy, Hash, Debug, Deserialize, Serialize, HeapSizeOf)]
 pub enum FrameType {
     IFrame,
     MozBrowserIFrame,
-}
-
-/// [Policies](https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-states)
-/// for providing a referrer header for a request
-#[derive(Clone, Copy, Debug, Deserialize, HeapSizeOf, Serialize)]
-pub enum ReferrerPolicy {
-    NoReferrer,
-    NoReferrerWhenDowngrade,
-    Origin,
-    SameOrigin,
-    OriginWhenCrossOrigin,
-    UnsafeUrl,
 }

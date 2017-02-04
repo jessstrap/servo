@@ -7,55 +7,61 @@
 //! [at]: https://drafts.csswg.org/css-device-adapt/#atviewport-rule
 //! [meta]: https://drafts.csswg.org/css-device-adapt/#viewport-meta
 
+#![deny(missing_docs)]
+
 use app_units::Au;
-use cssparser::ToCss;
 use cssparser::{AtRuleParser, DeclarationListParser, DeclarationParser, Parser, parse_important};
+use cssparser::ToCss as ParserToCss;
 use euclid::scale_factor::ScaleFactor;
-use euclid::size::{Size2D, TypedSize2D};
+use euclid::size::TypedSize2D;
+use media_queries::Device;
 use parser::{ParserContext, log_css_error};
-use properties::ComputedValues;
 use std::ascii::AsciiExt;
+use std::borrow::Cow;
 use std::fmt;
 use std::iter::Enumerate;
 use std::str::Chars;
-use style_traits::ViewportPx;
+use style_traits::ToCss;
 use style_traits::viewport::{Orientation, UserZoom, ViewportConstraints, Zoom};
-use stylesheets::Origin;
+use stylesheets::{Stylesheet, Origin};
 use values::computed::{Context, ToComputedValue};
-use values::specified::{Length, LengthOrPercentageOrAuto, ViewportPercentageLength};
+use values::specified::{NoCalcLength, LengthOrPercentageOrAuto, ViewportPercentageLength};
 
 macro_rules! declare_viewport_descriptor {
-    ( $( $variant: ident($data: ident), )+ ) => {
-        declare_viewport_descriptor_inner!([] [ $( $variant($data), )+ ] 0);
+    ( $( $variant_name: expr => $variant: ident($data: ident), )+ ) => {
+         declare_viewport_descriptor_inner!([] [ $( $variant_name => $variant($data), )+ ] 0);
     };
 }
 
 macro_rules! declare_viewport_descriptor_inner {
     (
-        [ $( $assigned_variant: ident($assigned_data: ident) = $assigned_discriminant: expr, )* ]
+        [ $( $assigned_variant_name: expr =>
+             $assigned_variant: ident($assigned_data: ident) = $assigned_discriminant: expr, )* ]
         [
-            $next_variant: ident($next_data: ident),
-            $( $variant: ident($data: ident), )*
+            $next_variant_name: expr => $next_variant: ident($next_data: ident),
+            $( $variant_name: expr => $variant: ident($data: ident), )*
         ]
         $next_discriminant: expr
     ) => {
         declare_viewport_descriptor_inner! {
             [
-                $( $assigned_variant($assigned_data) = $assigned_discriminant, )*
-                $next_variant($next_data) = $next_discriminant,
+                $( $assigned_variant_name => $assigned_variant($assigned_data) = $assigned_discriminant, )*
+                $next_variant_name => $next_variant($next_data) = $next_discriminant,
             ]
-            [ $( $variant($data), )* ]
+            [ $( $variant_name => $variant($data), )* ]
             $next_discriminant + 1
         }
     };
 
     (
-        [ $( $assigned_variant: ident($assigned_data: ident) = $assigned_discriminant: expr, )* ]
+        [ $( $assigned_variant_name: expr =>
+             $assigned_variant: ident($assigned_data: ident) = $assigned_discriminant: expr, )* ]
         [ ]
         $number_of_variants: expr
     ) => {
-        #[derive(Copy, Clone, Debug, PartialEq)]
+        #[derive(Clone, Debug, PartialEq)]
         #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+        #[allow(missing_docs)]
         pub enum ViewportDescriptor {
             $(
                 $assigned_variant($assigned_data),
@@ -65,7 +71,8 @@ macro_rules! declare_viewport_descriptor_inner {
         const VIEWPORT_DESCRIPTOR_VARIANTS: usize = $number_of_variants;
 
         impl ViewportDescriptor {
-            fn discriminant_value(&self) -> usize {
+            #[allow(missing_docs)]
+            pub fn discriminant_value(&self) -> usize {
                 match *self {
                     $(
                         ViewportDescriptor::$assigned_variant(..) => $assigned_discriminant,
@@ -73,34 +80,50 @@ macro_rules! declare_viewport_descriptor_inner {
                 }
             }
         }
+
+        impl ToCss for ViewportDescriptor {
+            fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+                match *self {
+                    $(
+                        ViewportDescriptor::$assigned_variant(ref val) => {
+                            try!(dest.write_str($assigned_variant_name));
+                            try!(dest.write_str(": "));
+                            try!(val.to_css(dest));
+                        },
+                    )*
+                }
+                dest.write_str(";")
+            }
+        }
     };
 }
 
 declare_viewport_descriptor! {
-    MinWidth(ViewportLength),
-    MaxWidth(ViewportLength),
+    "min-width" => MinWidth(ViewportLength),
+    "max-width" => MaxWidth(ViewportLength),
 
-    MinHeight(ViewportLength),
-    MaxHeight(ViewportLength),
+    "min-height" => MinHeight(ViewportLength),
+    "max-height" => MaxHeight(ViewportLength),
 
-    Zoom(Zoom),
-    MinZoom(Zoom),
-    MaxZoom(Zoom),
+    "zoom" => Zoom(Zoom),
+    "min-zoom" => MinZoom(Zoom),
+    "max-zoom" => MaxZoom(Zoom),
 
-    UserZoom(UserZoom),
-    Orientation(Orientation),
+    "user-zoom" => UserZoom(UserZoom),
+    "orientation" => Orientation(Orientation),
 }
 
 trait FromMeta: Sized {
-    fn from_meta (value: &str) -> Option<Self>;
+    fn from_meta(value: &str) -> Option<Self>;
 }
 
-// ViewportLength is a length | percentage | auto | extend-to-zoom
-// See:
-// * http://dev.w3.org/csswg/css-device-adapt/#min-max-width-desc
-// * http://dev.w3.org/csswg/css-device-adapt/#extend-to-zoom
-#[derive(Copy, Clone, Debug, PartialEq)]
+/// ViewportLength is a length | percentage | auto | extend-to-zoom
+/// See:
+/// * http://dev.w3.org/csswg/css-device-adapt/#min-max-width-desc
+/// * http://dev.w3.org/csswg/css-device-adapt/#extend-to-zoom
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub enum ViewportLength {
     Specified(LengthOrPercentageOrAuto),
     ExtendToZoom
@@ -108,10 +131,10 @@ pub enum ViewportLength {
 
 impl ToCss for ViewportLength {
     fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-        where W: fmt::Write
+        where W: fmt::Write,
     {
         match *self {
-            ViewportLength::Specified(length) => length.to_css(dest),
+            ViewportLength::Specified(ref length) => length.to_css(dest),
             ViewportLength::ExtendToZoom => write!(dest, "extend-to-zoom"),
         }
     }
@@ -127,14 +150,14 @@ impl FromMeta for ViewportLength {
 
         Some(match value {
             v if v.eq_ignore_ascii_case("device-width") =>
-                specified!(Length::ViewportPercentage(ViewportPercentageLength::Vw(100.))),
+                specified!(NoCalcLength::ViewportPercentage(ViewportPercentageLength::Vw(100.))),
             v if v.eq_ignore_ascii_case("device-height") =>
-                specified!(Length::ViewportPercentage(ViewportPercentageLength::Vh(100.))),
+                specified!(NoCalcLength::ViewportPercentage(ViewportPercentageLength::Vh(100.))),
             _ => {
                 match value.parse::<f32>() {
-                    Ok(n) if n >= 0. => specified!(Length::from_px(n.max(1.).min(10000.))),
+                    Ok(n) if n >= 0. => specified!(NoCalcLength::from_px(n.max(1.).min(10000.))),
                     Ok(_) => return None,
-                    Err(_) => specified!(Length::from_px(1.))
+                    Err(_) => specified!(NoCalcLength::from_px(1.))
                 }
             }
         })
@@ -188,8 +211,9 @@ struct ViewportRuleParser<'a, 'b: 'a> {
     context: &'a ParserContext<'b>
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[allow(missing_docs)]
 pub struct ViewportDescriptorDeclaration {
     pub origin: Origin,
     pub descriptor: ViewportDescriptor,
@@ -197,6 +221,7 @@ pub struct ViewportDescriptorDeclaration {
 }
 
 impl ViewportDescriptorDeclaration {
+    #[allow(missing_docs)]
     pub fn new(origin: Origin,
                descriptor: ViewportDescriptor,
                important: bool) -> ViewportDescriptorDeclaration
@@ -209,11 +234,21 @@ impl ViewportDescriptorDeclaration {
     }
 }
 
-fn parse_shorthand(input: &mut Parser) -> Result<[ViewportLength; 2], ()> {
+impl ToCss for ViewportDescriptorDeclaration {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+        try!(self.descriptor.to_css(dest));
+        if self.important {
+            try!(dest.write_str(" !important"));
+        }
+        dest.write_str(";")
+    }
+}
+
+fn parse_shorthand(input: &mut Parser) -> Result<(ViewportLength, ViewportLength), ()> {
     let min = try!(ViewportLength::parse(input));
     match input.try(|input| ViewportLength::parse(input)) {
-        Err(()) => Ok([min, min]),
-        Ok(max) => Ok([min, max])
+        Err(()) => Ok((min.clone(), min)),
+        Ok(max) => Ok((min, max))
     }
 }
 
@@ -225,7 +260,7 @@ impl<'a, 'b> AtRuleParser for ViewportRuleParser<'a, 'b> {
 impl<'a, 'b> DeclarationParser for ViewportRuleParser<'a, 'b> {
     type Declaration = Vec<ViewportDescriptorDeclaration>;
 
-    fn parse_value(&self, name: &str, input: &mut Parser) -> Result<Vec<ViewportDescriptorDeclaration>, ()> {
+    fn parse_value(&mut self, name: &str, input: &mut Parser) -> Result<Vec<ViewportDescriptorDeclaration>, ()> {
         macro_rules! declaration {
             ($declaration:ident($parse:path)) => {
                 declaration!($declaration(value: try!($parse(input)),
@@ -247,8 +282,8 @@ impl<'a, 'b> DeclarationParser for ViewportRuleParser<'a, 'b> {
                 let shorthand = try!(parse_shorthand(input));
                 let important = input.try(parse_important).is_ok();
 
-                Ok(vec![declaration!($min(value: shorthand[0], important: important)),
-                        declaration!($max(value: shorthand[1], important: important))])
+                Ok(vec![declaration!($min(value: shorthand.0, important: important)),
+                        declaration!($max(value: shorthand.1, important: important))])
             }}
         }
 
@@ -284,9 +319,11 @@ impl<'a, 'b> DeclarationParser for ViewportRuleParser<'a, 'b> {
     }
 }
 
+/// A `@viewport` rule.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub struct ViewportRule {
+    /// The declarations contained in this @viewport rule.
     pub declarations: Vec<ViewportDescriptorDeclaration>
 }
 
@@ -304,36 +341,33 @@ fn is_whitespace_separator_or_equals(c: &char) -> bool {
 }
 
 impl ViewportRule {
+    #[allow(missing_docs)]
     pub fn parse(input: &mut Parser, context: &ParserContext)
                      -> Result<ViewportRule, ()>
     {
         let parser = ViewportRuleParser { context: context };
 
-        let mut errors = vec![];
-        let valid_declarations = DeclarationListParser::new(input, parser)
-            .filter_map(|result| {
-                match result {
-                    Ok(declarations) => Some(declarations),
-                    Err(range) => {
-                        errors.push(range);
-                        None
+        let mut cascade = Cascade::new();
+        let mut parser = DeclarationListParser::new(input, parser);
+        while let Some(result) = parser.next() {
+            match result {
+                Ok(declarations) => {
+                    for declarations in declarations {
+                        cascade.add(Cow::Owned(declarations))
                     }
                 }
-            })
-            .flat_map(|declarations| declarations.into_iter())
-            .collect::<Vec<_>>();
-
-        for range in errors {
-            let pos = range.start;
-            let message = format!("Unsupported @viewport descriptor declaration: '{}'",
-                                  input.slice(range));
-            log_css_error(input, pos, &*message, &context);
+                Err(range) => {
+                    let pos = range.start;
+                    let message = format!("Unsupported @viewport descriptor declaration: '{}'",
+                                          parser.input.slice(range));
+                    log_css_error(parser.input, pos, &*message, &context);
+                }
+            }
         }
-
-        Ok(ViewportRule { declarations: valid_declarations.iter().cascade() })
+        Ok(ViewportRule { declarations: cascade.finish() })
     }
 
-    #[allow(unsafe_code)]
+    #[allow(missing_docs)]
     pub fn from_meta(content: &str) -> Option<ViewportRule> {
         let mut declarations = vec![None; VIEWPORT_DESCRIPTOR_VARIANTS];
         macro_rules! push_descriptor {
@@ -471,23 +505,18 @@ impl ViewportRule {
     }
 }
 
-pub trait ViewportRuleCascade: Iterator + Sized {
-    fn cascade(self) -> ViewportRule;
-}
-
-impl<'a, I> ViewportRuleCascade for I
-    where I: Iterator<Item=&'a ViewportRule>
-{
-    #[inline]
-    fn cascade(self) -> ViewportRule {
-        ViewportRule {
-            declarations: self.flat_map(|r| r.declarations.iter()).cascade()
+impl ToCss for ViewportRule {
+    // Serialization of ViewportRule is not specced.
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+        try!(dest.write_str("@viewport { "));
+        let mut iter = self.declarations.iter();
+        try!(iter.next().unwrap().to_css(dest));
+        for declaration in iter {
+            try!(dest.write_str(" "));
+            try!(declaration.to_css(dest));
         }
+        dest.write_str(" }")
     }
-}
-
-trait ViewportDescriptorDeclarationCascade: Iterator + Sized {
-    fn cascade(self) -> Vec<ViewportDescriptorDeclaration>;
 }
 
 /// Computes the cascade precedence as according to
@@ -512,56 +541,71 @@ impl ViewportDescriptorDeclaration {
     }
 }
 
-#[allow(unsafe_code)]
-fn cascade<'a, I>(iter: I) -> Vec<ViewportDescriptorDeclaration>
-    where I: Iterator<Item=&'a ViewportDescriptorDeclaration>
-{
-    let mut declarations: Vec<Option<(usize, &'a ViewportDescriptorDeclaration)>> =
-        vec![None; VIEWPORT_DESCRIPTOR_VARIANTS];
+#[allow(missing_docs)]
+pub struct Cascade {
+    declarations: Vec<Option<(usize, ViewportDescriptorDeclaration)>>,
+    count_so_far: usize,
+}
 
-    // index is used to reconstruct order of appearance after all declarations
-    // have been added to the map
-    let mut index = 0;
-    for declaration in iter {
-        let descriptor = declaration.descriptor.discriminant_value();
-
-        match declarations[descriptor] {
-            Some((ref mut entry_index, ref mut entry_declaration)) => {
-                if declaration.higher_or_equal_precendence(entry_declaration) {
-                    *entry_declaration = declaration;
-                    *entry_index = index;
-                    index += 1;
-                }
-            }
-            ref mut entry @ None => {
-                *entry = Some((index, declaration));
-                index += 1;
-            }
+#[allow(missing_docs)]
+impl Cascade {
+    pub fn new() -> Self {
+        Cascade {
+            declarations: vec![None; VIEWPORT_DESCRIPTOR_VARIANTS],
+            count_so_far: 0,
         }
     }
 
-    // sort the descriptors by order of appearance
-    declarations.sort_by_key(|entry| entry.map(|(index, _)| index));
-    declarations.into_iter().filter_map(|entry| entry.map(|(_, decl)| *decl)).collect::<Vec<_>>()
-}
+    pub fn from_stylesheets<'a, I>(stylesheets: I, device: &Device) -> Self
+        where I: IntoIterator,
+              I::Item: AsRef<Stylesheet>,
+    {
+        let mut cascade = Self::new();
+        for stylesheet in stylesheets {
+            stylesheet.as_ref().effective_viewport_rules(device, |rule| {
+                for declaration in &rule.declarations {
+                    cascade.add(Cow::Borrowed(declaration))
+                }
+            })
+        }
+        cascade
+    }
 
-impl<'a, I> ViewportDescriptorDeclarationCascade for I
-    where I: Iterator<Item=&'a ViewportDescriptorDeclaration>
-{
-    #[inline]
-    fn cascade(self) -> Vec<ViewportDescriptorDeclaration> {
-        cascade(self)
+    pub fn add(&mut self, declaration: Cow<ViewportDescriptorDeclaration>)  {
+        let descriptor = declaration.descriptor.discriminant_value();
+
+        match self.declarations[descriptor] {
+            Some((ref mut order_of_appearance, ref mut entry_declaration)) => {
+                if declaration.higher_or_equal_precendence(entry_declaration) {
+                    *entry_declaration = declaration.into_owned();
+                    *order_of_appearance = self.count_so_far;
+                }
+            }
+            ref mut entry @ None => {
+                *entry = Some((self.count_so_far, declaration.into_owned()));
+            }
+        }
+        self.count_so_far += 1;
+    }
+
+    pub fn finish(mut self) -> Vec<ViewportDescriptorDeclaration> {
+        // sort the descriptors by order of appearance
+        self.declarations.sort_by_key(|entry| entry.as_ref().map(|&(index, _)| index));
+        self.declarations.into_iter().filter_map(|entry| entry.map(|(_, decl)| decl)).collect()
     }
 }
 
+/// Just a helper trait to be able to implement methods on ViewportConstraints.
 pub trait MaybeNew {
-    fn maybe_new(initial_viewport: TypedSize2D<f32, ViewportPx>,
-                     rule: &ViewportRule)
-                     -> Option<ViewportConstraints>;
+    /// Create a ViewportConstraints from a viewport size and a `@viewport`
+    /// rule.
+    fn maybe_new(device: &Device,
+                 rule: &ViewportRule)
+                 -> Option<ViewportConstraints>;
 }
 
 impl MaybeNew for ViewportConstraints {
-    fn maybe_new(initial_viewport: TypedSize2D<f32, ViewportPx>,
+    fn maybe_new(device: &Device,
                  rule: &ViewportRule)
                  -> Option<ViewportConstraints>
     {
@@ -587,11 +631,11 @@ impl MaybeNew for ViewportConstraints {
         // collapse the list of declarations into descriptor values
         for declaration in &rule.declarations {
             match declaration.descriptor {
-                ViewportDescriptor::MinWidth(value) => min_width = Some(value),
-                ViewportDescriptor::MaxWidth(value) => max_width = Some(value),
+                ViewportDescriptor::MinWidth(ref value) => min_width = Some(value),
+                ViewportDescriptor::MaxWidth(ref value) => max_width = Some(value),
 
-                ViewportDescriptor::MinHeight(value) => min_height = Some(value),
-                ViewportDescriptor::MaxHeight(value) => max_height = Some(value),
+                ViewportDescriptor::MinHeight(ref value) => min_height = Some(value),
+                ViewportDescriptor::MaxHeight(ref value) => max_height = Some(value),
 
                 ViewportDescriptor::Zoom(value) => initial_zoom = value.to_f32(),
                 ViewportDescriptor::MinZoom(value) => min_zoom = value.to_f32(),
@@ -610,7 +654,7 @@ impl MaybeNew for ViewportConstraints {
                     (None, None) => None,
                     (a, None) => a,
                     (None, b) => b,
-                    (a, b) => Some(a.unwrap().$op(b.unwrap())),
+                    (Some(a), Some(b)) => Some(a.$op(b)),
                 }
             }
         }
@@ -639,15 +683,15 @@ impl MaybeNew for ViewportConstraints {
         //
         // Note: DEVICE-ADAPT § 5. states that relative length values are
         // resolved against initial values
-        let initial_viewport = Size2D::new(Au::from_f32_px(initial_viewport.width),
-                                           Au::from_f32_px(initial_viewport.height));
+        let initial_viewport = device.au_viewport_size();
 
-
+        // TODO(emilio): Stop cloning `ComputedValues` around!
         let context = Context {
             is_root_element: false,
             viewport_size: initial_viewport,
-            inherited_style: ComputedValues::initial_values(),
-            style: ComputedValues::initial_values().clone(),
+            inherited_style: device.default_values(),
+            style: device.default_values().clone(),
+            font_metrics_provider: None, // TODO: Should have!
         };
 
         // DEVICE-ADAPT § 9.3 Resolving 'extend-to-zoom'
@@ -665,14 +709,14 @@ impl MaybeNew for ViewportConstraints {
         macro_rules! to_pixel_length {
             ($value:ident, $dimension:ident, $extend_to:ident => $auto_extend_to:expr) => {
                 if let Some($value) = $value {
-                    match $value {
-                        ViewportLength::Specified(length) => match length {
-                            LengthOrPercentageOrAuto::Length(value) =>
+                    match *$value {
+                        ViewportLength::Specified(ref length) => match *length {
+                            LengthOrPercentageOrAuto::Length(ref value) =>
                                 Some(value.to_computed_value(&context)),
                             LengthOrPercentageOrAuto::Percentage(value) =>
                                 Some(initial_viewport.$dimension.scale_by(value.0)),
                             LengthOrPercentageOrAuto::Auto => None,
-                            LengthOrPercentageOrAuto::Calc(calc) => {
+                            LengthOrPercentageOrAuto::Calc(ref calc) => {
                                 let calc = calc.to_computed_value(&context);
                                 Some(initial_viewport.$dimension.scale_by(calc.percentage()) + calc.length())
                             }

@@ -5,44 +5,48 @@
 //! The script runtime contains common traits and structs commonly used by the
 //! script thread, the dom, and the worker threads.
 
+use dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
 use dom::bindings::js::{RootCollection, RootCollectionPtr, trace_roots};
-use dom::bindings::refcounted::{LiveDOMReferences, TrustedReference, trace_refcounted_objects};
-use dom::bindings::trace::trace_traceables;
+use dom::bindings::refcounted::{LiveDOMReferences, trace_refcounted_objects};
+use dom::bindings::settings_stack;
+use dom::bindings::trace::{JSTraceable, trace_traceables};
 use dom::bindings::utils::DOM_CALLBACKS;
+use dom::globalscope::GlobalScope;
 use js::glue::CollectServoSizes;
-use js::jsapi::{DisableIncrementalGC, GCDescription, GCProgress};
+use js::jsapi::{DisableIncrementalGC, GCDescription, GCProgress, HandleObject};
 use js::jsapi::{JSContext, JS_GetRuntime, JSRuntime, JSTracer, SetDOMCallbacks, SetGCSliceCallback};
 use js::jsapi::{JSGCInvocationKind, JSGCStatus, JS_AddExtraGCRootsTracer, JS_SetGCCallback};
 use js::jsapi::{JSGCMode, JSGCParamKey, JS_SetGCParameter, JS_SetGlobalJitCompilerOption};
 use js::jsapi::{JSJitCompilerOption, JS_SetOffthreadIonCompilationEnabled, JS_SetParallelParsingEnabled};
-use js::jsapi::{JSObject, RuntimeOptionsRef, SetPreserveWrapperCallback};
+use js::jsapi::{JSObject, RuntimeOptionsRef, SetPreserveWrapperCallback, SetEnqueuePromiseJobCallback};
+use js::panic::wrap_panic;
 use js::rust::Runtime;
+use microtask::{EnqueuedPromiseCallback, Microtask};
 use profile_traits::mem::{Report, ReportKind, ReportsChan};
 use script_thread::{Runnable, STACK_ROOTS, trace_thread};
-use std::any::Any;
-use std::cell::{RefCell, Cell};
+use servo_config::opts;
+use servo_config::prefs::PREFS;
+use std::cell::Cell;
 use std::io::{Write, stdout};
 use std::marker::PhantomData;
 use std::os;
+use std::os::raw::c_void;
+use std::panic::AssertUnwindSafe;
 use std::ptr;
+use style::thread_state;
 use time::{Tm, now};
-use util::opts;
-use util::prefs::PREFS;
-use util::thread_state;
 
 /// Common messages used to control the event loops in both the script and the worker
 pub enum CommonScriptMsg {
     /// Requests that the script thread measure its memory usage. The results are sent back via the
     /// supplied channel.
     CollectReports(ReportsChan),
-    /// A DOM object's last pinned reference was removed (dispatched to all threads).
-    RefcountCleanup(TrustedReference),
     /// Generic message that encapsulates event handling.
     RunnableMsg(ScriptThreadEventCategory, Box<Runnable + Send>),
 }
 
 /// A cloneable interface for communicating with an event loop.
-pub trait ScriptChan {
+pub trait ScriptChan: JSTraceable {
     /// Send a message to the associated event loop.
     fn send(&self, msg: CommonScriptMsg) -> Result<(), ()>;
     /// Clone this handle.
@@ -70,7 +74,10 @@ pub enum ScriptThreadEventCategory {
     UpdateReplacedElement,
     WebSocketEvent,
     WorkerEvent,
-    ServiceWorkerEvent
+    ServiceWorkerEvent,
+    EnterFullscreen,
+    ExitFullscreen,
+    WebVREvent
 }
 
 /// An interface for receiving ScriptMsg values in an event loop. Used for synchronous DOM
@@ -97,6 +104,25 @@ impl<'a> Drop for StackRootTLS<'a> {
     }
 }
 
+/// SM callback for promise job resolution. Adds a promise callback to the current
+/// global's microtask queue.
+#[allow(unsafe_code)]
+unsafe extern "C" fn enqueue_job(cx: *mut JSContext,
+                                 job: HandleObject,
+                                 _allocation_site: HandleObject,
+                                 _data: *mut c_void) -> bool {
+    wrap_panic(AssertUnwindSafe(|| {
+        //XXXjdm - use a different global now?
+        let global = GlobalScope::from_object(job.get());
+        let pipeline = global.pipeline_id();
+        global.enqueue_microtask(Microtask::Promise(EnqueuedPromiseCallback {
+            callback: PromiseJobCallback::new(cx, job.get()),
+            pipeline: pipeline,
+        }));
+        true
+    }), false)
+}
+
 #[allow(unsafe_code)]
 pub unsafe fn new_rt_and_cx() -> Runtime {
     LiveDOMReferences::initialize();
@@ -119,6 +145,8 @@ pub unsafe fn new_rt_and_cx() -> Runtime {
     SetPreserveWrapperCallback(runtime.rt(), Some(empty_wrapper_callback));
     // Pre barriers aren't working correctly at the moment
     DisableIncrementalGC(runtime.rt());
+
+    SetEnqueuePromiseJobCallback(runtime.rt(), Some(enqueue_job), ptr::null_mut());
 
     set_gc_zeal_options(runtime.rt());
 
@@ -322,21 +350,6 @@ pub fn get_reports(cx: *mut JSContext, path_seg: String) -> Vec<Report> {
     reports
 }
 
-thread_local!(static PANIC_RESULT: RefCell<Option<Box<Any + Send>>> = RefCell::new(None));
-
-pub fn store_panic_result(error: Box<Any + Send>) {
-    PANIC_RESULT.with(|result| {
-        assert!(result.borrow().is_none());
-        *result.borrow_mut() = Some(error);
-    });
-}
-
-pub fn maybe_take_panic_result() -> Option<Box<Any + Send>> {
-    PANIC_RESULT.with(|result| {
-        result.borrow_mut().take()
-    })
-}
-
 thread_local!(static GC_CYCLE_START: Cell<Option<Tm>> = Cell::new(None));
 thread_local!(static GC_SLICE_START: Cell<Option<Tm>> = Cell::new(None));
 
@@ -372,11 +385,11 @@ unsafe extern "C" fn gc_slice_callback(_rt: *mut JSRuntime, progress: GCProgress
     };
     if !desc.is_null() {
         let desc: &GCDescription = &*desc;
-        let invocationKind = match desc.invocationKind_ {
+        let invocation_kind = match desc.invocationKind_ {
             JSGCInvocationKind::GC_NORMAL => "GC_NORMAL",
             JSGCInvocationKind::GC_SHRINK => "GC_SHRINK",
         };
-        println!("  isCompartment={}, invocationKind={}", desc.isCompartment_, invocationKind);
+        println!("  isCompartment={}, invocation_kind={}", desc.isCompartment_, invocation_kind);
     }
     let _ = stdout().flush();
 }
@@ -395,6 +408,7 @@ unsafe extern fn trace_rust_roots(tr: *mut JSTracer, _data: *mut os::raw::c_void
     trace_thread(tr);
     trace_traceables(tr);
     trace_roots(tr);
+    settings_stack::trace(tr);
     debug!("done custom root handler");
 }
 

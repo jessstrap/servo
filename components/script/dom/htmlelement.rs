@@ -11,11 +11,11 @@ use dom::bindings::codegen::Bindings::HTMLElementBinding;
 use dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::error::{Error, ErrorResult};
-use dom::bindings::inheritance::Castable;
 use dom::bindings::inheritance::{ElementTypeId, HTMLElementTypeId, NodeTypeId};
-use dom::bindings::js::{JS, MutNullableHeap, Root, RootedReference};
+use dom::bindings::inheritance::Castable;
+use dom::bindings::js::{JS, MutNullableJS, Root, RootedReference};
 use dom::bindings::str::DOMString;
-use dom::cssstyledeclaration::{CSSModificationAccess, CSSStyleDeclaration};
+use dom::cssstyledeclaration::{CSSModificationAccess, CSSStyleDeclaration, CSSStyleOwner};
 use dom::document::{Document, FocusType};
 use dom::domstringmap::DOMStringMap;
 use dom::element::{AttributeMutation, Element};
@@ -29,28 +29,28 @@ use dom::node::{Node, SEQUENTIALLY_FOCUSABLE};
 use dom::node::{document_from_node, window_from_node};
 use dom::nodelist::NodeList;
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
 use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::default::Default;
 use std::rc::Rc;
-use string_cache::Atom;
 use style::attr::AttrValue;
 use style::element_state::*;
 
 #[dom_struct]
 pub struct HTMLElement {
     element: Element,
-    style_decl: MutNullableHeap<JS<CSSStyleDeclaration>>,
-    dataset: MutNullableHeap<JS<DOMStringMap>>,
+    style_decl: MutNullableJS<CSSStyleDeclaration>,
+    dataset: MutNullableJS<DOMStringMap>,
 }
 
 impl HTMLElement {
-    pub fn new_inherited(tag_name: Atom, prefix: Option<DOMString>,
+    pub fn new_inherited(tag_name: LocalName, prefix: Option<DOMString>,
                          document: &Document) -> HTMLElement {
         HTMLElement::new_inherited_with_state(ElementState::empty(), tag_name, prefix, document)
     }
 
-    pub fn new_inherited_with_state(state: ElementState, tag_name: Atom,
+    pub fn new_inherited_with_state(state: ElementState, tag_name: LocalName,
                                     prefix: Option<DOMString>, document: &Document)
                                     -> HTMLElement {
         HTMLElement {
@@ -62,8 +62,8 @@ impl HTMLElement {
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom, prefix: Option<DOMString>, document: &Document) -> Root<HTMLElement> {
-        Node::reflect_node(box HTMLElement::new_inherited(localName, prefix, document),
+    pub fn new(local_name: LocalName, prefix: Option<DOMString>, document: &Document) -> Root<HTMLElement> {
+        Node::reflect_node(box HTMLElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLElementBinding::Wrap)
     }
@@ -76,7 +76,7 @@ impl HTMLElement {
     fn update_sequentially_focusable_status(&self) {
         let element = self.upcast::<Element>();
         let node = self.upcast::<Node>();
-        if element.has_attribute(&atom!("tabindex")) {
+        if element.has_attribute(&local_name!("tabindex")) {
             node.set_flag(SEQUENTIALLY_FOCUSABLE, true);
         } else {
             match node.type_id() {
@@ -87,13 +87,12 @@ impl HTMLElement {
                     => node.set_flag(SEQUENTIALLY_FOCUSABLE, true),
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLLinkElement)) |
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLAnchorElement)) => {
-                    if element.has_attribute(&atom!("href")) {
+                    if element.has_attribute(&local_name!("href")) {
                         node.set_flag(SEQUENTIALLY_FOCUSABLE, true);
                     }
                 },
                 _ => {
-                    if let Some(attr) = element.get_attribute(&ns!(), &atom!("draggable")) {
-                        let attr = attr.r();
+                    if let Some(attr) = element.get_attribute(&ns!(), &local_name!("draggable")) {
                         let value = attr.value();
                         let is_true = match *value {
                             AttrValue::String(ref string) => string == "true",
@@ -116,7 +115,10 @@ impl HTMLElementMethods for HTMLElement {
     fn Style(&self) -> Root<CSSStyleDeclaration> {
         self.style_decl.or_init(|| {
             let global = window_from_node(self);
-            CSSStyleDeclaration::new(global.r(), self.upcast::<Element>(), None, CSSModificationAccess::ReadWrite)
+            CSSStyleDeclaration::new(&global,
+                                     CSSStyleOwner::Element(JS::from_ref(self.upcast())),
+                                     None,
+                                     CSSModificationAccess::ReadWrite)
         })
     }
 
@@ -149,7 +151,12 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onload
     fn GetOnload(&self) -> Option<Rc<EventHandlerNonNull>> {
         if self.is_body_or_frameset() {
-            window_from_node(self).GetOnload()
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().GetOnload()
+            } else {
+                None
+            }
         } else {
             self.upcast::<EventTarget>().get_event_handler_common("load")
         }
@@ -158,7 +165,10 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onload
     fn SetOnload(&self, listener: Option<Rc<EventHandlerNonNull>>) {
         if self.is_body_or_frameset() {
-            window_from_node(self).SetOnload(listener)
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().SetOnload(listener)
+            }
         } else {
             self.upcast::<EventTarget>().set_event_handler_common("load", listener)
         }
@@ -167,7 +177,12 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onresize
     fn GetOnresize(&self) -> Option<Rc<EventHandlerNonNull>> {
         if self.is_body_or_frameset() {
-            window_from_node(self).GetOnload()
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().GetOnload()
+            } else {
+                None
+            }
         } else {
             self.upcast::<EventTarget>().get_event_handler_common("resize")
         }
@@ -176,7 +191,10 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onresize
     fn SetOnresize(&self, listener: Option<Rc<EventHandlerNonNull>>) {
         if self.is_body_or_frameset() {
-            window_from_node(self).SetOnresize(listener);
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().SetOnresize(listener);
+            }
         } else {
             self.upcast::<EventTarget>().set_event_handler_common("resize", listener)
         }
@@ -185,7 +203,12 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onblur
     fn GetOnblur(&self) -> Option<Rc<EventHandlerNonNull>> {
         if self.is_body_or_frameset() {
-            window_from_node(self).GetOnblur()
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().GetOnblur()
+            } else {
+                None
+            }
         } else {
             self.upcast::<EventTarget>().get_event_handler_common("blur")
         }
@@ -194,7 +217,10 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onblur
     fn SetOnblur(&self, listener: Option<Rc<EventHandlerNonNull>>) {
         if self.is_body_or_frameset() {
-            window_from_node(self).SetOnblur(listener)
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().SetOnblur(listener)
+            }
         } else {
             self.upcast::<EventTarget>().set_event_handler_common("blur", listener)
         }
@@ -203,7 +229,12 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onfocus
     fn GetOnfocus(&self) -> Option<Rc<EventHandlerNonNull>> {
         if self.is_body_or_frameset() {
-            window_from_node(self).GetOnfocus()
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().GetOnfocus()
+            } else {
+                None
+            }
         } else {
             self.upcast::<EventTarget>().get_event_handler_common("focus")
         }
@@ -212,7 +243,10 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onfocus
     fn SetOnfocus(&self, listener: Option<Rc<EventHandlerNonNull>>) {
         if self.is_body_or_frameset() {
-            window_from_node(self).SetOnfocus(listener)
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().SetOnfocus(listener)
+            }
         } else {
             self.upcast::<EventTarget>().set_event_handler_common("focus", listener)
         }
@@ -221,7 +255,12 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onscroll
     fn GetOnscroll(&self) -> Option<Rc<EventHandlerNonNull>> {
         if self.is_body_or_frameset() {
-            window_from_node(self).GetOnscroll()
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().GetOnscroll()
+            } else {
+                None
+            }
         } else {
             self.upcast::<EventTarget>().get_event_handler_common("scroll")
         }
@@ -230,7 +269,10 @@ impl HTMLElementMethods for HTMLElement {
     // https://html.spec.whatwg.org/multipage/#handler-onscroll
     fn SetOnscroll(&self, listener: Option<Rc<EventHandlerNonNull>>) {
         if self.is_body_or_frameset() {
-            window_from_node(self).SetOnscroll(listener)
+            let document = document_from_node(self);
+            if document.has_browsing_context() {
+                document.window().SetOnscroll(listener)
+            }
         } else {
             self.upcast::<EventTarget>().set_event_handler_common("scroll", listener)
         }
@@ -394,16 +436,16 @@ impl HTMLElement {
     }
 
     pub fn get_custom_attr(&self, local_name: DOMString) -> Option<DOMString> {
-        // FIXME(ajeffrey): Convert directly from DOMString to Atom
-        let local_name = Atom::from(to_snake_case(local_name));
+        // FIXME(ajeffrey): Convert directly from DOMString to LocalName
+        let local_name = LocalName::from(to_snake_case(local_name));
         self.upcast::<Element>().get_attribute(&ns!(), &local_name).map(|attr| {
             DOMString::from(&**attr.value()) // FIXME(ajeffrey): Convert directly from AttrValue to DOMString
         })
     }
 
     pub fn delete_custom_attr(&self, local_name: DOMString) {
-        // FIXME(ajeffrey): Convert directly from DOMString to Atom
-        let local_name = Atom::from(to_snake_case(local_name));
+        // FIXME(ajeffrey): Convert directly from DOMString to LocalName
+        let local_name = LocalName::from(to_snake_case(local_name));
         self.upcast::<Element>().remove_attribute(&ns!(), &local_name);
     }
 
@@ -431,7 +473,7 @@ impl HTMLElement {
     pub fn is_listed_element(&self) -> bool {
         // Servo does not implement HTMLKeygenElement
         // https://github.com/servo/servo/issues/2782
-        if self.upcast::<Element>().local_name() == &atom!("keygen") {
+        if self.upcast::<Element>().local_name() == &local_name!("keygen") {
             return true;
         }
 
@@ -476,13 +518,13 @@ impl HTMLElement {
                 // will be a label for this HTMLElement
                 .take_while(|elem| !elem.is_labelable_element())
                 .filter_map(Root::downcast::<HTMLLabelElement>)
-                .filter(|elem| !elem.upcast::<Element>().has_attribute(&atom!("for")))
+                .filter(|elem| !elem.upcast::<Element>().has_attribute(&local_name!("for")))
                 .filter(|elem| elem.first_labelable_descendant().r() == Some(self))
                 .map(Root::upcast::<Node>);
 
         let id = element.Id();
         let id = match &id as &str {
-            "" => return NodeList::new_simple_list(window.r(), ancestors),
+            "" => return NodeList::new_simple_list(&window, ancestors),
             id => id,
         };
 
@@ -492,10 +534,10 @@ impl HTMLElement {
         let children = root_node.traverse_preorder()
                                 .filter_map(Root::downcast::<Element>)
                                 .filter(|elem| elem.is::<HTMLLabelElement>())
-                                .filter(|elem| elem.get_string_attribute(&atom!("for")) == id)
+                                .filter(|elem| elem.get_string_attribute(&local_name!("for")) == id)
                                 .map(Root::upcast::<Node>);
 
-        NodeList::new_simple_list(window.r(), children.chain(ancestors))
+        NodeList::new_simple_list(&window, children.chain(ancestors))
     }
 }
 

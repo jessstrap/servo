@@ -14,19 +14,19 @@ interface HTMLSelectElement : HTMLElement {
 
   readonly attribute DOMString type;
 
-  //readonly attribute HTMLOptionsCollection options;
-  //         attribute unsigned long length;
-  //getter Element? item(unsigned long index);
-  //HTMLOptionElement? namedItem(DOMString name);
+  readonly attribute HTMLOptionsCollection options;
+           attribute unsigned long length;
+  getter Element? item(unsigned long index);
+  HTMLOptionElement? namedItem(DOMString name);
   // Note: this function currently only exists for union.html.
   void add((HTMLOptionElement or HTMLOptGroupElement) element, optional (HTMLElement or long)? before = null);
-  //void remove(); // ChildNode overload
-  //void remove(long index);
+  void remove(); // ChildNode overload
+  void remove(long index);
   //setter void (unsigned long index, HTMLOptionElement? option);
 
   //readonly attribute HTMLCollection selectedOptions;
-  //         attribute long selectedIndex;
-  //         attribute DOMString value;
+  attribute long selectedIndex;
+  attribute DOMString value;
 
   //readonly attribute boolean willValidate;
   readonly attribute ValidityState validity;

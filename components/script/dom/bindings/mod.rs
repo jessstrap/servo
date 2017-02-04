@@ -43,8 +43,9 @@
 //! [`Fallible<T>`](error/type.Fallible.html).
 //! Methods that use certain WebIDL types like `any` or `object` will get a
 //! `*mut JSContext` argument prepended to the argument list. Static methods
-//! will be passed a [`GlobalRef`](global/enum.GlobalRef.html) for the relevant
-//! global. This argument comes before the `*mut JSContext` argument, if any.
+//! will be passed a [`&GlobalScope`](../globalscope/struct.GlobalScope.html)
+//! for the relevant global. This argument comes before the `*mut JSContext`
+//! argument, if any.
 //!
 //! Rust reflections of WebIDL operations (methods)
 //! -----------------------------------------------
@@ -79,7 +80,7 @@
 //!
 //! A WebIDL constructor is turned into a static class method named
 //! `Constructor`. The arguments of this method will be the arguments of the
-//! WebIDL constructor, with a `GlobalRef` for the relevant global prepended.
+//! WebIDL constructor, with a `&GlobalScope` for the relevant global prepended.
 //! The return value of the constructor for MyInterface is exactly the same as
 //! that of a method returning an instance of MyInterface. Constructors are
 //! always [allowed to throw](#throwing-exceptions).
@@ -128,19 +129,27 @@
 //! return `Err()` from the method with the appropriate [error value]
 //! (error/enum.Error.html).
 
+#![allow(unsafe_code)]
+#![deny(missing_docs)]
+#![deny(non_snake_case)]
+
 pub mod callback;
 pub mod cell;
+pub mod constant;
 pub mod conversions;
 pub mod error;
-pub mod global;
 pub mod guard;
 pub mod inheritance;
 pub mod interface;
+pub mod iterable;
 pub mod js;
+pub mod mozmap;
+pub mod namespace;
 pub mod num;
 pub mod proxyhandler;
 pub mod refcounted;
 pub mod reflector;
+pub mod settings_stack;
 pub mod str;
 pub mod structuredclone;
 pub mod trace;
@@ -151,7 +160,7 @@ pub mod xmlname;
 /// Generated JS-Rust bindings.
 #[allow(missing_docs, non_snake_case)]
 pub mod codegen {
-    #[allow(unrooted_must_root)]
+    #[allow(dead_code, unrooted_must_root)]
     pub mod Bindings {
         include!(concat!(env!("OUT_DIR"), "/Bindings/mod.rs"));
     }
@@ -161,7 +170,7 @@ pub mod codegen {
     pub mod InterfaceTypes {
         include!(concat!(env!("OUT_DIR"), "/InterfaceTypes.rs"));
     }
-    #[allow(unused_imports)]
+    #[allow(dead_code, unused_imports)]
     pub mod InheritTypes {
         include!(concat!(env!("OUT_DIR"), "/InheritTypes.rs"));
     }

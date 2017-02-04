@@ -4,16 +4,23 @@
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothdevice
 
-[Pref="dom.bluetooth.enabled", Exposed=(Window,Worker)]
-interface BluetoothDevice {
-    readonly attribute DOMString id;
-    readonly attribute DOMString? name;
-    readonly attribute BluetoothAdvertisingData adData;
-    readonly attribute BluetoothRemoteGATTServer gatt;
-    // readonly attribute FrozenArray[] uuids;
+[Pref="dom.bluetooth.enabled"]
+interface BluetoothDevice : EventTarget {
+  readonly attribute DOMString id;
+  readonly attribute DOMString? name;
+  readonly attribute BluetoothRemoteGATTServer gatt;
+
+  Promise<void> watchAdvertisements();
+  void unwatchAdvertisements();
+  readonly attribute boolean watchingAdvertisements;
+};
+
+[NoInterfaceObject]
+interface BluetoothDeviceEventHandlers {
+  attribute EventHandler ongattserverdisconnected;
 };
 
 // BluetoothDevice implements EventTarget;
-// BluetoothDevice implements BluetoothDeviceEventHandlers;
+BluetoothDevice implements BluetoothDeviceEventHandlers;
 // BluetoothDevice implements CharacteristicEventHandlers;
 // BluetoothDevice implements ServiceEventHandlers;

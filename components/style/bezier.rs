@@ -6,10 +6,13 @@
 //!
 //! This is based on `WebCore/platform/graphics/UnitBezier.h` in WebKit.
 
+#![deny(missing_docs)]
+
 use euclid::point::Point2D;
 
 const NEWTON_METHOD_ITERATIONS: u8 = 8;
 
+/// A unit cubic Bézier curve, used for timing functions in CSS transitions and animations.
 pub struct Bezier {
     ax: f64,
     bx: f64,
@@ -20,6 +23,13 @@ pub struct Bezier {
 }
 
 impl Bezier {
+    /// Create a unit cubic Bézier curve from the two middle control points.
+    ///
+    /// X coordinate is time, Y coordinate is function advancement.
+    /// The nominal range for both is 0 to 1.
+    ///
+    /// The start and end points are always (0, 0) and (1, 1) so that a transition or animation
+    /// starts at 0% and ends at 100%.
     #[inline]
     pub fn new(p1: Point2D<f64>, p2: Point2D<f64>) -> Bezier {
         let cx = 3.0 * p1.x;
@@ -96,6 +106,8 @@ impl Bezier {
         t
     }
 
+    /// Solve the bezier curve for a given `x` and an `epsilon`, that should be
+    /// between zero and one.
     #[inline]
     pub fn solve(&self, x: f64, epsilon: f64) -> f64 {
         self.sample_curve_y(self.solve_curve_x(x, epsilon))

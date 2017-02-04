@@ -6,21 +6,23 @@
 //! The traits are here instead of in script so that these modules won't have
 //! to depend on script.
 
-#![feature(custom_derive, plugin)]
-#![plugin(heapsize_plugin, plugins, serde_macros)]
+#![feature(plugin)]
+#![plugin(plugins)]
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
-extern crate app_units;
+extern crate bluetooth_traits;
 extern crate canvas_traits;
 extern crate cookie as cookie_rs;
 extern crate devtools_traits;
 extern crate euclid;
 extern crate gfx_traits;
 extern crate heapsize;
+#[macro_use]
+extern crate heapsize_derive;
+extern crate hyper;
 extern crate hyper_serde;
 extern crate ipc_channel;
-extern crate layers;
 extern crate libc;
 extern crate msg;
 extern crate net_traits;
@@ -28,15 +30,17 @@ extern crate offscreen_gl_context;
 extern crate profile_traits;
 extern crate rustc_serialize;
 extern crate serde;
+#[macro_use]
+extern crate serde_derive;
+extern crate servo_url;
 extern crate style_traits;
 extern crate time;
-extern crate url;
-extern crate util;
+extern crate webvr_traits;
 
 mod script_msg;
 pub mod webdriver_msg;
 
-use app_units::Au;
+use bluetooth_traits::BluetoothRequest;
 use devtools_traits::{DevtoolScriptControlMsg, ScriptToDevtoolsControlMsg, WorkerId};
 use euclid::Size2D;
 use euclid::length::Length;
@@ -45,32 +49,32 @@ use euclid::rect::Rect;
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::TypedSize2D;
 use gfx_traits::Epoch;
-use gfx_traits::LayerId;
-use gfx_traits::StackingContextId;
+use gfx_traits::ScrollRootId;
 use heapsize::HeapSizeOf;
+use hyper::header::Headers;
+use hyper::method::Method;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
-use layers::geometry::DevicePixel;
 use libc::c_void;
-use msg::constellation_msg::{FrameId, FrameType, Image, Key, KeyModifiers, KeyState, LoadData};
-use msg::constellation_msg::{PipelineId, PipelineNamespaceId, ReferrerPolicy};
-use msg::constellation_msg::{SubpageId, TraversalDirection, WindowSizeType};
-use net_traits::bluetooth_thread::BluetoothMethodMsg;
+use msg::constellation_msg::{FrameId, FrameType, Key, KeyModifiers, KeyState};
+use msg::constellation_msg::{PipelineId, PipelineNamespaceId, TraversalDirection};
+use net_traits::{ReferrerPolicy, ResourceThreads};
+use net_traits::image::base::Image;
 use net_traits::image_cache_thread::ImageCacheThread;
 use net_traits::response::HttpsState;
-use net_traits::{LoadOrigin, ResourceThreads};
+use net_traits::storage_thread::StorageType;
 use profile_traits::mem;
 use profile_traits::time as profile_time;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use servo_url::ServoUrl;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::mpsc::{Sender, Receiver};
-use style_traits::{PagePx, ViewportPx};
-use url::Url;
-use util::ipc::OptionalOpaqueIpcSender;
+use std::sync::mpsc::{Receiver, Sender};
+use style_traits::{PagePx, UnsafeNode, ViewportPx};
 use webdriver_msg::{LoadStatus, WebDriverScriptCommand};
+use webvr_traits::{WebVRDisplayEvent, WebVRMsg};
 
 pub use script_msg::{LayoutMsg, ScriptMsg, EventResult, LogEntry};
-pub use script_msg::{ServiceWorkerMsg, ScopeThings, SWManagerMsg, SWManagerSenders};
+pub use script_msg::{ServiceWorkerMsg, ScopeThings, SWManagerMsg, SWManagerSenders, DOMMessage};
 
 /// The address of a node. Layout sends these back. They must be validated via
 /// `from_untrusted_node_address` before they can be used, because we do not trust layout.
@@ -116,8 +120,6 @@ pub enum LayoutControlMsg {
     GetCurrentEpoch(IpcSender<Epoch>),
     /// Asks layout to run another step in its animation.
     TickAnimations,
-    /// Informs layout as to which regions of the page are visible.
-    SetVisibleRects(Vec<(LayerId, Rect<Au>)>),
     /// Tells layout about the new scrolling offsets of each scrollable stacking context.
     SetStackingContextScrollStates(Vec<StackingContextScrollState>),
     /// Requests the current load state of Web fonts. `true` is returned if fonts are still loading
@@ -125,30 +127,87 @@ pub enum LayoutControlMsg {
     GetWebFontLoadState(IpcSender<bool>),
 }
 
-/// The initial data associated with a newly-created framed pipeline.
+/// can be passed to `LoadUrl` to load a page with GET/POST
+/// parameters or headers
+#[derive(Clone, Deserialize, Serialize)]
+pub struct LoadData {
+    /// The URL.
+    pub url: ServoUrl,
+    /// The method.
+    #[serde(deserialize_with = "::hyper_serde::deserialize",
+            serialize_with = "::hyper_serde::serialize")]
+    pub method: Method,
+    /// The headers.
+    #[serde(deserialize_with = "::hyper_serde::deserialize",
+            serialize_with = "::hyper_serde::serialize")]
+    pub headers: Headers,
+    /// The data.
+    pub data: Option<Vec<u8>>,
+    /// The referrer policy.
+    pub referrer_policy: Option<ReferrerPolicy>,
+    /// The referrer URL.
+    pub referrer_url: Option<ServoUrl>,
+}
+
+impl LoadData {
+    /// Create a new `LoadData` object.
+    pub fn new(url: ServoUrl, referrer_policy: Option<ReferrerPolicy>, referrer_url: Option<ServoUrl>) -> LoadData {
+        LoadData {
+            url: url,
+            method: Method::Get,
+            headers: Headers::new(),
+            data: None,
+            referrer_policy: referrer_policy,
+            referrer_url: referrer_url,
+        }
+    }
+}
+
+/// The initial data required to create a new layout attached to an existing script thread.
 #[derive(Deserialize, Serialize)]
 pub struct NewLayoutInfo {
-    /// Id of the parent of this new pipeline.
-    pub containing_pipeline_id: PipelineId,
+    /// The ID of the parent pipeline and frame type, if any.
+    /// If `None`, this is a root pipeline.
+    pub parent_info: Option<(PipelineId, FrameType)>,
     /// Id of the newly-created pipeline.
     pub new_pipeline_id: PipelineId,
-    /// Id of the new frame associated with this pipeline.
-    pub subpage_id: SubpageId,
-    /// Type of the new frame associated with this pipeline.
-    pub frame_type: FrameType,
+    /// Id of the frame associated with this pipeline.
+    pub frame_id: FrameId,
     /// Network request data which will be initiated by the script thread.
     pub load_data: LoadData,
-    /// The paint channel, cast to `OptionalOpaqueIpcSender`. This is really an
-    /// `Sender<LayoutToPaintMsg>`.
-    pub paint_chan: OptionalOpaqueIpcSender,
+    /// Information about the initial window size.
+    pub window_size: Option<WindowSizeData>,
     /// A port on which layout can receive messages from the pipeline.
     pub pipeline_port: IpcReceiver<LayoutControlMsg>,
-    /// A sender for the layout thread to communicate to the constellation.
-    pub layout_to_constellation_chan: IpcSender<LayoutMsg>,
     /// A shutdown channel so that layout can tell the content process to shut down when it's done.
-    pub content_process_shutdown_chan: IpcSender<()>,
+    pub content_process_shutdown_chan: Option<IpcSender<()>>,
     /// Number of threads to use for layout.
     pub layout_threads: usize,
+}
+
+/// When a pipeline is closed, should its browsing context be discarded too?
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum DiscardBrowsingContext {
+    /// Discard the browsing context
+    Yes,
+    /// Don't discard the browsing context
+    No,
+}
+
+/// Is a document fully active, active or inactive?
+/// A document is active if it is the current active document in its session history,
+/// it is fuly active if it is active and all of its ancestors are active,
+/// and it is inactive otherwise.
+/// https://html.spec.whatwg.org/multipage/#active-document
+/// https://html.spec.whatwg.org/multipage/#fully-active
+#[derive(Copy, Clone, PartialEq, Eq, Hash, HeapSizeOf, Debug, Deserialize, Serialize)]
+pub enum DocumentActivity {
+    /// An inactive document
+    Inactive,
+    /// An active but not fully active document
+    Active,
+    /// A fully active document
+    FullyActive,
 }
 
 /// Messages sent from the constellation or layout to the script thread.
@@ -161,7 +220,9 @@ pub enum ConstellationControlMsg {
     /// Notifies script that window has been resized but to not take immediate action.
     ResizeInactive(PipelineId, WindowSizeData),
     /// Notifies the script that a pipeline should be closed.
-    ExitPipeline(PipelineId),
+    ExitPipeline(PipelineId, DiscardBrowsingContext),
+    /// Notifies the script that the whole thread should be closed.
+    ExitScriptThread,
     /// Sends a DOM event.
     SendEvent(PipelineId, CompositorEvent),
     /// Notifies script of the viewport.
@@ -170,73 +231,89 @@ pub enum ConstellationControlMsg {
     SetScrollState(PipelineId, Vec<(UntrustedNodeAddress, Point2D<f32>)>),
     /// Requests that the script thread immediately send the constellation the title of a pipeline.
     GetTitle(PipelineId),
-    /// Notifies script thread to suspend all its timers
-    Freeze(PipelineId),
-    /// Notifies script thread to resume all its timers
-    Thaw(PipelineId),
+    /// Notifies script thread of a change to one of its document's activity
+    SetDocumentActivity(PipelineId, DocumentActivity),
     /// Notifies script thread whether frame is visible
     ChangeFrameVisibilityStatus(PipelineId, bool),
     /// Notifies script thread that frame visibility change is complete
-    NotifyVisibilityChange(PipelineId, PipelineId, bool),
+    /// PipelineId is for the parent, FrameId is for the actual frame.
+    NotifyVisibilityChange(PipelineId, FrameId, bool),
     /// Notifies script thread that a url should be loaded in this iframe.
-    Navigate(PipelineId, SubpageId, LoadData),
+    /// PipelineId is for the parent, FrameId is for the actual frame.
+    Navigate(PipelineId, FrameId, LoadData, bool),
     /// Requests the script thread forward a mozbrowser event to an iframe it owns,
-    /// or to the window if no subpage id is provided.
-    MozBrowserEvent(PipelineId, Option<SubpageId>, MozBrowserEvent),
-    /// Updates the current subpage and pipeline IDs of a given iframe
-    UpdateSubpageId(PipelineId, SubpageId, SubpageId, PipelineId),
+    /// or to the window if no child frame id is provided.
+    MozBrowserEvent(PipelineId, Option<FrameId>, MozBrowserEvent),
+    /// Updates the current pipeline ID of a given iframe.
+    /// First PipelineId is for the parent, second is the new PipelineId for the frame.
+    UpdatePipelineId(PipelineId, FrameId, PipelineId),
     /// Set an iframe to be focused. Used when an element in an iframe gains focus.
-    FocusIFrame(PipelineId, SubpageId),
+    /// PipelineId is for the parent, FrameId is for the actual frame.
+    FocusIFrame(PipelineId, FrameId),
     /// Passes a webdriver command to the script thread for execution
     WebDriverScriptCommand(PipelineId, WebDriverScriptCommand),
     /// Notifies script thread that all animations are done
     TickAllAnimations(PipelineId),
+    /// Notifies the script thread of a transition end
+    TransitionEnd(UnsafeNode, String, f64),
     /// Notifies the script thread that a new Web font has been loaded, and thus the page should be
     /// reflowed.
     WebFontLoaded(PipelineId),
     /// Cause a `load` event to be dispatched at the appropriate frame element.
     DispatchFrameLoadEvent {
-        /// The pipeline that has been marked as loaded.
-        target: PipelineId,
+        /// The frame that has been marked as loaded.
+        target: FrameId,
         /// The pipeline that contains a frame loading the target pipeline.
         parent: PipelineId,
+        /// The pipeline that has completed loading.
+        child: PipelineId,
     },
-    /// Notifies a parent frame that one of its child frames is now active.
-    FramedContentChanged(PipelineId, SubpageId),
+    /// Cause a `storage` event to be dispatched at the appropriate window.
+    /// The strings are key, old value and new value.
+    DispatchStorageEvent(PipelineId, StorageType, ServoUrl, Option<String>, Option<String>, Option<String>),
+    /// Notifies a parent pipeline that one of its child frames is now active.
+    /// PipelineId is for the parent, FrameId is the child frame.
+    FramedContentChanged(PipelineId, FrameId),
     /// Report an error from a CSS parser for the given pipeline
     ReportCSSError(PipelineId, String, usize, usize, String),
     /// Reload the given page.
     Reload(PipelineId),
+    /// Notifies the script thread of a WebVR device event
+    WebVREvent(PipelineId, WebVREventMsg)
 }
 
 impl fmt::Debug for ConstellationControlMsg {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         use self::ConstellationControlMsg::*;
-        write!(formatter, "ConstellationMsg::{}", match *self {
+        let variant = match *self {
             AttachLayout(..) => "AttachLayout",
             Resize(..) => "Resize",
             ResizeInactive(..) => "ResizeInactive",
             ExitPipeline(..) => "ExitPipeline",
+            ExitScriptThread => "ExitScriptThread",
             SendEvent(..) => "SendEvent",
             Viewport(..) => "Viewport",
             SetScrollState(..) => "SetScrollState",
             GetTitle(..) => "GetTitle",
-            Freeze(..) => "Freeze",
-            Thaw(..) => "Thaw",
+            SetDocumentActivity(..) => "SetDocumentActivity",
             ChangeFrameVisibilityStatus(..) => "ChangeFrameVisibilityStatus",
             NotifyVisibilityChange(..) => "NotifyVisibilityChange",
             Navigate(..) => "Navigate",
             MozBrowserEvent(..) => "MozBrowserEvent",
-            UpdateSubpageId(..) => "UpdateSubpageId",
+            UpdatePipelineId(..) => "UpdatePipelineId",
             FocusIFrame(..) => "FocusIFrame",
             WebDriverScriptCommand(..) => "WebDriverScriptCommand",
             TickAllAnimations(..) => "TickAllAnimations",
+            TransitionEnd(..) => "TransitionEnd",
             WebFontLoaded(..) => "WebFontLoaded",
             DispatchFrameLoadEvent { .. } => "DispatchFrameLoadEvent",
+            DispatchStorageEvent(..) => "DispatchStorageEvent",
             FramedContentChanged(..) => "FramedContentChanged",
             ReportCSSError(..) => "ReportCSSError",
             Reload(..) => "Reload",
-        })
+            WebVREvent(..) => "WebVREvent",
+        };
+        write!(formatter, "ConstellationMsg::{}", variant)
     }
 }
 
@@ -321,7 +398,7 @@ pub enum CompositorEvent {
     KeyEvent(Option<char>, Key, KeyState, KeyModifiers),
 }
 
-/// Touchpad pressure phase for TouchpadPressureEvent.
+/// Touchpad pressure phase for `TouchpadPressureEvent`.
 #[derive(Copy, Clone, HeapSizeOf, PartialEq, Deserialize, Serialize)]
 pub enum TouchpadPressurePhase {
     /// Pressure before a regular click.
@@ -334,14 +411,11 @@ pub enum TouchpadPressurePhase {
 
 /// Requests a TimerEvent-Message be sent after the given duration.
 #[derive(Deserialize, Serialize)]
-pub struct TimerEventRequest(pub IpcSender<TimerEvent>,
-                             pub TimerSource,
-                             pub TimerEventId,
-                             pub MsDuration);
+pub struct TimerEventRequest(pub IpcSender<TimerEvent>, pub TimerSource, pub TimerEventId, pub MsDuration);
 
 /// Notifies the script thread to fire due timers.
-/// TimerSource must be FromWindow when dispatched to ScriptThread and
-/// must be FromWorker when dispatched to a DedicatedGlobalWorkerScope
+/// `TimerSource` must be `FromWindow` when dispatched to `ScriptThread` and
+/// must be `FromWorker` when dispatched to a `DedicatedGlobalWorkerScope`
 #[derive(Deserialize, Serialize)]
 pub struct TimerEvent(pub TimerSource, pub TimerEventId);
 
@@ -354,7 +428,7 @@ pub enum TimerSource {
     FromWorker,
 }
 
-/// The id to be used for a TimerEvent is defined by the corresponding TimerEventRequest.
+/// The id to be used for a `TimerEvent` is defined by the corresponding `TimerEventRequest`.
 #[derive(PartialEq, Eq, Copy, Clone, Debug, HeapSizeOf, Deserialize, Serialize)]
 pub struct TimerEventId(pub u32);
 
@@ -388,19 +462,25 @@ pub struct InitialScriptState {
     pub id: PipelineId,
     /// The subpage ID of this pipeline to create in its pipeline parent.
     /// If `None`, this is the root.
-    pub parent_info: Option<(PipelineId, SubpageId, FrameType)>,
+    pub parent_info: Option<(PipelineId, FrameType)>,
+    /// The ID of the frame this script is part of.
+    pub frame_id: FrameId,
+    /// The ID of the top-level frame this script is part of.
+    pub top_level_frame_id: FrameId,
     /// A channel with which messages can be sent to us (the script thread).
     pub control_chan: IpcSender<ConstellationControlMsg>,
     /// A port on which messages sent by the constellation to script can be received.
     pub control_port: IpcReceiver<ConstellationControlMsg>,
     /// A channel on which messages can be sent to the constellation from script.
     pub constellation_chan: IpcSender<ScriptMsg>,
+    /// A sender for the layout thread to communicate to the constellation.
+    pub layout_to_constellation_chan: IpcSender<LayoutMsg>,
     /// A channel to schedule timer events.
     pub scheduler_chan: IpcSender<TimerEventRequest>,
     /// A channel to the resource manager thread.
     pub resource_threads: ResourceThreads,
     /// A channel to the bluetooth thread.
-    pub bluetooth_thread: IpcSender<BluetoothMethodMsg>,
+    pub bluetooth_thread: IpcSender<BluetoothRequest>,
     /// A channel to the image cache thread.
     pub image_cache_thread: ImageCacheThread,
     /// A channel to the time profiler thread.
@@ -415,6 +495,8 @@ pub struct InitialScriptState {
     pub pipeline_namespace_id: PipelineNamespaceId,
     /// A ping will be sent on this channel once the script thread shuts down.
     pub content_process_shutdown_chan: IpcSender<()>,
+    /// A channel to the webvr thread, if available.
+    pub webvr_thread: Option<IpcSender<WebVRMsg>>
 }
 
 /// This trait allows creating a `ScriptThread` without depending on the `script`
@@ -423,9 +505,7 @@ pub trait ScriptThreadFactory {
     /// Type of message sent from script to layout.
     type Message;
     /// Create a `ScriptThread`.
-    fn create(state: InitialScriptState,
-              load_data: LoadData)
-              -> (Sender<Self::Message>, Receiver<Self::Message>);
+    fn create(state: InitialScriptState, load_data: LoadData) -> (Sender<Self::Message>, Receiver<Self::Message>);
 }
 
 /// Whether the sandbox attribute is present for an iframe element
@@ -434,28 +514,38 @@ pub enum IFrameSandboxState {
     /// Sandbox attribute is present
     IFrameSandboxed,
     /// Sandbox attribute is not present
-    IFrameUnsandboxed
+    IFrameUnsandboxed,
 }
 
-/// Specifies the information required to load a URL in an iframe.
+/// Specifies the information required to load an iframe.
 #[derive(Deserialize, Serialize)]
 pub struct IFrameLoadInfo {
-    /// Load data containing the url to load
-    pub load_data: Option<LoadData>,
     /// Pipeline ID of the parent of this iframe
-    pub containing_pipeline_id: PipelineId,
-    /// The new subpage ID for this load
-    pub new_subpage_id: SubpageId,
-    /// The old subpage ID for this iframe, if a page was previously loaded.
-    pub old_subpage_id: Option<SubpageId>,
+    pub parent_pipeline_id: PipelineId,
+    /// The ID for this iframe.
+    pub frame_id: FrameId,
     /// The new pipeline ID that the iframe has generated.
     pub new_pipeline_id: PipelineId,
-    /// Sandbox type of this iframe
-    pub sandbox: IFrameSandboxState,
     ///  Whether this iframe should be considered private
     pub is_private: bool,
     /// Whether this iframe is a mozbrowser iframe
     pub frame_type: FrameType,
+    /// Wether this load should replace the current entry (reload). If true, the current
+    /// entry will be replaced instead of a new entry being added.
+    pub replace: bool,
+}
+
+/// Specifies the information required to load a URL in an iframe.
+#[derive(Deserialize, Serialize)]
+pub struct IFrameLoadInfoWithData {
+    /// The information required to load an iframe.
+    pub info: IFrameLoadInfo,
+    /// Load data containing the url to load
+    pub load_data: Option<LoadData>,
+    /// The old pipeline ID for this iframe, if a page was previously loaded.
+    pub old_pipeline_id: Option<PipelineId>,
+    /// Sandbox type of this iframe
+    pub sandbox: IFrameSandboxState,
 }
 
 // https://developer.mozilla.org/en-US/docs/Web/API/Using_the_Browser_API#Events
@@ -558,11 +648,17 @@ pub enum AnimationTickType {
 /// The scroll state of a stacking context.
 #[derive(Copy, Clone, Debug, Deserialize, Serialize)]
 pub struct StackingContextScrollState {
-    /// The ID of the stacking context.
-    pub stacking_context_id: StackingContextId,
+    /// The ID of the scroll root.
+    pub scroll_root_id: ScrollRootId,
     /// The scrolling offset of this stacking context.
     pub scroll_offset: Point2D<f32>,
 }
+
+/// One hardware pixel.
+///
+/// This unit corresponds to the smallest addressable element of the display hardware.
+#[derive(Copy, Clone, Debug)]
+pub enum DevicePixel {}
 
 /// Data about the window size.
 #[derive(Copy, Clone, Deserialize, Serialize, HeapSizeOf)]
@@ -576,6 +672,15 @@ pub struct WindowSizeData {
 
     /// The resolution of the window in dppx, not including any "pinch zoom" factor.
     pub device_pixel_ratio: ScaleFactor<f32, ViewportPx, DevicePixel>,
+}
+
+/// The type of window size change.
+#[derive(Deserialize, Eq, PartialEq, Serialize, Copy, Clone, HeapSizeOf)]
+pub enum WindowSizeType {
+    /// Initial load.
+    Initial,
+    /// Window resize.
+    Resize,
 }
 
 /// Messages to the constellation originating from the WebDriver server.
@@ -604,20 +709,18 @@ pub enum WebDriverCommandMsg {
 pub enum ConstellationMsg {
     /// Exit the constellation.
     Exit,
-    /// Inform the constellation of the size of the viewport.
-    FrameSize(PipelineId, Size2D<f32>),
     /// Request that the constellation send the FrameId corresponding to the document
     /// with the provided pipeline id
     GetFrame(PipelineId, IpcSender<Option<FrameId>>),
     /// Request that the constellation send the current pipeline id for the provided frame
     /// id, or for the root frame if this is None, over a provided channel.
     /// Also returns a boolean saying whether the document has finished loading or not.
-    GetPipeline(Option<FrameId>, IpcSender<Option<(PipelineId, bool)>>),
+    GetPipeline(Option<FrameId>, IpcSender<Option<PipelineId>>),
     /// Requests that the constellation inform the compositor of the title of the pipeline
     /// immediately.
     GetPipelineTitle(PipelineId),
     /// Request to load the initial page.
-    InitLoadUrl(Url),
+    InitLoadUrl(ServoUrl),
     /// Query the constellation to see if the current compositor output is stable
     IsReadyToSaveImage(HashMap<PipelineId, Epoch>),
     /// Inform the constellation of a key event.
@@ -634,8 +737,20 @@ pub enum ConstellationMsg {
     WebDriverCommand(WebDriverCommandMsg),
     /// Reload the current page.
     Reload,
-    /// A log entry, with the pipeline id and thread name
-    LogEntry(Option<PipelineId>, Option<String>, LogEntry),
+    /// A log entry, with the top-level frame id and thread name
+    LogEntry(Option<FrameId>, Option<String>, LogEntry),
+    /// Set the WebVR thread channel.
+    SetWebVRThread(IpcSender<WebVRMsg>),
+    /// Dispatch a WebVR event to the subscribed script threads.
+    WebVREvent(Vec<PipelineId>, WebVREventMsg),
+}
+
+/// Messages to the constellation originating from the WebVR thread.
+/// Used to dispatch VR Headset state events: connected, unconnected, and more.
+#[derive(Deserialize, Serialize, Clone)]
+pub enum WebVREventMsg {
+    /// Inform the constellation of a VR display event.
+    DisplayEvent(WebVRDisplayEvent)
 }
 
 /// Resources required by workerglobalscopes
@@ -657,27 +772,17 @@ pub struct WorkerGlobalScopeInit {
     pub scheduler_chan: IpcSender<TimerEventRequest>,
     /// The worker id
     pub worker_id: WorkerId,
+    /// The pipeline id
+    pub pipeline_id: PipelineId,
 }
 
 /// Common entities representing a network load origin
 #[derive(Deserialize, Serialize, Clone)]
 pub struct WorkerScriptLoadOrigin {
     /// referrer url
-    pub referrer_url: Option<Url>,
+    pub referrer_url: Option<ServoUrl>,
     /// the referrer policy which is used
     pub referrer_policy: Option<ReferrerPolicy>,
     /// the pipeline id of the entity requesting the load
-    pub pipeline_id: Option<PipelineId>
-}
-
-impl LoadOrigin for WorkerScriptLoadOrigin {
-    fn referrer_url(&self) -> Option<Url> {
-        self.referrer_url.clone()
-    }
-    fn referrer_policy(&self) -> Option<ReferrerPolicy> {
-        self.referrer_policy.clone()
-    }
-    fn pipeline_id(&self) -> Option<PipelineId> {
-        self.pipeline_id.clone()
-    }
+    pub pipeline_id: Option<PipelineId>,
 }

@@ -4,37 +4,66 @@
 
 //! Implements sequential traversal over the DOM tree.
 
-use dom::TNode;
-use traversal::{RestyleResult, DomTraversalContext};
+#![deny(missing_docs)]
 
-pub fn traverse_dom<N, C>(root: N,
-                          shared: &C::SharedContext)
-    where N: TNode,
-          C: DomTraversalContext<N>
+use context::TraversalStatistics;
+use dom::{TElement, TNode};
+use std::borrow::Borrow;
+use traversal::{DomTraversal, PerLevelTraversalData, PreTraverseToken};
+
+/// Do a sequential DOM traversal for layout or styling, generic over `D`.
+pub fn traverse_dom<E, D>(traversal: &D,
+                          root: E,
+                          token: PreTraverseToken)
+    where E: TElement,
+          D: DomTraversal<E>,
 {
-    fn doit<'a, N, C>(context: &'a C, node: N)
-        where N: TNode,
-              C: DomTraversalContext<N>
+    debug_assert!(!traversal.is_parallel());
+    debug_assert!(token.should_traverse());
+
+    fn doit<E, D>(traversal: &D, traversal_data: &mut PerLevelTraversalData,
+                  thread_local: &mut D::ThreadLocalContext, node: E::ConcreteNode)
+        where E: TElement,
+              D: DomTraversal<E>
     {
-        debug_assert!(context.should_process(node));
-        if let RestyleResult::Continue = context.process_preorder(node) {
-            for kid in node.children() {
-                context.pre_process_child_hook(node, kid);
-                if context.should_process(kid) {
-                    doit::<N, C>(context, kid);
-                }
+        traversal.process_preorder(traversal_data, thread_local, node);
+        if let Some(el) = node.as_element() {
+            if let Some(ref mut depth) = traversal_data.current_dom_depth {
+                *depth += 1;
+            }
+
+            traversal.traverse_children(thread_local, el, |tlc, kid| {
+                doit(traversal, traversal_data, tlc, kid)
+            });
+
+            if let Some(ref mut depth) = traversal_data.current_dom_depth {
+                *depth -= 1;
             }
         }
 
-        if context.needs_postorder_traversal() {
-            context.process_postorder(node);
+        if D::needs_postorder_traversal() {
+            traversal.process_postorder(thread_local, node);
         }
     }
 
-    let context = C::new(shared, root.opaque());
-    if context.should_process(root) {
-        doit::<N, C>(&context, root);
+    let mut traversal_data = PerLevelTraversalData {
+        current_dom_depth: None,
+    };
+
+    let mut tlc = traversal.create_thread_local_context();
+    if token.traverse_unstyled_children_only() {
+        for kid in root.as_node().children() {
+            if kid.as_element().map_or(false, |el| el.get_data().is_none()) {
+                doit(traversal, &mut traversal_data, &mut tlc, kid);
+            }
+        }
+    } else {
+        doit(traversal, &mut traversal_data, &mut tlc, root.as_node());
     }
-    // Clear the local LRU cache since we store stateful elements inside.
-    context.local_context().style_sharing_candidate_cache.borrow_mut().clear();
+
+    // Dump statistics to stdout if requested.
+    let tlsc = tlc.borrow();
+    if TraversalStatistics::should_dump() {
+        println!("{}", tlsc.statistics);
+    }
 }

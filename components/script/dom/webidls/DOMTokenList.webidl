@@ -3,7 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://dom.spec.whatwg.org/#domtokenlist
-[Exposed=(Window,Worker)]
 interface DOMTokenList {
   [Pure]
   readonly attribute unsigned long length;
@@ -25,4 +24,5 @@ interface DOMTokenList {
            attribute DOMString value;
 
   stringifier;
+  iterable<DOMString?>;
 };

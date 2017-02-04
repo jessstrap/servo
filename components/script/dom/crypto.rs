@@ -2,37 +2,37 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use core::nonzero::NonZero;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::CryptoBinding;
 use dom::bindings::codegen::Bindings::CryptoBinding::CryptoMethods;
-use dom::bindings::conversions::array_buffer_view_data;
 use dom::bindings::error::{Error, Fallible};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
+use dom::globalscope::GlobalScope;
 use js::jsapi::{JSContext, JSObject};
 use js::jsapi::{JS_GetArrayBufferViewType, Type};
-use rand::{OsRng, Rng};
+use servo_rand::{ServoRng, Rng};
 
-no_jsmanaged_fields!(OsRng);
+unsafe_no_jsmanaged_fields!(ServoRng);
 
 // https://developer.mozilla.org/en-US/docs/Web/API/Crypto
 #[dom_struct]
 pub struct Crypto {
     reflector_: Reflector,
     #[ignore_heap_size_of = "Defined in rand"]
-    rng: DOMRefCell<OsRng>,
+    rng: DOMRefCell<ServoRng>,
 }
 
 impl Crypto {
     fn new_inherited() -> Crypto {
         Crypto {
             reflector_: Reflector::new(),
-            rng: DOMRefCell::new(OsRng::new().unwrap()),
+            rng: DOMRefCell::new(ServoRng::new()),
         }
     }
 
-    pub fn new(global: GlobalRef) -> Root<Crypto> {
+    pub fn new(global: &GlobalScope) -> Root<Crypto> {
         reflect_dom_object(box Crypto::new_inherited(), global, CryptoBinding::Wrap)
     }
 }
@@ -40,13 +40,15 @@ impl Crypto {
 impl CryptoMethods for Crypto {
     #[allow(unsafe_code)]
     // https://dvcs.w3.org/hg/webcrypto-api/raw-file/tip/spec/Overview.html#Crypto-method-getRandomValues
-    fn GetRandomValues(&self,
+    unsafe fn GetRandomValues(&self,
                        _cx: *mut JSContext,
                        input: *mut JSObject)
-                       -> Fallible<*mut JSObject> {
-        let mut data = match unsafe { array_buffer_view_data::<u8>(input) } {
-            Some(data) => data,
-            None => {
+                       -> Fallible<NonZero<*mut JSObject>> {
+        assert!(!input.is_null());
+        typedarray!(in(_cx) let mut array_buffer_view: ArrayBufferView = input);
+        let mut data = match array_buffer_view.as_mut() {
+            Ok(x) => x.as_mut_slice(),
+            Err(_) => {
                 return Err(Error::Type("Argument to Crypto.getRandomValues is not an ArrayBufferView"
                                        .to_owned()));
             }
@@ -62,7 +64,7 @@ impl CryptoMethods for Crypto {
 
         self.rng.borrow_mut().fill_bytes(&mut data);
 
-        Ok(input)
+        Ok(NonZero::new(input))
     }
 }
 

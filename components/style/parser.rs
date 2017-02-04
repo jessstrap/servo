@@ -4,76 +4,87 @@
 
 //! The context within which CSS code is parsed.
 
+#![deny(missing_docs)]
+
 use cssparser::{Parser, SourcePosition};
 use error_reporting::ParseErrorReporter;
 #[cfg(feature = "gecko")]
-use gecko_bindings::ptr::{GeckoArcPrincipal, GeckoArcURI};
-use selector_impl::TheSelectorImpl;
-use selectors::parser::ParserContext as SelectorParserContext;
-use stylesheets::Origin;
-use url::Url;
+use gecko_bindings::sugar::refptr::{GeckoArcPrincipal, GeckoArcURI};
+use servo_url::ServoUrl;
+use style_traits::OneOrMoreCommaSeparated;
+use stylesheets::{MemoryHoleReporter, Origin};
 
+/// Extra data that the style backend may need to parse stylesheets.
 #[cfg(not(feature = "gecko"))]
 pub struct ParserContextExtraData;
 
+/// Extra data that the style backend may need to parse stylesheets.
 #[cfg(feature = "gecko")]
 pub struct ParserContextExtraData {
+    /// The base URI.
     pub base: Option<GeckoArcURI>,
+    /// The referrer URI.
     pub referrer: Option<GeckoArcURI>,
+    /// The principal that loaded this stylesheet.
     pub principal: Option<GeckoArcPrincipal>,
 }
 
-impl ParserContextExtraData {
-    #[cfg(not(feature = "gecko"))]
-    pub fn default() -> ParserContextExtraData {
+#[cfg(not(feature = "gecko"))]
+impl Default for ParserContextExtraData {
+    fn default() -> Self {
         ParserContextExtraData
     }
+}
 
-    #[cfg(feature = "gecko")]
-    pub fn default() -> ParserContextExtraData {
+#[cfg(feature = "gecko")]
+impl Default for ParserContextExtraData {
+    fn default() -> Self {
         ParserContextExtraData { base: None, referrer: None, principal: None }
     }
 }
 
+/// The data that the parser needs from outside in order to parse a stylesheet.
 pub struct ParserContext<'a> {
+    /// The `Origin` of the stylesheet, whether it's a user, author or
+    /// user-agent stylesheet.
     pub stylesheet_origin: Origin,
-    pub base_url: &'a Url,
-    pub selector_context: SelectorParserContext<TheSelectorImpl>,
+    /// The base url we're parsing this stylesheet as.
+    pub base_url: &'a ServoUrl,
+    /// An error reporter to report syntax errors.
     pub error_reporter: Box<ParseErrorReporter + Send>,
+    /// Implementation-dependent extra data.
     pub extra_data: ParserContextExtraData,
 }
 
 impl<'a> ParserContext<'a> {
-    pub fn new_with_extra_data(stylesheet_origin: Origin, base_url: &'a Url,
+    /// Create a `ParserContext` with extra data.
+    pub fn new_with_extra_data(stylesheet_origin: Origin,
+                               base_url: &'a ServoUrl,
                                error_reporter: Box<ParseErrorReporter + Send>,
                                extra_data: ParserContextExtraData)
                                -> ParserContext<'a> {
-        let mut selector_context = SelectorParserContext::new();
-        selector_context.in_user_agent_stylesheet = stylesheet_origin == Origin::UserAgent;
         ParserContext {
             stylesheet_origin: stylesheet_origin,
             base_url: base_url,
-            selector_context: selector_context,
             error_reporter: error_reporter,
             extra_data: extra_data,
         }
     }
 
-    pub fn new(stylesheet_origin: Origin, base_url: &'a Url, error_reporter: Box<ParseErrorReporter + Send>)
+    /// Create a parser context with the default extra data.
+    pub fn new(stylesheet_origin: Origin,
+               base_url: &'a ServoUrl,
+               error_reporter: Box<ParseErrorReporter + Send>)
                -> ParserContext<'a> {
         let extra_data = ParserContextExtraData::default();
-        ParserContext::new_with_extra_data(stylesheet_origin, base_url, error_reporter, extra_data)
+        Self::new_with_extra_data(stylesheet_origin, base_url, error_reporter, extra_data)
+    }
+
+    /// Create a parser context for on-the-fly parsing in CSSOM
+    pub fn new_for_cssom(base_url: &'a ServoUrl) -> ParserContext<'a> {
+        Self::new(Origin::User, base_url, Box::new(MemoryHoleReporter))
     }
 }
-
-
-impl<'a> ParserContext<'a> {
-    pub fn parse_url(&self, input: &str) -> Url {
-        self.base_url.join(input)
-            .unwrap_or_else(|_| Url::parse("about:invalid").unwrap())
-    }
-}
-
 
 /// Defaults to a no-op.
 /// Set a `RUST_LOG=style::errors` environment variable
@@ -84,8 +95,17 @@ pub fn log_css_error(input: &mut Parser, position: SourcePosition, message: &str
 
 // XXXManishearth Replace all specified value parse impls with impls of this
 // trait. This will make it easy to write more generic values in the future.
-// There may need to be two traits -- one for parsing with context, and one
-// for parsing without
-pub trait Parse {
-    fn parse(input: &mut Parser) -> Result<Self, ()> where Self: Sized;
+/// A trait to abstract parsing of a specified value given a `ParserContext` and
+/// CSS input.
+pub trait Parse : Sized {
+    /// Parse a value of this type.
+    ///
+    /// Returns an error on failure.
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ()>;
+}
+
+impl<T> Parse for Vec<T> where T: Parse + OneOrMoreCommaSeparated {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ()> {
+        input.parse_comma_separated(|input| T::parse(context, input))
+    }
 }

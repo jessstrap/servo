@@ -4,7 +4,6 @@
 
 use dom::bindings::codegen::Bindings::TouchListBinding;
 use dom::bindings::codegen::Bindings::TouchListBinding::TouchListMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::touch::Touch;
@@ -26,7 +25,7 @@ impl TouchList {
 
     pub fn new(window: &Window, touches: &[&Touch]) -> Root<TouchList> {
         reflect_dom_object(box TouchList::new_inherited(touches),
-                           GlobalRef::Window(window), TouchListBinding::Wrap)
+                           window, TouchListBinding::Wrap)
     }
 }
 
@@ -42,9 +41,7 @@ impl TouchListMethods for TouchList {
     }
 
     /// https://w3c.github.io/touch-events/#widl-TouchList-item-getter-Touch-unsigned-long-index
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<Touch>> {
-        let item = self.Item(index);
-        *found = item.is_some();
-        item
+    fn IndexedGetter(&self, index: u32) -> Option<Root<Touch>> {
+        self.Item(index)
     }
 }

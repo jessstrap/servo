@@ -73,6 +73,7 @@ pub struct TextInput<T: ClipboardProvider> {
     ///
     /// https://html.spec.whatwg.org/multipage/#attr-fe-maxlength
     pub max_length: Option<usize>,
+    pub min_length: Option<usize>,
     pub selection_direction: SelectionDirection,
 }
 
@@ -150,6 +151,7 @@ impl<T: ClipboardProvider> TextInput<T> {
     /// Instantiate a new text input control
     pub fn new(lines: Lines, initial: DOMString,
                clipboard_provider: T, max_length: Option<usize>,
+               min_length: Option<usize>,
                selection_direction: SelectionDirection) -> TextInput<T> {
         let mut i = TextInput {
             lines: vec!(),
@@ -158,6 +160,7 @@ impl<T: ClipboardProvider> TextInput<T> {
             multiline: lines == Lines::Multiple,
             clipboard_provider: clipboard_provider,
             max_length: max_length,
+            min_length: min_length,
             selection_direction: selection_direction,
         };
         i.set_content(initial);
@@ -541,7 +544,6 @@ impl<T: ClipboardProvider> TextInput<T> {
                 self.adjust_vertical(28, maybe_select);
                 KeyReaction::RedrawSelection
             }
-            (None, Key::Tab) => KeyReaction::TriggerDefaultAction,
             _ => KeyReaction::Nothing,
         }
     }

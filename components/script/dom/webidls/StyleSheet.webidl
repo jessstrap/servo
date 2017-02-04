@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://drafts.csswg.org/cssom/#the-stylesheet-interface
-[Exposed=(Window,Worker)]
+[Exposed=Window]
 interface StyleSheet {
   readonly attribute DOMString type_;
   readonly attribute DOMString? href;
@@ -13,5 +13,11 @@ interface StyleSheet {
   readonly attribute DOMString? title;
 
   // [SameObject, PutForwards=mediaText] readonly attribute MediaList media;
-  // attribute boolean disabled;
+  attribute boolean disabled;
+};
+
+// https://drafts.csswg.org/cssom/#the-linkstyle-interface
+[NoInterfaceObject]
+interface LinkStyle {
+  readonly attribute StyleSheet? sheet;
 };

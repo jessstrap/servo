@@ -6,21 +6,19 @@ use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::BlobBinding::BlobMethods;
 use dom::bindings::codegen::Bindings::URLBinding::{self, URLMethods};
 use dom::bindings::error::{Error, ErrorResult, Fallible};
-use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, MutNullableHeap, Root};
-use dom::bindings::reflector::{Reflectable, Reflector, reflect_dom_object};
+use dom::bindings::js::{MutNullableJS, Root};
+use dom::bindings::reflector::{DomObject, Reflector, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
 use dom::blob::Blob;
+use dom::globalscope::GlobalScope;
 use dom::urlhelper::UrlHelper;
 use dom::urlsearchparams::URLSearchParams;
 use ipc_channel::ipc;
+use net_traits::{CoreResourceMsg, IpcSend};
 use net_traits::blob_url_store::{get_blob_origin, parse_blob_url};
-use net_traits::filemanager_thread::{SelectedFileId, FileManagerThreadMsg};
-use net_traits::{IpcSend, CoreResourceMsg};
-use std::borrow::ToOwned;
+use net_traits::filemanager_thread::FileManagerThreadMsg;
+use servo_url::ServoUrl;
 use std::default::Default;
-use url::quirks::domain_to_unicode;
-use url::{Host, Url};
 use uuid::Uuid;
 
 // https://url.spec.whatwg.org/#url
@@ -29,14 +27,14 @@ pub struct URL {
     reflector_: Reflector,
 
     // https://url.spec.whatwg.org/#concept-url-url
-    url: DOMRefCell<Url>,
+    url: DOMRefCell<ServoUrl>,
 
     // https://url.spec.whatwg.org/#dom-url-searchparams
-    search_params: MutNullableHeap<JS<URLSearchParams>>,
+    search_params: MutNullableJS<URLSearchParams>,
 }
 
 impl URL {
-    fn new_inherited(url: Url) -> URL {
+    fn new_inherited(url: ServoUrl) -> URL {
         URL {
             reflector_: Reflector::new(),
             url: DOMRefCell::new(url),
@@ -44,24 +42,25 @@ impl URL {
         }
     }
 
-    pub fn new(global: GlobalRef, url: Url) -> Root<URL> {
+    pub fn new(global: &GlobalScope, url: ServoUrl) -> Root<URL> {
         reflect_dom_object(box URL::new_inherited(url),
                            global, URLBinding::Wrap)
     }
 
     pub fn query_pairs(&self) -> Vec<(String, String)> {
-        self.url.borrow().query_pairs().into_owned().collect()
+        self.url.borrow().as_url().unwrap().query_pairs().into_owned().collect()
     }
 
     pub fn set_query_pairs(&self, pairs: &[(String, String)]) {
-        let mut url = self.url.borrow_mut();
-        url.query_pairs_mut().clear().extend_pairs(pairs);
+        if let Some(ref mut url) = self.url.borrow_mut().as_mut_url() {
+            url.query_pairs_mut().clear().extend_pairs(pairs);
+        }
     }
 }
 
 impl URL {
     // https://url.spec.whatwg.org/#constructors
-    pub fn Constructor(global: GlobalRef, url: USVString,
+    pub fn Constructor(global: &GlobalScope, url: USVString,
                        base: Option<USVString>)
                        -> Fallible<Root<URL>> {
         let parsed_base = match base {
@@ -71,7 +70,7 @@ impl URL {
             },
             Some(base) =>
                 // Step 2.1.
-                match Url::parse(&base.0) {
+                match ServoUrl::parse(&base.0) {
                     Ok(base) => Some(base),
                     Err(error) => {
                         // Step 2.2.
@@ -80,7 +79,7 @@ impl URL {
                 }
         };
         // Step 3.
-        let parsed_url = match Url::options().base_url(parsed_base.as_ref()).parse(&url.0) {
+        let parsed_url = match ServoUrl::parse_with_base(parsed_base.as_ref(), &url.0) {
             Ok(url) => url,
             Err(error) => {
                 // Step 4.
@@ -96,42 +95,25 @@ impl URL {
         Ok(result)
     }
 
-    // https://url.spec.whatwg.org/#dom-url-domaintoasciidomain
-    pub fn DomainToASCII(_: GlobalRef, origin: USVString) -> USVString {
-        // Step 1.
-        let ascii_domain = Host::parse(&origin.0);
-        if let Ok(Host::Domain(string)) = ascii_domain {
-            // Step 3.
-            USVString(string.to_owned())
-        } else {
-            // Step 2.
-            USVString("".to_owned())
-        }
-    }
-
-    pub fn DomainToUnicode(_: GlobalRef, origin: USVString) -> USVString {
-        USVString(domain_to_unicode(&origin.0))
-    }
-
     // https://w3c.github.io/FileAPI/#dfn-createObjectURL
-    pub fn CreateObjectURL(global: GlobalRef, blob: &Blob) -> DOMString {
+    pub fn CreateObjectURL(global: &GlobalScope, blob: &Blob) -> DOMString {
         /// XXX: Second field is an unicode-serialized Origin, it is a temporary workaround
         ///      and should not be trusted. See issue https://github.com/servo/servo/issues/11722
         let origin = get_blob_origin(&global.get_url());
 
         if blob.IsClosed() {
             // Generate a dummy id
-            let id = Uuid::new_v4().simple().to_string();
+            let id = Uuid::new_v4();
             return DOMString::from(URL::unicode_serialization_blob_url(&origin, &id));
         }
 
         let id = blob.get_blob_url_id();
 
-        DOMString::from(URL::unicode_serialization_blob_url(&origin, &id.0))
+        DOMString::from(URL::unicode_serialization_blob_url(&origin, &id))
     }
 
     // https://w3c.github.io/FileAPI/#dfn-revokeObjectURL
-    pub fn RevokeObjectURL(global: GlobalRef, url: DOMString) {
+    pub fn RevokeObjectURL(global: &GlobalScope, url: DOMString) {
         /*
             If the url refers to a Blob that has a readability state of CLOSED OR
             if the value provided for the url argument is not a Blob URL, OR
@@ -143,10 +125,9 @@ impl URL {
         */
         let origin = get_blob_origin(&global.get_url());
 
-        if let Ok(url) = Url::parse(&url) {
-             if let Ok((id, _, _)) = parse_blob_url(&url) {
+        if let Ok(url) = ServoUrl::parse(&url) {
+             if let Ok((id, _)) = parse_blob_url(&url) {
                 let resource_threads = global.resource_threads();
-                let id = SelectedFileId(id.simple().to_string());
                 let (tx, rx) = ipc::channel().unwrap();
                 let msg = FileManagerThreadMsg::RevokeBlobURL(id, origin, tx);
                 let _ = resource_threads.send(CoreResourceMsg::ToFileManager(msg));
@@ -157,7 +138,7 @@ impl URL {
     }
 
     // https://w3c.github.io/FileAPI/#unicodeSerializationOfBlobURL
-    fn unicode_serialization_blob_url(origin: &str, id: &str) -> String {
+    fn unicode_serialization_blob_url(origin: &str, id: &Uuid) -> String {
         // Step 1, 2
         let mut result = "blob:".to_string();
 
@@ -168,7 +149,7 @@ impl URL {
         result.push('/');
 
         // Step 5
-        result.push_str(id);
+        result.push_str(&id.simple().to_string());
 
         result
     }
@@ -212,7 +193,7 @@ impl URLMethods for URL {
 
     // https://url.spec.whatwg.org/#dom-url-href
     fn SetHref(&self, value: USVString) -> ErrorResult {
-        match Url::parse(&value.0) {
+        match ServoUrl::parse(&value.0) {
             Ok(url) => {
                 *self.url.borrow_mut() = url;
                 self.search_params.set(None);  // To be re-initialized in the SearchParams getter.
@@ -278,13 +259,15 @@ impl URLMethods for URL {
     fn SetSearch(&self, value: USVString) {
         UrlHelper::SetSearch(&mut self.url.borrow_mut(), value);
         if let Some(search_params) = self.search_params.get() {
-            search_params.set_list(self.url.borrow().query_pairs().into_owned().collect());
+            search_params.set_list(self.query_pairs());
         }
     }
 
     // https://url.spec.whatwg.org/#dom-url-searchparams
     fn SearchParams(&self) -> Root<URLSearchParams> {
-        self.search_params.or_init(|| URLSearchParams::new(self.global().r(), Some(self)))
+        self.search_params.or_init(|| {
+            URLSearchParams::new(&self.global(), Some(self))
+        })
     }
 
     // https://url.spec.whatwg.org/#dom-url-href

@@ -7,6 +7,8 @@ use dom::bindings::inheritance::Castable;
 use dom::bindings::inheritance::ElementTypeId;
 use dom::bindings::inheritance::HTMLElementTypeId;
 use dom::bindings::inheritance::NodeTypeId;
+use dom::bindings::inheritance::SVGElementTypeId;
+use dom::bindings::inheritance::SVGGraphicsElementTypeId;
 use dom::bindings::str::DOMString;
 use dom::document::Document;
 use dom::element::{AttributeMutation, Element};
@@ -47,7 +49,8 @@ use dom::htmltemplateelement::HTMLTemplateElement;
 use dom::htmltextareaelement::HTMLTextAreaElement;
 use dom::htmltitleelement::HTMLTitleElement;
 use dom::node::{ChildrenMutation, CloneChildrenFlag, Node, UnbindContext};
-use string_cache::Atom;
+use dom::svgsvgelement::SVGSVGElement;
+use html5ever_atoms::LocalName;
 use style::attr::AttrValue;
 
 /// Trait to allow DOM nodes to opt-in to overriding (or adding to) common
@@ -68,7 +71,7 @@ pub trait VirtualMethods {
 
     /// Returns the right AttrValue variant for the attribute with name `name`
     /// on this element.
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match self.super_type() {
             Some(ref s) => s.parse_plain_attribute(name, value),
             _ => AttrValue::String(value.into()),
@@ -119,6 +122,14 @@ pub trait VirtualMethods {
                      clone_children: CloneChildrenFlag) {
         if let Some(ref s) = self.super_type() {
             s.cloning_steps(copy, maybe_doc, clone_children);
+        }
+    }
+
+    /// Called on an element when it is popped off the stack of open elements
+    /// of a parser.
+    fn pop(&self) {
+        if let Some(ref s) = self.super_type() {
+            s.pop();
         }
     }
 }
@@ -230,6 +241,11 @@ pub fn vtable_for(node: &Node) -> &VirtualMethods {
         }
         NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTitleElement)) => {
             node.downcast::<HTMLTitleElement>().unwrap() as &VirtualMethods
+        }
+        NodeTypeId::Element(ElementTypeId::SVGElement(SVGElementTypeId::SVGGraphicsElement(
+                    SVGGraphicsElementTypeId::SVGSVGElement
+                ))) => {
+            node.downcast::<SVGSVGElement>().unwrap() as &VirtualMethods
         }
         NodeTypeId::Element(ElementTypeId::Element) => {
             node.downcast::<Element>().unwrap() as &VirtualMethods

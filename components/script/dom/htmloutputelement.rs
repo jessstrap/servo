@@ -13,7 +13,7 @@ use dom::htmlformelement::{FormControl, HTMLFormElement};
 use dom::node::{Node, window_from_node};
 use dom::nodelist::NodeList;
 use dom::validitystate::ValidityState;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 
 #[dom_struct]
 pub struct HTMLOutputElement {
@@ -21,20 +21,20 @@ pub struct HTMLOutputElement {
 }
 
 impl HTMLOutputElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLOutputElement {
         HTMLOutputElement {
             htmlelement:
-                HTMLElement::new_inherited(localName, prefix, document)
+                HTMLElement::new_inherited(local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLOutputElement> {
-        Node::reflect_node(box HTMLOutputElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLOutputElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLOutputElementBinding::Wrap)
     }
@@ -44,7 +44,7 @@ impl HTMLOutputElementMethods for HTMLOutputElement {
     // https://html.spec.whatwg.org/multipage/#dom-cva-validity
     fn Validity(&self) -> Root<ValidityState> {
         let window = window_from_node(self);
-        ValidityState::new(window.r(), self.upcast())
+        ValidityState::new(&window, self.upcast())
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-fae-form

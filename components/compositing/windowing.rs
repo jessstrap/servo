@@ -5,19 +5,18 @@
 //! Abstract windowing methods. The concrete implementations of these can be found in `platform/`.
 
 use compositor_thread::{CompositorProxy, CompositorReceiver};
+use euclid::{Point2D, Size2D};
 use euclid::point::TypedPoint2D;
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::TypedSize2D;
-use euclid::{Point2D, Size2D};
-use layers::geometry::DevicePixel;
-use layers::platform::surface::NativeDisplay;
 use msg::constellation_msg::{Key, KeyModifiers, KeyState};
 use net_traits::net_error_list::NetError;
-use script_traits::{MouseButton, TouchpadPressurePhase, TouchEventType, TouchId};
+use script_traits::{DevicePixel, MouseButton, TouchEventType, TouchId, TouchpadPressurePhase};
+use servo_geometry::ScreenPx;
+use servo_url::ServoUrl;
 use std::fmt::{Debug, Error, Formatter};
 use style_traits::cursor::Cursor;
-use url::Url;
-use util::geometry::ScreenPx;
+use webrender_traits::ScrollLocation;
 
 #[derive(Clone)]
 pub enum MouseWindowEvent {
@@ -64,7 +63,7 @@ pub enum WindowEvent {
     Touch(TouchEventType, TouchId, TypedPoint2D<f32, DevicePixel>),
     /// Sent when the user scrolls. The first point is the delta and the second point is the
     /// origin.
-    Scroll(TypedPoint2D<f32, DevicePixel>, TypedPoint2D<i32, DevicePixel>, TouchEventType),
+    Scroll(ScrollLocation, TypedPoint2D<i32, DevicePixel>, TouchEventType),
     /// Sent when the user zooms.
     Zoom(f32),
     /// Simulated "pinch zoom" gesture for non-touch platforms (e.g. ctrl-scrollwheel).
@@ -120,11 +119,13 @@ pub trait WindowMethods {
     fn set_inner_size(&self, size: Size2D<u32>);
     /// Set the window position
     fn set_position(&self, point: Point2D<i32>);
+    /// Set fullscreen state
+    fn set_fullscreen_state(&self, state: bool);
 
     /// Sets the page title for the current page.
     fn set_page_title(&self, title: Option<String>);
     /// Sets the load data for the current page.
-    fn set_page_url(&self, url: Url);
+    fn set_page_url(&self, url: ServoUrl);
     /// Called when the browser chrome should display a status message.
     fn status(&self, Option<String>);
     /// Called when the browser has started loading a frame.
@@ -139,16 +140,12 @@ pub trait WindowMethods {
     /// Returns the scale factor of the system (device pixels / screen pixels).
     fn scale_factor(&self) -> ScaleFactor<f32, ScreenPx, DevicePixel>;
 
-    /// Gets the OS native graphics display for this window.
-    fn native_display(&self) -> NativeDisplay;
-
     /// Creates a channel to the compositor. The dummy parameter is needed because we don't have
     /// UFCS in Rust yet.
     ///
     /// This is part of the windowing system because its implementation often involves OS-specific
     /// magic to wake the up window's event loop.
-    fn create_compositor_channel(&self)
-                                 -> (Box<CompositorProxy + Send>, Box<CompositorReceiver>);
+    fn create_compositor_channel(&self) -> (Box<CompositorProxy + Send>, Box<CompositorReceiver>);
 
     /// Requests that the window system prepare a composite. Typically this will involve making
     /// some type of platform-specific graphics context current. Returns true if the composite may
@@ -165,5 +162,5 @@ pub trait WindowMethods {
     fn supports_clipboard(&self) -> bool;
 
     /// Add a favicon
-    fn set_favicon(&self, url: Url);
+    fn set_favicon(&self, url: ServoUrl);
 }

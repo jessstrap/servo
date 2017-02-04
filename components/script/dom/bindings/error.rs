@@ -6,21 +6,20 @@
 
 use dom::bindings::codegen::Bindings::DOMExceptionBinding::DOMExceptionMethods;
 use dom::bindings::codegen::PrototypeList::proto_id_to_name;
+use dom::bindings::conversions::{ConversionResult, FromJSValConvertible, ToJSValConvertible};
 use dom::bindings::conversions::root_from_object;
-use dom::bindings::conversions::{FromJSValConvertible, ToJSValConvertible};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::str::USVString;
 use dom::domexception::{DOMErrorName, DOMException};
+use dom::globalscope::GlobalScope;
 use js::error::{throw_range_error, throw_type_error};
 use js::jsapi::HandleObject;
-use js::jsapi::JSAutoCompartment;
 use js::jsapi::JSContext;
-use js::jsapi::JSObject;
 use js::jsapi::JS_ClearPendingException;
 use js::jsapi::JS_ErrorFromException;
 use js::jsapi::JS_GetPendingException;
 use js::jsapi::JS_IsExceptionPending;
 use js::jsapi::JS_SetPendingException;
+use js::jsapi::MutableHandleValue;
 use js::jsval::UndefinedValue;
 use libc::c_uint;
 use std::slice::from_raw_parts;
@@ -88,7 +87,7 @@ pub type Fallible<T> = Result<T, Error>;
 pub type ErrorResult = Fallible<()>;
 
 /// Set a pending exception for the given `result` on `cx`.
-pub unsafe fn throw_dom_exception(cx: *mut JSContext, global: GlobalRef, result: Error) {
+pub unsafe fn throw_dom_exception(cx: *mut JSContext, global: &GlobalScope, result: Error) {
     let code = match result {
         Error::IndexSize => DOMErrorName::IndexSizeError,
         Error::NotFound => DOMErrorName::NotFoundError,
@@ -134,11 +133,16 @@ pub unsafe fn throw_dom_exception(cx: *mut JSContext, global: GlobalRef, result:
     JS_SetPendingException(cx, thrown.handle());
 }
 
-struct ErrorInfo {
-    filename: String,
-    message: String,
-    lineno: c_uint,
-    column: c_uint,
+/// A struct encapsulating information about a runtime script error.
+pub struct ErrorInfo {
+    /// The error message.
+    pub message: String,
+    /// The file name.
+    pub filename: String,
+    /// The line number.
+    pub lineno: c_uint,
+    /// The column number.
+    pub column: c_uint,
 }
 
 impl ErrorInfo {
@@ -194,41 +198,57 @@ impl ErrorInfo {
 }
 
 /// Report a pending exception, thereby clearing it.
-pub unsafe fn report_pending_exception(cx: *mut JSContext, obj: *mut JSObject) {
-    if JS_IsExceptionPending(cx) {
-        let _ac = JSAutoCompartment::new(cx, obj);
-        rooted!(in(cx) let mut value = UndefinedValue());
-        if !JS_GetPendingException(cx, value.handle_mut()) {
-            JS_ClearPendingException(cx);
-            error!("Uncaught exception: JS_GetPendingException failed");
-            return;
-        }
+///
+/// The `dispatch_event` argument is temporary and non-standard; passing false
+/// prevents dispatching the `error` event.
+pub unsafe fn report_pending_exception(cx: *mut JSContext, dispatch_event: bool) {
+    if !JS_IsExceptionPending(cx) { return; }
 
+    rooted!(in(cx) let mut value = UndefinedValue());
+    if !JS_GetPendingException(cx, value.handle_mut()) {
         JS_ClearPendingException(cx);
-        if !value.is_object() {
-            match USVString::from_jsval(cx, value.handle(), ()) {
-                Ok(USVString(string)) => error!("Uncaught exception: {}", string),
-                Err(_) => error!("Uncaught exception: failed to stringify primitive"),
-            }
-            return;
-        }
+        error!("Uncaught exception: JS_GetPendingException failed");
+        return;
+    }
 
+    JS_ClearPendingException(cx);
+    let error_info = if value.is_object() {
         rooted!(in(cx) let object = value.to_object());
-        let error_info = ErrorInfo::from_native_error(cx, object.handle())
-            .or_else(|| ErrorInfo::from_dom_exception(object.handle()));
-        let error_info = match error_info {
-            Some(error_info) => error_info,
-            None => {
-                error!("Uncaught exception: failed to extract information");
-                return;
-            }
-        };
+        ErrorInfo::from_native_error(cx, object.handle())
+            .or_else(|| ErrorInfo::from_dom_exception(object.handle()))
+            .unwrap_or_else(|| {
+                ErrorInfo {
+                    message: format!("uncaught exception: unknown (can't convert to string)"),
+                    filename: String::new(),
+                    lineno: 0,
+                    column: 0,
+                }
+            })
+    } else {
+        match USVString::from_jsval(cx, value.handle(), ()) {
+            Ok(ConversionResult::Success(USVString(string))) => {
+                ErrorInfo {
+                    message: format!("uncaught exception: {}", string),
+                    filename: String::new(),
+                    lineno: 0,
+                    column: 0,
+                }
+            },
+            _ => {
+                panic!("Uncaught exception: failed to stringify primitive");
+            },
+        }
+    };
 
-        error!("Error at {}:{}:{} {}",
-               error_info.filename,
-               error_info.lineno,
-               error_info.column,
-               error_info.message);
+    error!("Error at {}:{}:{} {}",
+           error_info.filename,
+           error_info.lineno,
+           error_info.column,
+           error_info.message);
+
+    if dispatch_event {
+        GlobalScope::from_context(cx)
+            .report_an_error(error_info, value.handle());
     }
 }
 
@@ -247,4 +267,15 @@ pub unsafe fn throw_invalid_this(cx: *mut JSContext, proto_id: u16) {
     let error = format!("\"this\" object does not implement interface {}.",
                         proto_id_to_name(proto_id));
     throw_type_error(cx, &error);
+}
+
+impl Error {
+    /// Convert this error value to a JS value, consuming it in the process.
+    pub unsafe fn to_jsval(self, cx: *mut JSContext, global: &GlobalScope, rval: MutableHandleValue) {
+        assert!(!JS_IsExceptionPending(cx));
+        throw_dom_exception(cx, global, self);
+        assert!(JS_IsExceptionPending(cx));
+        assert!(JS_GetPendingException(cx, rval));
+        JS_ClearPendingException(cx);
+    }
 }

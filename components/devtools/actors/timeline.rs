@@ -5,9 +5,9 @@
 use actor::{Actor, ActorMessageStatus, ActorRegistry};
 use actors::framerate::FramerateActor;
 use actors::memory::{MemoryActor, TimelineMemoryReply};
+use devtools_traits::{PreciseTime, TimelineMarker, TimelineMarkerType};
 use devtools_traits::DevtoolScriptControlMsg;
 use devtools_traits::DevtoolScriptControlMsg::{DropTimelineMarkers, SetTimelineMarkers};
-use devtools_traits::{PreciseTime, TimelineMarker, TimelineMarkerType};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use msg::constellation_msg::PipelineId;
 use protocol::JsonPacketStream;
@@ -19,7 +19,6 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use util::thread::spawn_named;
 
 pub struct TimelineActor {
     name: String,
@@ -143,28 +142,28 @@ impl TimelineActor {
         }
     }
 
-    fn pull_timeline_data(&self, receiver: IpcReceiver<TimelineMarker>, mut emitter: Emitter) {
+    fn pull_timeline_data(&self, receiver: IpcReceiver<Option<TimelineMarker>>, mut emitter: Emitter) {
         let is_recording = self.is_recording.clone();
 
         if !*is_recording.lock().unwrap() {
             return;
         }
 
-        spawn_named("PullTimelineMarkers".to_owned(), move || {
+        thread::Builder::new().name("PullTimelineMarkers".to_owned()).spawn(move || {
             loop {
                 if !*is_recording.lock().unwrap() {
                     break;
                 }
 
                 let mut markers = vec![];
-                while let Ok(marker) = receiver.try_recv() {
+                while let Ok(Some(marker)) = receiver.try_recv() {
                     markers.push(emitter.marker(marker));
                 }
                 emitter.send(markers);
 
                 thread::sleep(Duration::from_millis(DEFAULT_TIMELINE_DATA_PULL_TIMEOUT));
             }
-        });
+        }).expect("Thread spawning failed");
     }
 }
 
@@ -182,7 +181,7 @@ impl Actor for TimelineActor {
             "start" => {
                 **self.is_recording.lock().as_mut().unwrap() = true;
 
-                let (tx, rx) = ipc::channel::<TimelineMarker>().unwrap();
+                let (tx, rx) = ipc::channel::<Option<TimelineMarker>>().unwrap();
                 self.script_sender.send(SetTimelineMarkers(self.pipeline,
                                                            self.marker_types.clone(),
                                                            tx)).unwrap();

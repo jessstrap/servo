@@ -2,15 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#![feature(as_unsafe_cell)]
-#![feature(borrow_state)]
 #![feature(box_syntax)]
 #![feature(conservative_impl_trait)]
 #![feature(const_fn)]
 #![feature(core_intrinsics)]
-#![feature(custom_attribute)]
-#![feature(custom_derive)]
-#![feature(fnbox)]
+#![feature(field_init_shorthand)]
+#![feature(more_struct_aliases)]
 #![feature(mpsc_select)]
 #![feature(nonzero)]
 #![feature(on_unimplemented)]
@@ -18,23 +15,24 @@
 #![feature(plugin)]
 #![feature(slice_patterns)]
 #![feature(stmt_expr_attributes)]
-#![feature(question_mark)]
 #![feature(try_from)]
+#![feature(untagged_unions)]
 
 #![deny(unsafe_code)]
 #![allow(non_snake_case)]
 
 #![doc = "The script crate contains all matters DOM."]
 
-#![plugin(heapsize_plugin)]
-#![plugin(phf_macros)]
 #![plugin(plugins)]
 
 extern crate angle;
 extern crate app_units;
-#[allow(unused_extern_crates)]
+extern crate atomic_refcell;
+extern crate audio_video_metadata;
 #[macro_use]
 extern crate bitflags;
+extern crate bluetooth_traits;
+extern crate byteorder;
 extern crate canvas_traits;
 extern crate caseless;
 extern crate cookie as cookie_rs;
@@ -47,13 +45,18 @@ extern crate euclid;
 extern crate fnv;
 extern crate gfx_traits;
 extern crate heapsize;
+#[macro_use] extern crate heapsize_derive;
 extern crate html5ever;
+#[macro_use] extern crate html5ever_atoms;
+#[macro_use]
 extern crate hyper;
 extern crate hyper_serde;
 extern crate image;
 extern crate ipc_channel;
 #[macro_use]
 extern crate js;
+#[macro_use]
+extern crate jstraceable_derive;
 extern crate libc;
 #[macro_use]
 extern crate log;
@@ -65,10 +68,10 @@ extern crate net_traits;
 extern crate num_traits;
 extern crate offscreen_gl_context;
 extern crate open;
+extern crate parking_lot;
 extern crate phf;
 #[macro_use]
 extern crate profile_traits;
-extern crate rand;
 extern crate range;
 extern crate ref_filter_map;
 extern crate ref_slice;
@@ -78,48 +81,54 @@ extern crate script_layout_interface;
 extern crate script_traits;
 extern crate selectors;
 extern crate serde;
+#[macro_use] extern crate servo_atoms;
+extern crate servo_config;
+extern crate servo_geometry;
+extern crate servo_rand;
+extern crate servo_url;
 extern crate smallvec;
-#[macro_use(atom, ns)] extern crate string_cache;
 #[macro_use]
 extern crate style;
+extern crate style_traits;
 extern crate time;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 extern crate tinyfiledialogs;
 extern crate url;
-#[macro_use]
-extern crate util;
 extern crate uuid;
 extern crate webrender_traits;
 extern crate websocket;
+extern crate webvr_traits;
 extern crate xml5ever;
 
-pub mod bluetooth_blacklist;
+mod body;
 pub mod clipboard_provider;
 mod devtools;
 pub mod document_loader;
 #[macro_use]
-pub mod dom;
+mod dom;
+pub mod fetch;
 pub mod layout_wrapper;
 mod mem;
+mod microtask;
 mod network_listener;
 pub mod origin;
-pub mod parse;
 pub mod script_runtime;
 #[allow(unsafe_code)]
 pub mod script_thread;
 mod serviceworker_manager;
+mod serviceworkerjob;
+mod stylesheet_loader;
 mod task_source;
+pub mod test;
 pub mod textinput;
 mod timers;
 mod unpremultiplytable;
 mod webdriver_handlers;
 
 use dom::bindings::codegen::RegisterBindings;
-use js::jsapi::{Handle, JSContext, JSObject, SetDOMProxyInformation};
+use dom::bindings::proxyhandler;
 use script_traits::SWManagerSenders;
 use serviceworker_manager::ServiceWorkerManager;
-use std::ptr;
-use util::opts;
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
@@ -162,28 +171,20 @@ fn perform_platform_specific_initialization() {
 #[cfg(not(target_os = "linux"))]
 fn perform_platform_specific_initialization() {}
 
-#[allow(unsafe_code)]
-pub fn init(sw_senders: SWManagerSenders) {
-    unsafe {
-        SetDOMProxyInformation(ptr::null(), 0, Some(script_thread::shadow_check_callback));
-    }
-
+pub fn init_service_workers(sw_senders: SWManagerSenders) {
     // Spawn the service worker manager passing the constellation sender
     ServiceWorkerManager::spawn_manager(sw_senders);
-
-    // Create the global vtables used by the (generated) DOM
-    // bindings to implement JS proxies.
-    RegisterBindings::RegisterProxyHandlers();
-
-    perform_platform_specific_initialization();
 }
 
-/// FIXME(pcwalton): Currently WebRender cannot handle DOM-initiated scrolls. Remove this when it
-/// can. See PR #11680 for details.
-///
-/// This function is only marked `unsafe` because the `[Func=foo]` WebIDL attribute requires it. It
-/// shouldn't actually do anything unsafe.
 #[allow(unsafe_code)]
-pub unsafe fn script_can_initiate_scroll(_: *mut JSContext, _: Handle<*mut JSObject>) -> bool {
-    !opts::get().use_webrender
+pub fn init() {
+    unsafe {
+        proxyhandler::init();
+
+        // Create the global vtables used by the (generated) DOM
+        // bindings to implement JS proxies.
+        RegisterBindings::RegisterProxyHandlers();
+    }
+
+    perform_platform_specific_initialization();
 }

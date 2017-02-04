@@ -6,10 +6,9 @@
 //[NamedConstructor=Option(optional DOMString text = "", optional DOMString value,
 //                         optional boolean defaultSelected = false,
 //                         optional boolean selected = false)]
-[Exposed=(Window,Worker)]
 interface HTMLOptionElement : HTMLElement {
              attribute boolean disabled;
-  //readonly attribute HTMLFormElement? form;
+             readonly attribute HTMLFormElement? form;
              attribute DOMString label;
              attribute boolean defaultSelected;
              attribute boolean selected;

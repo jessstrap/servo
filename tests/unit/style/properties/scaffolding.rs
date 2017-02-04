@@ -21,6 +21,7 @@ fn properties_list_json() {
         .arg(&script)
         .arg("servo")
         .arg("html")
+        .arg("regular")
         .status()
         .unwrap();
     assert!(status.success());
@@ -32,6 +33,10 @@ fn properties_list_json() {
 
 #[cfg(windows)]
 fn find_python() -> String {
+    if Command::new("python2.7.exe").arg("--version").output().is_ok() {
+        return "python2.7.exe".to_owned();
+    }
+
     if Command::new("python27.exe").arg("--version").output().is_ok() {
         return "python27.exe".to_owned();
     }

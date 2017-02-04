@@ -2,7 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use body::{BodyOperations, BodyType, consume_body};
 use dom::bindings::cell::DOMRefCell;
+use dom::bindings::codegen::Bindings::HeadersBinding::{HeadersInit, HeadersMethods};
 use dom::bindings::codegen::Bindings::RequestBinding;
 use dom::bindings::codegen::Bindings::RequestBinding::ReferrerPolicy;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestCache;
@@ -14,39 +16,44 @@ use dom::bindings::codegen::Bindings::RequestBinding::RequestMethods;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestMode;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestRedirect;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestType;
-use dom::bindings::codegen::UnionTypes::HeadersOrByteStringSequenceSequence;
 use dom::bindings::error::{Error, Fallible};
-use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, MutNullableHeap, Root};
-use dom::bindings::reflector::{Reflectable, Reflector, reflect_dom_object};
-use dom::bindings::str::{ByteString, USVString, DOMString};
-use dom::headers::{Headers, Guard};
-use hyper;
-use msg::constellation_msg::{ReferrerPolicy as MsgReferrerPolicy};
+use dom::bindings::js::{MutNullableJS, Root};
+use dom::bindings::reflector::{DomObject, Reflector, reflect_dom_object};
+use dom::bindings::str::{ByteString, DOMString, USVString};
+use dom::globalscope::GlobalScope;
+use dom::headers::{Guard, Headers};
+use dom::promise::Promise;
+use dom::xmlhttprequest::Extractable;
+use hyper::method::Method as HttpMethod;
+use net_traits::ReferrerPolicy as MsgReferrerPolicy;
+use net_traits::request::{Origin, Window};
 use net_traits::request::CacheMode as NetTraitsRequestCache;
 use net_traits::request::CredentialsMode as NetTraitsRequestCredentials;
 use net_traits::request::Destination as NetTraitsRequestDestination;
 use net_traits::request::RedirectMode as NetTraitsRequestRedirect;
-use net_traits::request::Referer as NetTraitsRequestReferer;
+use net_traits::request::Referrer as NetTraitsRequestReferrer;
 use net_traits::request::Request as NetTraitsRequest;
 use net_traits::request::RequestMode as NetTraitsRequestMode;
 use net_traits::request::Type as NetTraitsRequestType;
-use net_traits::request::{Origin, Window};
-use std::cell::Cell;
-use url::Url;
+use servo_url::ServoUrl;
+use std::ascii::AsciiExt;
+use std::cell::{Cell, Ref};
+use std::rc::Rc;
 
 #[dom_struct]
 pub struct Request {
     reflector_: Reflector,
     request: DOMRefCell<NetTraitsRequest>,
     body_used: Cell<bool>,
-    headers: MutNullableHeap<JS<Headers>>,
+    headers: MutNullableJS<Headers>,
     mime_type: DOMRefCell<Vec<u8>>,
+    #[ignore_heap_size_of = "Rc"]
+    body_promise: DOMRefCell<Option<(Rc<Promise>, BodyType)>>,
 }
 
 impl Request {
-    fn new_inherited(global: GlobalRef,
-                     url: Url,
+    fn new_inherited(global: &GlobalScope,
+                     url: ServoUrl,
                      is_service_worker_global_scope: bool) -> Request {
         Request {
             reflector_: Reflector::new(),
@@ -57,11 +64,12 @@ impl Request {
             body_used: Cell::new(false),
             headers: Default::default(),
             mime_type: DOMRefCell::new("".to_string().into_bytes()),
+            body_promise: DOMRefCell::new(None),
         }
     }
 
-    pub fn new(global: GlobalRef,
-               url: Url,
+    pub fn new(global: &GlobalScope,
+               url: ServoUrl,
                is_service_worker_global_scope: bool) -> Root<Request> {
         reflect_dom_object(box Request::new_inherited(global,
                                                       url,
@@ -70,7 +78,7 @@ impl Request {
     }
 
     // https://fetch.spec.whatwg.org/#dom-request
-    pub fn Constructor(global: GlobalRef,
+    pub fn Constructor(global: &GlobalScope,
                        input: RequestInfo,
                        init: &RequestInit)
                        -> Fallible<Root<Request>> {
@@ -84,8 +92,7 @@ impl Request {
         let mut fallback_credentials: Option<NetTraitsRequestCredentials> = None;
 
         // Step 4
-        // TODO: `entry settings object` is not implemented in Servo yet.
-        let base_url = global.get_url();
+        let base_url = global.api_base_url();
 
         match input {
             // Step 5
@@ -106,7 +113,7 @@ impl Request {
                                                             url,
                                                             false);
                 // Step 5.5
-                fallback_mode = Some(NetTraitsRequestMode::CORSMode);
+                fallback_mode = Some(NetTraitsRequestMode::CorsMode);
                 // Step 5.6
                 fallback_credentials = Some(NetTraitsRequestCredentials::Omit);
             }
@@ -123,7 +130,7 @@ impl Request {
 
         // Step 7
         // TODO: `entry settings object` is not implemented yet.
-        let origin = global.get_url().origin();
+        let origin = base_url.origin();
 
         // Step 8
         let mut window = Window::Client;
@@ -153,8 +160,7 @@ impl Request {
         // TODO: `entry settings object` is not implemented in Servo yet.
         *request.origin.borrow_mut() = Origin::Client;
         request.omit_origin_header = temporary_request.omit_origin_header;
-        request.same_origin_data.set(true);
-        request.referer = temporary_request.referer;
+        request.referrer = temporary_request.referrer;
         request.referrer_policy = temporary_request.referrer_policy;
         request.mode = temporary_request.mode;
         request.credentials_mode = temporary_request.credentials_mode;
@@ -182,7 +188,7 @@ impl Request {
                 // Step 13.2
                 request.omit_origin_header.set(false);
                 // Step 13.3
-                *request.referer.borrow_mut() = NetTraitsRequestReferer::Client;
+                *request.referrer.borrow_mut() = NetTraitsRequestReferrer::Client;
                 // Step 13.4
                 request.referrer_policy.set(None);
             }
@@ -193,7 +199,7 @@ impl Request {
             let ref referrer = init_referrer.0;
             // Step 14.2
             if referrer.is_empty() {
-                *request.referer.borrow_mut() = NetTraitsRequestReferer::NoReferer;
+                *request.referrer.borrow_mut() = NetTraitsRequestReferrer::NoReferrer;
             } else {
                 // Step 14.3
                 let parsed_referrer = base_url.join(referrer);
@@ -207,7 +213,7 @@ impl Request {
                     if parsed_referrer.cannot_be_a_base() &&
                         parsed_referrer.scheme() == "about" &&
                         parsed_referrer.path() == "client" {
-                            *request.referer.borrow_mut() = NetTraitsRequestReferer::Client;
+                            *request.referrer.borrow_mut() = NetTraitsRequestReferrer::Client;
                         } else {
                             // Step 14.6
                             if parsed_referrer.origin() != origin {
@@ -215,7 +221,7 @@ impl Request {
                                     "RequestInit's referrer has invalid origin".to_string()));
                             }
                             // Step 14.7
-                            *request.referer.borrow_mut() = NetTraitsRequestReferer::RefererUrl(parsed_referrer);
+                            *request.referrer.borrow_mut() = NetTraitsRequestReferrer::ReferrerUrl(parsed_referrer);
                         }
                 }
             }
@@ -284,44 +290,51 @@ impl Request {
                 return Err(Error::Type("Method is forbidden".to_string()));
             }
             // Step 25.2
-            let method_lower = init_method.to_lower();
-            let method_string = match method_lower.as_str() {
-                Some(s) => s,
+            let method = match init_method.as_str() {
+                Some(s) => normalize_method(s),
                 None => return Err(Error::Type("Method is not a valid UTF8".to_string())),
             };
-            let normalized_method = normalize_method(method_string);
             // Step 25.3
-            let hyper_method = normalized_method_to_typed_method(&normalized_method);
-            *request.method.borrow_mut() = hyper_method;
+            *request.method.borrow_mut() = method;
         }
 
         // Step 26
         let r = Request::from_net_request(global,
                                           false,
                                           request);
-        r.headers.or_init(|| Headers::for_request(r.global().r()));
+        r.headers.or_init(|| Headers::for_request(&r.global()));
 
         // Step 27
         let mut headers_copy = r.Headers();
 
-        // This is equivalent to the specification's concept of
-        // "associated headers list".
-        if let RequestInfo::Request(ref input_request) = input {
-            headers_copy = input_request.Headers();
-        }
-
         // Step 28
         if let Some(possible_header) = init.headers.as_ref() {
-            if let &HeadersOrByteStringSequenceSequence::Headers(ref init_headers) = possible_header {
-                headers_copy = init_headers.clone();
+            match possible_header {
+                &HeadersInit::Headers(ref init_headers) => {
+                    headers_copy = init_headers.clone();
+                }
+                &HeadersInit::ByteStringSequenceSequence(ref init_sequence) => {
+                    try!(headers_copy.fill(Some(
+                        HeadersInit::ByteStringSequenceSequence(init_sequence.clone()))));
+                },
+                &HeadersInit::ByteStringMozMap(ref init_map) => {
+                    try!(headers_copy.fill(Some(
+                        HeadersInit::ByteStringMozMap(init_map.clone()))));
+                },
             }
         }
 
         // Step 29
-        r.Headers().empty_header_list();
+        // We cannot empty `r.Headers().header_list` because
+        // we would undo the Step 27 above.  One alternative is to set
+        // `headers_copy` as a deep copy of `r.Headers()`. However,
+        // `r.Headers()` is a `Root<T>`, and therefore it is difficult
+        // to obtain a mutable reference to `r.Headers()`. Without the
+        // mutable reference, we cannot mutate `r.Headers()` to be the
+        // deep copied headers in Step 27.
 
         // Step 30
-        if r.request.borrow().mode == NetTraitsRequestMode::NoCORS {
+        if r.request.borrow().mode == NetTraitsRequestMode::NoCors {
             let borrowed_request = r.request.borrow();
             // Step 30.1
             if !is_cors_safelisted_method(&borrowed_request.method.borrow()) {
@@ -337,10 +350,22 @@ impl Request {
         }
 
         // Step 31
-        try!(r.Headers().fill(Some(HeadersOrByteStringSequenceSequence::Headers(headers_copy))));
+        match init.headers {
+            None => {
+                // This is equivalent to the specification's concept of
+                // "associated headers list". If an init headers is not given,
+                // but an input with headers is given, set request's
+                // headers as the input's Headers.
+                if let RequestInfo::Request(ref input_request) = input {
+                    try!(r.Headers().fill(Some(HeadersInit::Headers(input_request.Headers()))));
+                }
+            },
+            Some(HeadersInit::Headers(_)) => try!(r.Headers().fill(Some(HeadersInit::Headers(headers_copy)))),
+            _ => {},
+        }
 
         // Step 32
-        let input_body = if let RequestInfo::Request(ref input_request) = input {
+        let mut input_body = if let RequestInfo::Request(ref input_request) = input {
             let input_request_request = input_request.request.borrow();
             let body = input_request_request.body.borrow();
             body.clone()
@@ -354,9 +379,9 @@ impl Request {
                 let req = r.request.borrow();
                 let req_method = req.method.borrow();
                 match &*req_method {
-                    &hyper::method::Method::Get => return Err(Error::Type(
+                    &HttpMethod::Get => return Err(Error::Type(
                         "Init's body is non-null, and request method is GET".to_string())),
-                    &hyper::method::Method::Head => return Err(Error::Type(
+                    &HttpMethod::Head => return Err(Error::Type(
                         "Init's body is non-null, and request method is HEAD".to_string())),
                     _ => {},
                 }
@@ -364,7 +389,20 @@ impl Request {
         }
 
         // Step 34
-        // TODO: `ReadableStream` object is not implemented in Servo yet.
+        if let Some(Some(ref init_body)) = init.body {
+            // Step 34.2
+            let extracted_body_tmp = init_body.extract();
+            input_body = Some(extracted_body_tmp.0);
+            let content_type = extracted_body_tmp.1;
+
+            // Step 34.3
+            if let Some(contents) = content_type {
+                if !r.Headers().Has(ByteString::new(b"Content-Type".to_vec())).unwrap() {
+                    try!(r.Headers().Append(ByteString::new(b"Content-Type".to_vec()),
+                                            ByteString::new(contents.as_bytes().to_vec())));
+                }
+            }
+        }
 
         // Step 35
         {
@@ -382,10 +420,17 @@ impl Request {
         // Step 38
         Ok(r)
     }
+
+    // https://fetch.spec.whatwg.org/#concept-body-locked
+    fn locked(&self) -> bool {
+        // TODO: ReadableStream is unimplemented. Just return false
+        // for now.
+        false
+    }
 }
 
 impl Request {
-    fn from_net_request(global: GlobalRef,
+    fn from_net_request(global: &GlobalScope,
                         is_service_worker_global_scope: bool,
                         net_request: NetTraitsRequest) -> Root<Request> {
         let r = Request::new(global,
@@ -395,18 +440,14 @@ impl Request {
         r
     }
 
-    fn clone_from(r: &Request) -> Root<Request> {
+    fn clone_from(r: &Request) -> Fallible<Root<Request>> {
         let req = r.request.borrow();
         let url = req.url();
         let is_service_worker_global_scope = req.is_service_worker_global_scope;
         let body_used = r.body_used.get();
         let mime_type = r.mime_type.borrow().clone();
         let headers_guard = r.Headers().get_guard();
-        let r_clone = reflect_dom_object(
-            box Request::new_inherited(r.global().r(),
-                                       url,
-                                       is_service_worker_global_scope),
-            r.global().r(), RequestBinding::Wrap);
+        let r_clone = Request::new(&r.global(), url, is_service_worker_global_scope);
         r_clone.request.borrow_mut().pipeline_id.set(req.pipeline_id.get());
         {
             let mut borrowed_r_request = r_clone.request.borrow_mut();
@@ -415,44 +456,37 @@ impl Request {
         *r_clone.request.borrow_mut() = req.clone();
         r_clone.body_used.set(body_used);
         *r_clone.mime_type.borrow_mut() = mime_type;
+        try!(r_clone.Headers().fill(Some(HeadersInit::Headers(r.Headers()))));
         r_clone.Headers().set_guard(headers_guard);
-        r_clone
+        Ok(r_clone)
+    }
+
+    pub fn get_request(&self) -> NetTraitsRequest {
+        self.request.borrow().clone()
     }
 }
 
-fn net_request_from_global(global: GlobalRef,
-                           url: Url,
+fn net_request_from_global(global: &GlobalScope,
+                           url: ServoUrl,
                            is_service_worker_global_scope: bool) -> NetTraitsRequest {
     let origin = Origin::Origin(global.get_url().origin());
-    let pipeline_id = global.pipeline();
+    let pipeline_id = global.pipeline_id();
     NetTraitsRequest::new(url,
                           Some(origin),
                           is_service_worker_global_scope,
                           Some(pipeline_id))
 }
 
-fn normalized_method_to_typed_method(m: &str) -> hyper::method::Method {
-    match m {
-        "DELETE" => hyper::method::Method::Delete,
-        "GET" => hyper::method::Method::Get,
-        "HEAD" => hyper::method::Method::Head,
-        "OPTIONS" => hyper::method::Method::Options,
-        "POST" => hyper::method::Method::Post,
-        "PUT" => hyper::method::Method::Put,
-        a => hyper::method::Method::Extension(a.to_string())
-    }
-}
-
 // https://fetch.spec.whatwg.org/#concept-method-normalize
-fn normalize_method(m: &str) -> String {
+fn normalize_method(m: &str) -> HttpMethod {
     match m {
-        "delete" => "DELETE".to_string(),
-        "get" => "GET".to_string(),
-        "head" => "HEAD".to_string(),
-        "options" => "OPTIONS".to_string(),
-        "post" => "POST".to_string(),
-        "put" => "PUT".to_string(),
-        a => a.to_string(),
+        m if m.eq_ignore_ascii_case("DELETE") => HttpMethod::Delete,
+        m if m.eq_ignore_ascii_case("GET") => HttpMethod::Get,
+        m if m.eq_ignore_ascii_case("HEAD") => HttpMethod::Head,
+        m if m.eq_ignore_ascii_case("OPTIONS") => HttpMethod::Options,
+        m if m.eq_ignore_ascii_case("POST") => HttpMethod::Post,
+        m if m.eq_ignore_ascii_case("PUT") => HttpMethod::Put,
+        m => HttpMethod::Extension(m.to_string()),
     }
 }
 
@@ -482,14 +516,14 @@ fn is_forbidden_method(m: &ByteString) -> bool {
 }
 
 // https://fetch.spec.whatwg.org/#cors-safelisted-method
-fn is_cors_safelisted_method(m: &hyper::method::Method) -> bool {
-    m == &hyper::method::Method::Get ||
-        m == &hyper::method::Method::Head ||
-        m == &hyper::method::Method::Post
+fn is_cors_safelisted_method(m: &HttpMethod) -> bool {
+    m == &HttpMethod::Get ||
+        m == &HttpMethod::Head ||
+        m == &HttpMethod::Post
 }
 
 // https://url.spec.whatwg.org/#include-credentials
-fn includes_credentials(input: &Url) -> bool {
+fn includes_credentials(input: &ServoUrl) -> bool {
     !input.username().is_empty() || input.password().is_some()
 }
 
@@ -522,7 +556,7 @@ impl RequestMethods for Request {
 
     // https://fetch.spec.whatwg.org/#dom-request-headers
     fn Headers(&self) -> Root<Headers> {
-        self.headers.or_init(|| Headers::new(self.global().r()))
+        self.headers.or_init(|| Headers::new(&self.global()))
     }
 
     // https://fetch.spec.whatwg.org/#dom-request-type
@@ -538,11 +572,11 @@ impl RequestMethods for Request {
     // https://fetch.spec.whatwg.org/#dom-request-referrer
     fn Referrer(&self) -> USVString {
         let r = self.request.borrow();
-        let referrer = r.referer.borrow();
+        let referrer = r.referrer.borrow();
         USVString(match &*referrer {
-            &NetTraitsRequestReferer::NoReferer => String::from("no-referrer"),
-            &NetTraitsRequestReferer::Client => String::from("client"),
-            &NetTraitsRequestReferer::RefererUrl(ref u) => {
+            &NetTraitsRequestReferrer::NoReferrer => String::from("no-referrer"),
+            &NetTraitsRequestReferrer::Client => String::from("client"),
+            &NetTraitsRequestReferrer::ReferrerUrl(ref u) => {
                 let u_c = u.clone();
                 u_c.into_string()
             }
@@ -600,7 +634,57 @@ impl RequestMethods for Request {
         }
 
         // Step 2
-        Ok(Request::clone_from(self))
+        Request::clone_from(self)
+    }
+
+    #[allow(unrooted_must_root)]
+    // https://fetch.spec.whatwg.org/#dom-body-text
+    fn Text(&self) -> Rc<Promise> {
+        consume_body(self, BodyType::Text)
+    }
+
+    #[allow(unrooted_must_root)]
+    // https://fetch.spec.whatwg.org/#dom-body-blob
+    fn Blob(&self) -> Rc<Promise> {
+        consume_body(self, BodyType::Blob)
+    }
+
+    #[allow(unrooted_must_root)]
+    // https://fetch.spec.whatwg.org/#dom-body-formdata
+    fn FormData(&self) -> Rc<Promise> {
+        consume_body(self, BodyType::FormData)
+    }
+
+    #[allow(unrooted_must_root)]
+    // https://fetch.spec.whatwg.org/#dom-body-json
+    fn Json(&self) -> Rc<Promise> {
+        consume_body(self, BodyType::Json)
+    }
+}
+
+impl BodyOperations for Request {
+    fn get_body_used(&self) -> bool {
+        self.BodyUsed()
+    }
+
+    fn set_body_promise(&self, p: &Rc<Promise>, body_type: BodyType) {
+        assert!(self.body_promise.borrow().is_none());
+        self.body_used.set(true);
+        *self.body_promise.borrow_mut() = Some((p.clone(), body_type));
+    }
+
+    fn is_locked(&self) -> bool {
+        self.locked()
+    }
+
+    fn take_body(&self) -> Option<Vec<u8>> {
+        let request = self.request.borrow_mut();
+        let body = request.body.borrow_mut().take();
+        Some(body.unwrap_or(vec![]))
+    }
+
+    fn get_mime_type(&self) -> Ref<Vec<u8>> {
+        self.mime_type.borrow()
     }
 }
 
@@ -729,8 +813,8 @@ impl Into<NetTraitsRequestMode> for RequestMode {
         match self {
             RequestMode::Navigate => NetTraitsRequestMode::Navigate,
             RequestMode::Same_origin => NetTraitsRequestMode::SameOrigin,
-            RequestMode::No_cors => NetTraitsRequestMode::NoCORS,
-            RequestMode::Cors => NetTraitsRequestMode::CORSMode,
+            RequestMode::No_cors => NetTraitsRequestMode::NoCors,
+            RequestMode::Cors => NetTraitsRequestMode::CorsMode,
         }
     }
 }
@@ -740,8 +824,9 @@ impl Into<RequestMode> for NetTraitsRequestMode {
         match self {
             NetTraitsRequestMode::Navigate => RequestMode::Navigate,
             NetTraitsRequestMode::SameOrigin => RequestMode::Same_origin,
-            NetTraitsRequestMode::NoCORS => RequestMode::No_cors,
-            NetTraitsRequestMode::CORSMode => RequestMode::Cors,
+            NetTraitsRequestMode::NoCors => RequestMode::No_cors,
+            NetTraitsRequestMode::CorsMode => RequestMode::Cors,
+            NetTraitsRequestMode::WebSocket => unreachable!("Websocket request mode should never be exposed to JS"),
         }
     }
 }
@@ -758,6 +843,9 @@ impl Into<MsgReferrerPolicy> for ReferrerPolicy {
             ReferrerPolicy::Origin => MsgReferrerPolicy::Origin,
             ReferrerPolicy::Origin_when_cross_origin => MsgReferrerPolicy::OriginWhenCrossOrigin,
             ReferrerPolicy::Unsafe_url => MsgReferrerPolicy::UnsafeUrl,
+            ReferrerPolicy::Strict_origin => MsgReferrerPolicy::StrictOrigin,
+            ReferrerPolicy::Strict_origin_when_cross_origin =>
+                MsgReferrerPolicy::StrictOriginWhenCrossOrigin,
         }
     }
 }
@@ -772,6 +860,9 @@ impl Into<ReferrerPolicy> for MsgReferrerPolicy {
             MsgReferrerPolicy::SameOrigin => ReferrerPolicy::Origin,
             MsgReferrerPolicy::OriginWhenCrossOrigin => ReferrerPolicy::Origin_when_cross_origin,
             MsgReferrerPolicy::UnsafeUrl => ReferrerPolicy::Unsafe_url,
+            MsgReferrerPolicy::StrictOrigin => ReferrerPolicy::Strict_origin,
+            MsgReferrerPolicy::StrictOriginWhenCrossOrigin =>
+                ReferrerPolicy::Strict_origin_when_cross_origin,
         }
     }
 }
@@ -796,13 +887,15 @@ impl Into<RequestRedirect> for NetTraitsRequestRedirect {
     }
 }
 
-impl Clone for HeadersOrByteStringSequenceSequence {
-    fn clone(&self) -> HeadersOrByteStringSequenceSequence {
+impl Clone for HeadersInit {
+    fn clone(&self) -> HeadersInit {
     match self {
-        &HeadersOrByteStringSequenceSequence::Headers(ref h) =>
-            HeadersOrByteStringSequenceSequence::Headers(h.clone()),
-        &HeadersOrByteStringSequenceSequence::ByteStringSequenceSequence(ref b) =>
-            HeadersOrByteStringSequenceSequence::ByteStringSequenceSequence(b.clone()),
+        &HeadersInit::Headers(ref h) =>
+            HeadersInit::Headers(h.clone()),
+        &HeadersInit::ByteStringSequenceSequence(ref b) =>
+            HeadersInit::ByteStringSequenceSequence(b.clone()),
+        &HeadersInit::ByteStringMozMap(ref m) =>
+            HeadersInit::ByteStringMozMap(m.clone()),
         }
     }
 }

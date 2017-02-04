@@ -10,9 +10,15 @@
 
 ${helpers.single_keyword("-moz-box-align", "stretch start center baseline end",
                          products="gecko", gecko_ffi_name="mBoxAlign",
-                         gecko_constant_prefix="NS_STYLE_BOX_ALIGN",
-                         animatable=False)}
+                         gecko_enum_prefix="StyleBoxAlign",
+                         gecko_inexhaustive=True,
+                         animatable=False,
+                         alias="-webkit-box-align",
+                         spec="Nonstandard (https://developer.mozilla.org/en-US/docs/Web/CSS/box-align)")}
 
 ${helpers.predefined_type("-moz-box-flex", "Number", "0.0", "parse_non_negative",
                           products="gecko", gecko_ffi_name="mBoxFlex",
-                          animatable=False)}
+                          needs_context=False,
+                          animatable=False,
+                          alias="-webkit-box-flex",
+                          spec="Nonstandard (https://developer.mozilla.org/en-US/docs/Web/CSS/box-flex)")}

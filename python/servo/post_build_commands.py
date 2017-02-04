@@ -9,7 +9,6 @@
 
 from __future__ import print_function, unicode_literals
 
-from glob import glob
 import os
 import os.path as path
 import subprocess
@@ -23,7 +22,12 @@ from mach.decorators import (
     Command,
 )
 
-from servo.command_base import CommandBase, cd, call, check_call, is_windows, is_macosx
+from servo.command_base import (
+    CommandBase,
+    call, check_call,
+    is_linux, is_windows, is_macosx, set_osmesa_env,
+    get_browserhtml_path,
+)
 
 
 def read_file(filename, if_exists=False):
@@ -31,18 +35,6 @@ def read_file(filename, if_exists=False):
         return None
     with open(filename) as f:
         return f.read()
-
-
-def find_dep_path_newest(package, bin_path):
-    deps_path = path.join(path.split(bin_path)[0], "build")
-    with cd(deps_path):
-        print(os.getcwd())
-        candidates = glob(package + '-*')
-    candidates = (path.join(deps_path, c) for c in candidates)
-    candidate_times = sorted(((path.getmtime(c), c) for c in candidates), reverse=True)
-    if len(candidate_times) > 0:
-        return candidate_times[0][1]
-    return None
 
 
 @CommandProvider
@@ -65,12 +57,21 @@ class PostBuildCommands(CommandBase):
                      help='Name of debugger to use.')
     @CommandArgument('--browserhtml', '-b', action='store_true',
                      help='Launch with Browser.html')
+    @CommandArgument('--headless', '-z', action='store_true',
+                     help='Launch in headless mode')
+    @CommandArgument('--software', '-s', action='store_true',
+                     help='Launch with software rendering')
     @CommandArgument(
         'params', nargs='...',
         help="Command-line arguments to be passed through to Servo")
-    def run(self, params, release=False, dev=False, android=None, debug=False, debugger=None, browserhtml=False):
+    def run(self, params, release=False, dev=False, android=None, debug=False, debugger=None, browserhtml=False,
+            headless=False, software=False):
         env = self.build_env()
         env["RUST_BACKTRACE"] = "1"
+
+        # Make --debugger imply --debug
+        if debugger:
+            debug = True
 
         if android is None:
             android = self.config["build"]["android"]
@@ -99,11 +100,7 @@ class PostBuildCommands(CommandBase):
         args = [self.get_binary_path(release, dev)]
 
         if browserhtml:
-            browserhtml_path = find_dep_path_newest('browserhtml', args[0])
-            if browserhtml_path is None:
-                print("Could not find browserhtml package; perhaps you haven't built Servo.")
-                return 1
-
+            browserhtml_path = get_browserhtml_path(args[0])
             if is_macosx():
                 # Enable borderless on OSX
                 args = args + ['-b']
@@ -111,11 +108,21 @@ class PostBuildCommands(CommandBase):
                 # Convert to a relative path to avoid mingw -> Windows path conversions
                 browserhtml_path = path.relpath(browserhtml_path, os.getcwd())
 
-            args = args + ['-w',
-                           '--pref', 'dom.mozbrowser.enabled',
+            args = args + ['--pref', 'dom.mozbrowser.enabled',
                            '--pref', 'dom.forcetouch.enabled',
                            '--pref', 'shell.builtin-key-shortcuts.enabled=false',
-                           path.join(browserhtml_path, 'out', 'index.html')]
+                           path.join(browserhtml_path, 'index.html')]
+
+        if headless:
+            set_osmesa_env(args[0], env)
+            args.append('-z')
+
+        if software:
+            if not is_linux():
+                print("Software rendering is only supported on Linux at the moment.")
+                return
+
+            env['LIBGL_ALWAYS_SOFTWARE'] = "1"
 
         # Borrowed and modified from:
         # http://hg.mozilla.org/mozilla-central/file/c9cfa9b91dea/python/mozbuild/mozbuild/mach_commands.py#l883

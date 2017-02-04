@@ -6,23 +6,21 @@ use dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use dom::bindings::codegen::Bindings::UIEventBinding;
 use dom::bindings::codegen::Bindings::UIEventBinding::UIEventMethods;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::Root;
-use dom::bindings::js::{JS, MutNullableHeap, RootedReference};
+use dom::bindings::js::{MutNullableJS, Root, RootedReference};
 use dom::bindings::reflector::reflect_dom_object;
 use dom::bindings::str::DOMString;
 use dom::event::{Event, EventBubbles, EventCancelable};
 use dom::window::Window;
+use servo_atoms::Atom;
 use std::cell::Cell;
 use std::default::Default;
-use string_cache::Atom;
 
 // https://w3c.github.io/uievents/#interface-uievent
 #[dom_struct]
 pub struct UIEvent {
     event: Event,
-    view: MutNullableHeap<JS<Window>>,
+    view: MutNullableJS<Window>,
     detail: Cell<i32>
 }
 
@@ -37,7 +35,7 @@ impl UIEvent {
 
     pub fn new_uninitialized(window: &Window) -> Root<UIEvent> {
         reflect_dom_object(box UIEvent::new_inherited(),
-                           GlobalRef::Window(window),
+                           window,
                            UIEventBinding::Wrap)
     }
 
@@ -52,12 +50,13 @@ impl UIEvent {
         ev
     }
 
-    pub fn Constructor(global: GlobalRef,
+    pub fn Constructor(window: &Window,
                        type_: DOMString,
                        init: &UIEventBinding::UIEventInit) -> Fallible<Root<UIEvent>> {
         let bubbles = EventBubbles::from(init.parent.bubbles);
         let cancelable = EventCancelable::from(init.parent.cancelable);
-        let event = UIEvent::new(global.as_window(), type_,
+        let event = UIEvent::new(window,
+                                 type_,
                                  bubbles, cancelable,
                                  init.view.r(), init.detail);
         Ok(event)

@@ -14,7 +14,6 @@ use eutil::Downcast;
 use interfaces::CefApp;
 use interfaces::CefBrowser;
 use render_handler::CefRenderHandlerExtensions;
-use rustc_unicode::str::Utf16Encoder;
 use types::{cef_cursor_handle_t, cef_cursor_type_t, cef_rect_t};
 use wrappers::CefWrap;
 
@@ -24,19 +23,18 @@ use euclid::point::Point2D;
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::{Size2D, TypedSize2D};
 use gleam::gl;
-use layers::geometry::DevicePixel;
-use layers::platform::surface::NativeDisplay;
 use msg::constellation_msg::{Key, KeyModifiers};
 use net_traits::net_error_list::NetError;
+use script_traits::DevicePixel;
+use servo_geometry::ScreenPx;
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::mpsc::{Sender, channel};
-use std_url::Url;
+use servo_url::ServoUrl;
 use style_traits::cursor::Cursor;
-use util::geometry::ScreenPx;
 #[cfg(target_os="linux")]
 extern crate x11;
 #[cfg(target_os="linux")]
@@ -239,15 +237,15 @@ impl WindowMethods for Window {
 
     }
 
+    fn set_fullscreen_state(&self, _state: bool) {
+    }
+
     fn present(&self) {
         let browser = self.cef_browser.borrow();
-        match *browser {
-            None => {}
-            Some(ref browser) => {
-                if check_ptr_exist!(browser.get_host().get_client(), get_render_handler) &&
-                   check_ptr_exist!(browser.get_host().get_client().get_render_handler(), on_present) {
-                    browser.get_host().get_client().get_render_handler().on_present(browser.clone());
-                   }
+        if let Some(ref browser) = *browser {
+            if check_ptr_exist!(browser.get_host().get_client(), get_render_handler) &&
+               check_ptr_exist!(browser.get_host().get_client().get_render_handler(), on_present) {
+                browser.get_host().get_client().get_render_handler().on_present(browser.clone());
             }
         }
     }
@@ -284,19 +282,6 @@ impl WindowMethods for Window {
         }
     }
 
-    #[cfg(target_os="linux")]
-    fn native_display(&self) -> NativeDisplay {
-        use x11::xlib;
-        unsafe {
-            NativeDisplay::new(DISPLAY as *mut xlib::Display)
-        }
-    }
-
-    #[cfg(not(target_os="linux"))]
-    fn native_display(&self) -> NativeDisplay {
-        NativeDisplay::new()
-    }
-
     fn create_compositor_channel(&self)
                                  -> (Box<CompositorProxy+Send>, Box<CompositorReceiver>) {
         let (sender, receiver) = channel();
@@ -326,13 +311,13 @@ impl WindowMethods for Window {
         }
     }
 
-    fn set_favicon(&self, url: Url) {
+    fn set_favicon(&self, url: ServoUrl) {
         let browser = self.cef_browser.borrow();
         let browser = match *browser {
             None => return,
             Some(ref browser) => browser,
         };
-        browser.downcast().favicons.borrow_mut().push(url.to_string().clone());
+        browser.downcast().favicons.borrow_mut().push(url.into_string());
     }
 
     fn status(&self, info: Option<String>) {
@@ -342,10 +327,7 @@ impl WindowMethods for Window {
             Some(ref browser) => browser,
         };
         let str = match info {
-            Some(s) => {
-                let utf16_chars: Vec<u16> = Utf16Encoder::new(s.chars()).collect();
-                utf16_chars
-            }
+            Some(s) => s.encode_utf16().collect::<Vec<u16>>(),
             None => vec![]
         };
 
@@ -408,7 +390,7 @@ impl WindowMethods for Window {
         };
         if check_ptr_exist!(browser.get_host().get_client(), get_load_handler) &&
            check_ptr_exist!(browser.get_host().get_client().get_load_handler(), on_load_error) {
-            let utf16_chars: Vec<u16> = Utf16Encoder::new((url).chars()).collect();
+            let utf16_chars: Vec<u16> = url.encode_utf16().collect();
             browser.get_host()
                    .get_client()
                    .get_load_handler()
@@ -439,10 +421,7 @@ impl WindowMethods for Window {
         let frame = frame.downcast();
         let mut title_visitor = frame.title_visitor.borrow_mut();
         let str = match string {
-            Some(s) => {
-                let utf16_chars: Vec<u16> = Utf16Encoder::new(s.chars()).collect();
-                utf16_chars
-            }
+            Some(s) => s.encode_utf16().collect(),
             None => vec![]
         };
 
@@ -450,15 +429,13 @@ impl WindowMethods for Window {
            check_ptr_exist!(browser.get_host().get_client().get_display_handler(), on_title_change) {
             browser.get_host().get_client().get_display_handler().on_title_change((*browser).clone(), str.as_slice());
         }
-        match &mut *title_visitor {
-            &mut None => {},
-            &mut Some(ref mut visitor) => {
-                visitor.visit(&str);
-            }
-        };
+
+        if let Some(ref mut visitor) = *title_visitor {
+            visitor.visit(&str);
+        }
     }
 
-    fn set_page_url(&self, url: Url) {
+    fn set_page_url(&self, url: ServoUrl) {
         // it seems to be the case that load start is always called
         // IMMEDIATELY before address change, so just stick it here
         on_load_start(self);
@@ -471,8 +448,8 @@ impl WindowMethods for Window {
         let servoframe = frame.downcast();
         // FIXME(https://github.com/rust-lang/rust/issues/23338)
         let mut frame_url = servoframe.url.borrow_mut();
-        *frame_url = url.to_string();
-        let utf16_chars: Vec<u16> = Utf16Encoder::new((*frame_url).chars()).collect();
+        *frame_url = url.into_string();
+        let utf16_chars: Vec<u16> = frame_url.encode_utf16().collect();
         if check_ptr_exist!(browser.get_host().get_client(), get_display_handler) &&
            check_ptr_exist!(browser.get_host().get_client().get_display_handler(), on_address_change) {
             browser.get_host().get_client().get_display_handler().on_address_change((*browser).clone(), frame.clone(), utf16_chars.as_slice());
@@ -486,19 +463,16 @@ impl WindowMethods for Window {
     fn set_cursor(&self, cursor: Cursor) {
         use types::{CefCursorInfo,cef_point_t,cef_size_t};
         let browser = self.cef_browser.borrow();
-        match *browser {
-            None => {}
-            Some(ref browser) => {
-                let cursor_handle = self.cursor_handle_for_cursor(cursor);
-                let info = CefCursorInfo { hotspot: cef_point_t {x: 0, y: 0}, image_scale_factor: 0.0, buffer: 0 as *mut isize, size: cef_size_t { width: 0, height: 0 } };
-                if check_ptr_exist!(browser.get_host().get_client(), get_render_handler) &&
-                   check_ptr_exist!(browser.get_host().get_client().get_render_handler(), on_cursor_change) {
-                    browser.get_host()
-                           .get_client()
-                           .get_render_handler()
-                           .on_cursor_change(browser.clone(), cursor_handle,
-                             self.cursor_type_for_cursor(cursor), &info)
-                   }
+        if let Some(ref browser) = *browser {
+            let cursor_handle = self.cursor_handle_for_cursor(cursor);
+            let info = CefCursorInfo { hotspot: cef_point_t {x: 0, y: 0}, image_scale_factor: 0.0, buffer: 0 as *mut isize, size: cef_size_t { width: 0, height: 0 } };
+            if check_ptr_exist!(browser.get_host().get_client(), get_render_handler) &&
+               check_ptr_exist!(browser.get_host().get_client().get_render_handler(), on_cursor_change) {
+                browser.get_host()
+                       .get_client()
+                       .get_render_handler()
+                       .on_cursor_change(browser.clone(), cursor_handle,
+                                         self.cursor_type_for_cursor(cursor), &info);
             }
         }
     }

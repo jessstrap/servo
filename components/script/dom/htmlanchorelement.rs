@@ -5,12 +5,13 @@
 use dom::activation::Activatable;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
+use dom::bindings::codegen::Bindings::DOMTokenListBinding::DOMTokenListMethods;
 use dom::bindings::codegen::Bindings::HTMLAnchorElementBinding;
 use dom::bindings::codegen::Bindings::HTMLAnchorElementBinding::HTMLAnchorElementMethods;
 use dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, MutNullableHeap, Root};
+use dom::bindings::js::{MutNullableJS, Root};
 use dom::bindings::str::{DOMString, USVString};
 use dom::document::Document;
 use dom::domtokenlist::DOMTokenList;
@@ -20,48 +21,49 @@ use dom::eventtarget::EventTarget;
 use dom::htmlelement::HTMLElement;
 use dom::htmlimageelement::HTMLImageElement;
 use dom::mouseevent::MouseEvent;
-use dom::node::{Node, document_from_node, window_from_node};
+use dom::node::{Node, document_from_node};
 use dom::urlhelper::UrlHelper;
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
+use net_traits::ReferrerPolicy;
 use num_traits::ToPrimitive;
 use script_traits::MozBrowserEvent;
+use servo_config::prefs::PREFS;
+use servo_url::ServoUrl;
 use std::default::Default;
-use string_cache::Atom;
 use style::attr::AttrValue;
-use url::Url;
-use util::prefs::PREFS;
 
 #[dom_struct]
 pub struct HTMLAnchorElement {
     htmlelement: HTMLElement,
-    rel_list: MutNullableHeap<JS<DOMTokenList>>,
-    url: DOMRefCell<Option<Url>>,
+    rel_list: MutNullableJS<DOMTokenList>,
+    url: DOMRefCell<Option<ServoUrl>>,
 }
 
 impl HTMLAnchorElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLAnchorElement {
         HTMLAnchorElement {
             htmlelement:
-                HTMLElement::new_inherited(localName, prefix, document),
+                HTMLElement::new_inherited(local_name, prefix, document),
             rel_list: Default::default(),
             url: DOMRefCell::new(None),
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLAnchorElement> {
-        Node::reflect_node(box HTMLAnchorElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLAnchorElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLAnchorElementBinding::Wrap)
     }
 
     // https://html.spec.whatwg.org/multipage/#concept-hyperlink-url-set
     fn set_url(&self) {
-        let attribute = self.upcast::<Element>().get_attribute(&ns!(), &atom!("href"));
+        let attribute = self.upcast::<Element>().get_attribute(&ns!(), &local_name!("href"));
         *self.url.borrow_mut() = attribute.and_then(|attribute| {
             let document = document_from_node(self);
             document.base_url().join(&attribute.value()).ok()
@@ -82,7 +84,7 @@ impl HTMLAnchorElement {
 
     // https://html.spec.whatwg.org/multipage/#update-href
     fn update_href(&self, url: DOMString) {
-        self.upcast::<Element>().set_string_attribute(&atom!("href"), url);
+        self.upcast::<Element>().set_string_attribute(&local_name!("href"), url);
     }
 }
 
@@ -91,9 +93,9 @@ impl VirtualMethods for HTMLAnchorElement {
         Some(self.upcast::<HTMLElement>() as &VirtualMethods)
     }
 
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &atom!("rel") => AttrValue::from_serialized_tokenlist(value.into()),
+            &local_name!("rel") => AttrValue::from_serialized_tokenlist(value.into()),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }
@@ -113,7 +115,7 @@ impl HTMLAnchorElementMethods for HTMLAnchorElement {
     // https://html.spec.whatwg.org/multipage/#dom-a-rellist
     fn RelList(&self) -> Root<DOMTokenList> {
         self.rel_list.or_init(|| {
-            DOMTokenList::new(self.upcast(), &atom!("rel"))
+            DOMTokenList::new(self.upcast(), &local_name!("rel"))
         })
     }
 
@@ -263,7 +265,7 @@ impl HTMLAnchorElementMethods for HTMLAnchorElement {
 
         USVString(match *self.url.borrow() {
             None => {
-                match self.upcast::<Element>().get_attribute(&ns!(), &atom!("href")) {
+                match self.upcast::<Element>().get_attribute(&ns!(), &local_name!("href")) {
                     // Step 3.
                     None => String::new(),
                     // Step 4.
@@ -277,9 +279,26 @@ impl HTMLAnchorElementMethods for HTMLAnchorElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-hyperlink-href
     fn SetHref(&self, value: USVString) {
-        self.upcast::<Element>().set_string_attribute(&atom!("href"),
+        self.upcast::<Element>().set_string_attribute(&local_name!("href"),
                                                       DOMString::from_string(value.0));
         self.set_url();
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-hyperlink-origin
+    fn Origin(&self) -> USVString {
+        // Step 1.
+        self.reinitialize_url();
+
+        USVString(match *self.url.borrow() {
+            None => {
+                // Step 2.
+                "".to_owned()
+            },
+            Some(ref url) => {
+                // Step 3.
+                url.origin().unicode_serialization()
+            },
+        })
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-hyperlink-password
@@ -497,7 +516,7 @@ impl Activatable for HTMLAnchorElement {
         // hyperlink"
         // https://html.spec.whatwg.org/multipage/#the-a-element
         // "The activation behaviour of a elements *that create hyperlinks*"
-        self.upcast::<Element>().has_attribute(&atom!("href"))
+        self.upcast::<Element>().has_attribute(&local_name!("href"))
     }
 
 
@@ -523,10 +542,9 @@ impl Activatable for HTMLAnchorElement {
         let mouse_event = event.downcast::<MouseEvent>().unwrap();
         let mut ismap_suffix = None;
         if let Some(element) = target.downcast::<Element>() {
-            if target.is::<HTMLImageElement>() && element.has_attribute(&atom!("ismap")) {
+            if target.is::<HTMLImageElement>() && element.has_attribute(&local_name!("ismap")) {
                 let target_node = element.upcast::<Node>();
-                let rect = window_from_node(target_node).content_box_query(
-                    target_node.to_trusted_node_address());
+                let rect = target_node.bounding_content_box_or_zero();
                 ismap_suffix = Some(
                     format!("?{},{}", mouse_event.ClientX().to_f32().unwrap() - rect.origin.x.to_f32_px(),
                                       mouse_event.ClientY().to_f32().unwrap() - rect.origin.y.to_f32_px())
@@ -536,11 +554,18 @@ impl Activatable for HTMLAnchorElement {
 
         // Step 4.
         //TODO: Download the link is `download` attribute is set.
-        follow_hyperlink(element, ismap_suffix);
+
+        // https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-delivery
+        let referrer_policy = match self.RelList().Contains("noreferrer".into()) {
+            true => Some(ReferrerPolicy::NoReferrer),
+            false => None,
+        };
+
+        follow_hyperlink(element, ismap_suffix, referrer_policy);
     }
 
     //TODO:https://html.spec.whatwg.org/multipage/#the-a-element
-    fn implicit_submission(&self, _ctrlKey: bool, _shiftKey: bool, _altKey: bool, _metaKey: bool) {
+    fn implicit_submission(&self, _ctrl_key: bool, _shift_key: bool, _alt_key: bool, _meta_key: bool) {
     }
 }
 
@@ -550,14 +575,14 @@ fn is_current_browsing_context(target: DOMString) -> bool {
 }
 
 /// https://html.spec.whatwg.org/multipage/#following-hyperlinks-2
-fn follow_hyperlink(subject: &Element, hyperlink_suffix: Option<String>) {
+pub fn follow_hyperlink(subject: &Element, hyperlink_suffix: Option<String>, referrer_policy: Option<ReferrerPolicy>) {
     // Step 1: replace.
     // Step 2: source browsing context.
     // Step 3: target browsing context.
-    let target = subject.get_attribute(&ns!(), &atom!("target"));
+    let target = subject.get_attribute(&ns!(), &local_name!("target"));
 
     // Step 4: disown target's opener if needed.
-    let attribute = subject.get_attribute(&ns!(), &atom!("href")).unwrap();
+    let attribute = subject.get_attribute(&ns!(), &local_name!("href")).unwrap();
     let mut href = attribute.Value();
 
     // Step 7: append a hyperlink suffix.
@@ -587,6 +612,7 @@ fn follow_hyperlink(subject: &Element, hyperlink_suffix: Option<String>) {
     }
 
     debug!("following hyperlink to {}", url);
+
     let window = document.window();
-    window.load_url(url);
+    window.load_url(url, false, false, referrer_policy);
 }

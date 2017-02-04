@@ -4,32 +4,31 @@
 
 use dom::bindings::codegen::Bindings::WorkerLocationBinding;
 use dom::bindings::codegen::Bindings::WorkerLocationBinding::WorkerLocationMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
 use dom::urlhelper::UrlHelper;
 use dom::workerglobalscope::WorkerGlobalScope;
-use url::Url;
+use servo_url::ServoUrl;
 
 // https://html.spec.whatwg.org/multipage/#worker-locations
 #[dom_struct]
 pub struct WorkerLocation {
     reflector_: Reflector,
-    url: Url,
+    url: ServoUrl,
 }
 
 impl WorkerLocation {
-    fn new_inherited(url: Url) -> WorkerLocation {
+    fn new_inherited(url: ServoUrl) -> WorkerLocation {
         WorkerLocation {
             reflector_: Reflector::new(),
             url: url,
         }
     }
 
-    pub fn new(global: &WorkerGlobalScope, url: Url) -> Root<WorkerLocation> {
+    pub fn new(global: &WorkerGlobalScope, url: ServoUrl) -> Root<WorkerLocation> {
         reflect_dom_object(box WorkerLocation::new_inherited(url),
-                           GlobalRef::Worker(global),
+                           global,
                            WorkerLocationBinding::Wrap)
     }
 }

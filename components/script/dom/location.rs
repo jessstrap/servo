@@ -4,13 +4,13 @@
 
 use dom::bindings::codegen::Bindings::LocationBinding;
 use dom::bindings::codegen::Bindings::LocationBinding::LocationMethods;
-use dom::bindings::global::GlobalRef;
+use dom::bindings::error::{Error, ErrorResult};
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
 use dom::urlhelper::UrlHelper;
 use dom::window::Window;
-use url::Url;
+use servo_url::ServoUrl;
 
 #[dom_struct]
 pub struct Location {
@@ -28,36 +28,52 @@ impl Location {
 
     pub fn new(window: &Window) -> Root<Location> {
         reflect_dom_object(box Location::new_inherited(window),
-                           GlobalRef::Window(window),
+                           window,
                            LocationBinding::Wrap)
     }
 
-    fn get_url(&self) -> Url {
+    fn get_url(&self) -> ServoUrl {
         self.window.get_url()
     }
 
     fn set_url_component(&self, value: USVString,
-                         setter: fn(&mut Url, USVString)) {
+                         setter: fn(&mut ServoUrl, USVString)) {
         let mut url = self.window.get_url();
         setter(&mut url, value);
-        self.window.load_url(url);
+        self.window.load_url(url, false, false, None);
     }
 }
 
 impl LocationMethods for Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-assign
-    fn Assign(&self, url: USVString) {
+    fn Assign(&self, url: USVString) -> ErrorResult {
         // TODO: per spec, we should use the _API base URL_ specified by the
         //       _entry settings object_.
         let base_url = self.window.get_url();
         if let Ok(url) = base_url.join(&url.0) {
-            self.window.load_url(url);
+            self.window.load_url(url, false, false, None);
+            Ok(())
+        } else {
+            Err(Error::Syntax)
         }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-reload
     fn Reload(&self) {
-        self.window.load_url(self.get_url());
+        self.window.load_url(self.get_url(), true, true, None);
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-location-replace
+    fn Replace(&self, url: USVString) -> ErrorResult {
+        // TODO: per spec, we should use the _API base URL_ specified by the
+        //       _entry settings object_.
+        let base_url = self.window.get_url();
+        if let Ok(url) = base_url.join(&url.0) {
+            self.window.load_url(url, true, false, None);
+            Ok(())
+        } else {
+            Err(Error::Syntax)
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-hash
@@ -106,7 +122,7 @@ impl LocationMethods for Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-href
     fn SetHref(&self, value: USVString) {
         if let Ok(url) = self.window.get_url().join(&value.0) {
-            self.window.load_url(url);
+            self.window.load_url(url, false, false, None);
         }
     }
 

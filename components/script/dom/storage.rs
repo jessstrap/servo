@@ -5,21 +5,21 @@
 use dom::bindings::codegen::Bindings::StorageBinding;
 use dom::bindings::codegen::Bindings::StorageBinding::StorageMethods;
 use dom::bindings::error::{Error, ErrorResult};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::refcounted::Trusted;
-use dom::bindings::reflector::{Reflectable, Reflector, reflect_dom_object};
+use dom::bindings::reflector::{DomObject, Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
 use dom::event::{Event, EventBubbles, EventCancelable};
+use dom::globalscope::GlobalScope;
 use dom::storageevent::StorageEvent;
-use dom::urlhelper::UrlHelper;
 use ipc_channel::ipc::{self, IpcSender};
 use net_traits::IpcSend;
 use net_traits::storage_thread::{StorageThreadMsg, StorageType};
 use script_thread::{Runnable, ScriptThread};
+use script_traits::ScriptMsg;
+use servo_url::ServoUrl;
 use task_source::TaskSource;
-use url::Url;
 
 #[dom_struct]
 pub struct Storage {
@@ -35,20 +35,16 @@ impl Storage {
         }
     }
 
-    pub fn new(global: &GlobalRef, storage_type: StorageType) -> Root<Storage> {
-        reflect_dom_object(box Storage::new_inherited(storage_type), *global, StorageBinding::Wrap)
+    pub fn new(global: &GlobalScope, storage_type: StorageType) -> Root<Storage> {
+        reflect_dom_object(box Storage::new_inherited(storage_type), global, StorageBinding::Wrap)
     }
 
-    fn get_url(&self) -> Url {
-        let global_root = self.global();
-        let global_ref = global_root.r();
-        global_ref.get_url()
+    fn get_url(&self) -> ServoUrl {
+        self.global().get_url()
     }
 
     fn get_storage_thread(&self) -> IpcSender<StorageThreadMsg> {
-        let global_root = self.global();
-        let global_ref = global_root.r();
-        global_ref.as_window().resource_threads().sender()
+        self.global().resource_threads().sender()
     }
 
 }
@@ -136,10 +132,8 @@ impl StorageMethods for Storage {
     }
 
     // check-tidy: no specs after this line
-    fn NamedGetter(&self, name: DOMString, found: &mut bool) -> Option<DOMString> {
-        let item = self.GetItem(name);
-        *found = item.is_some();
-        item
+    fn NamedGetter(&self, name: DOMString) -> Option<DOMString> {
+        self.GetItem(name)
     }
 
     fn NamedSetter(&self, name: DOMString, value: DOMString) -> ErrorResult {
@@ -156,61 +150,60 @@ impl Storage {
     /// https://html.spec.whatwg.org/multipage/#send-a-storage-notification
     fn broadcast_change_notification(&self, key: Option<String>, old_value: Option<String>,
                                      new_value: Option<String>) {
-        let global_root = self.global();
-        let global_ref = global_root.r();
-        let window = global_ref.as_window();
+        let pipeline_id = self.global().pipeline_id();
+        let storage = self.storage_type;
+        let url = self.get_url();
+        let msg = ScriptMsg::BroadcastStorageEvent(pipeline_id, storage, url, key, old_value, new_value);
+        self.global().constellation_chan().send(msg).unwrap();
+    }
+
+    /// https://html.spec.whatwg.org/multipage/#send-a-storage-notification
+    pub fn queue_storage_event(&self, url: ServoUrl,
+                               key: Option<String>, old_value: Option<String>, new_value: Option<String>) {
+        let global = self.global();
+        let window = global.as_window();
         let task_source = window.dom_manipulation_task_source();
         let trusted_storage = Trusted::new(self);
-        task_source.queue(box StorageEventRunnable::new(trusted_storage, key, old_value, new_value),
-                          global_ref).unwrap();
+        task_source
+            .queue(
+                box StorageEventRunnable::new(trusted_storage, url, key, old_value, new_value), &global)
+            .unwrap();
     }
 }
 
 pub struct StorageEventRunnable {
     element: Trusted<Storage>,
+    url: ServoUrl,
     key: Option<String>,
     old_value: Option<String>,
     new_value: Option<String>
 }
 
 impl StorageEventRunnable {
-    fn new(storage: Trusted<Storage>, key: Option<String>, old_value: Option<String>,
-           new_value: Option<String>) -> StorageEventRunnable {
-        StorageEventRunnable { element: storage, key: key, old_value: old_value, new_value: new_value }
+    fn new(storage: Trusted<Storage>, url: ServoUrl,
+           key: Option<String>, old_value: Option<String>, new_value: Option<String>) -> StorageEventRunnable {
+        StorageEventRunnable { element: storage, url: url, key: key, old_value: old_value, new_value: new_value }
     }
 }
 
 impl Runnable for StorageEventRunnable {
     fn name(&self) -> &'static str { "StorageEventRunnable" }
 
-    fn main_thread_handler(self: Box<StorageEventRunnable>, script_thread: &ScriptThread) {
+    fn main_thread_handler(self: Box<StorageEventRunnable>, _: &ScriptThread) {
         let this = *self;
-        let storage_root = this.element.root();
-        let storage = storage_root.r();
-        let global_root = storage.global();
-        let global_ref = global_root.r();
-        let ev_window = global_ref.as_window();
-        let ev_url = storage.get_url();
+        let storage = this.element.root();
+        let global = storage.global();
+        let window = global.as_window();
 
         let storage_event = StorageEvent::new(
-            global_ref,
+            &global,
             atom!("storage"),
             EventBubbles::DoesNotBubble, EventCancelable::NotCancelable,
             this.key.map(DOMString::from), this.old_value.map(DOMString::from), this.new_value.map(DOMString::from),
-            DOMString::from(ev_url.to_string()),
-            Some(storage)
+            DOMString::from(this.url.into_string()),
+            Some(&storage)
         );
 
-        let root_context = script_thread.root_browsing_context();
-        for it_context in root_context.iter() {
-            let it_window_root = it_context.active_window();
-            let it_window = it_window_root.r();
-            assert!(UrlHelper::SameOrigin(&ev_url, &it_window.get_url()));
-            // TODO: Such a Document object is not necessarily fully active, but events fired on such
-            // objects are ignored by the event loop until the Document becomes fully active again.
-            if ev_window.pipeline() != it_window.pipeline() {
-                storage_event.upcast::<Event>().fire(it_window.upcast());
-            }
-        }
+        storage_event.upcast::<Event>().fire(window.upcast());
     }
 }

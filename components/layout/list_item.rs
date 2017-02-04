@@ -9,24 +9,21 @@
 
 use app_units::Au;
 use block::BlockFlow;
-use context::LayoutContext;
+use context::{LayoutContext, SharedLayoutContext};
 use display_list_builder::{DisplayListBuildState, ListItemFlowDisplayListBuilding};
 use euclid::Point2D;
 use floats::FloatKind;
 use flow::{Flow, FlowClass, OpaqueFlow};
-use fragment::Overflow;
 use fragment::{CoordinateSystem, Fragment, FragmentBorderBoxIterator, GeneratedContentInfo};
+use fragment::Overflow;
 use generated_content;
-use gfx::display_list::StackingContext;
-use gfx_traits::StackingContextId;
-use inline::InlineMetrics;
-use script_layout_interface::restyle_damage::RESOLVE_GENERATED_CONTENT;
+use inline::InlineFlow;
 use std::sync::Arc;
 use style::computed_values::{list_style_type, position};
 use style::context::SharedStyleContext;
 use style::logical_geometry::LogicalSize;
 use style::properties::ServoComputedValues;
-use text;
+use style::servo::restyle_damage::RESOLVE_GENERATED_CONTENT;
 
 /// A block with the CSS `display` property equal to `list-item`.
 #[derive(Debug)]
@@ -44,7 +41,7 @@ impl ListItemFlow {
                                         flotation: Option<FloatKind>)
                                         -> ListItemFlow {
         let mut this = ListItemFlow {
-            block_flow: BlockFlow::from_fragment(main_fragment, flotation),
+            block_flow: BlockFlow::from_fragment_and_float_kind(main_fragment, flotation),
             marker_fragments: marker_fragments,
         };
 
@@ -106,25 +103,22 @@ impl Flow for ListItemFlow {
     fn assign_block_size<'a>(&mut self, layout_context: &'a LayoutContext<'a>) {
         self.block_flow.assign_block_size(layout_context);
 
+        // FIXME(pcwalton): Do this during flow construction, like `InlineFlow` does?
+        let marker_line_metrics =
+            InlineFlow::minimum_line_metrics_for_fragments(&self.marker_fragments,
+                                                           &mut layout_context.font_context(),
+                                                           &*self.block_flow.fragment.style);
         for marker in &mut self.marker_fragments {
-            let containing_block_block_size =
-                self.block_flow.base.block_container_explicit_block_size;
-            marker.assign_replaced_block_size_if_necessary(containing_block_block_size);
-
-            let font_metrics =
-                text::font_metrics_for_style(&mut layout_context.font_context(),
-                                             marker.style.get_font_arc());
-            let line_height = text::line_height_from_style(&*marker.style, &font_metrics);
-            let item_inline_metrics = InlineMetrics::from_font_metrics(&font_metrics, line_height);
-            let marker_inline_metrics = marker.inline_metrics(layout_context);
-            marker.border_box.start.b = item_inline_metrics.block_size_above_baseline -
+            marker.assign_replaced_block_size_if_necessary();
+            let marker_inline_metrics = marker.aligned_inline_metrics(layout_context,
+                                                                      &marker_line_metrics,
+                                                                      Some(&marker_line_metrics));
+            marker.border_box.start.b = marker_line_metrics.space_above_baseline -
                 marker_inline_metrics.ascent;
-            marker.border_box.size.block = marker_inline_metrics.ascent +
-                marker_inline_metrics.depth_below_baseline;
         }
     }
 
-    fn compute_absolute_position(&mut self, layout_context: &LayoutContext) {
+    fn compute_absolute_position(&mut self, layout_context: &SharedLayoutContext) {
         self.block_flow.compute_absolute_position(layout_context)
     }
 
@@ -148,11 +142,8 @@ impl Flow for ListItemFlow {
         self.build_display_list_for_list_item(state);
     }
 
-    fn collect_stacking_contexts(&mut self,
-                                 parent_id: StackingContextId,
-                                 contexts: &mut Vec<Box<StackingContext>>)
-                                 -> StackingContextId {
-        self.block_flow.collect_stacking_contexts(parent_id, contexts)
+    fn collect_stacking_contexts(&mut self, state: &mut DisplayListBuildState) {
+        self.block_flow.collect_stacking_contexts(state);
     }
 
     fn repair_style(&mut self, new_style: &Arc<ServoComputedValues>) {

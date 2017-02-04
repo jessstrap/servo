@@ -6,6 +6,6 @@
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.5
 //
 
-[Exposed=(Window,Worker)]
+[Exposed=Window]
 interface WebGLRenderbuffer : WebGLObject {
 };

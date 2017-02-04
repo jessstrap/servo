@@ -7,6 +7,7 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
+from glob import glob
 import gzip
 import itertools
 import locale
@@ -17,11 +18,12 @@ import subprocess
 from subprocess import PIPE
 import sys
 import tarfile
-import platform
-
-import toml
 
 from mach.registrar import Registrar
+import toml
+
+from servo.packages import WINDOWS_MSVC as msvc_deps
+from servo.util import host_triple
 
 BIN_SUFFIX = ".exe" if sys.platform == "win32" else ""
 
@@ -45,6 +47,26 @@ def setlocale(name):
         yield locale.setlocale(locale.LC_ALL, name)
     finally:
         locale.setlocale(locale.LC_ALL, saved_locale)
+
+
+def find_dep_path_newest(package, bin_path):
+    deps_path = path.join(path.split(bin_path)[0], "build")
+    candidates = []
+    with cd(deps_path):
+        for c in glob(package + '-*'):
+            candidate_path = path.join(deps_path, c)
+            if path.exists(path.join(candidate_path, "output")):
+                candidates.append(candidate_path)
+    if candidates:
+        return max(candidates, key=lambda c: path.getmtime(path.join(c, "output")))
+    return None
+
+
+def get_browserhtml_path(binary_path):
+    browserhtml_path = find_dep_path_newest('browserhtml', binary_path)
+    if browserhtml_path:
+        return path.join(browserhtml_path, "out")
+    sys.exit("Could not find browserhtml package; perhaps you haven't built Servo.")
 
 
 def archive_deterministically(dir_to_archive, dest_archive, prepend_path=None):
@@ -84,45 +106,6 @@ def archive_deterministically(dir_to_archive, dest_archive, prepend_path=None):
                             arcname = os.path.normpath(os.path.join(prepend_path, arcname))
                         tar_file.add(entry, filter=reset, recursive=False, arcname=arcname)
         os.rename(temp_file, dest_archive)
-
-
-def host_triple():
-    os_type = platform.system().lower()
-    if os_type == "linux":
-        os_type = "unknown-linux-gnu"
-    elif os_type == "darwin":
-        os_type = "apple-darwin"
-    elif os_type == "android":
-        os_type = "linux-androideabi"
-    elif os_type == "windows":
-        os_type = "pc-windows-msvc"
-    elif os_type.startswith("mingw64_nt-") or os_type.startswith("cygwin_nt-"):
-        os_type = "pc-windows-gnu"
-    elif os_type == "freebsd":
-        os_type = "unknown-freebsd"
-    else:
-        os_type = "unknown"
-
-    cpu_type = platform.machine().lower()
-    if os_type.endswith("-msvc"):
-        # vcvars*.bat should set it properly
-        platform_env = os.environ.get("PLATFORM")
-        if platform_env == "X86":
-            cpu_type = "i686"
-        elif platform_env == "X64":
-            cpu_type = "x86_64"
-        else:
-            cpu_type = "unknown"
-    elif cpu_type in ["i386", "i486", "i686", "i768", "x86"]:
-        cpu_type = "i686"
-    elif cpu_type in ["x86_64", "x86-64", "x64", "amd64"]:
-        cpu_type = "x86_64"
-    elif cpu_type == "arm":
-        cpu_type = "arm"
-    else:
-        cpu_type = "unknown"
-
-    return "%s-%s" % (cpu_type, os_type)
 
 
 def normalize_env(env):
@@ -193,6 +176,31 @@ def is_macosx():
     return sys.platform == 'darwin'
 
 
+def is_linux():
+    return sys.platform.startswith('linux')
+
+
+def set_osmesa_env(bin_path, env):
+    """Set proper LD_LIBRARY_PATH and DRIVE for software rendering on Linux and OSX"""
+    if is_linux():
+        dep_path = find_dep_path_newest('osmesa-src', bin_path)
+        if not dep_path:
+            return None
+        osmesa_path = path.join(dep_path, "out", "lib", "gallium")
+        env["LD_LIBRARY_PATH"] = osmesa_path
+        env["GALLIUM_DRIVER"] = "softpipe"
+    elif is_macosx():
+        osmesa_path = path.join(find_dep_path_newest('osmesa-src', bin_path),
+                                "out", "src", "gallium", "targets", "osmesa", ".libs")
+        glapi_path = path.join(find_dep_path_newest('osmesa-src', bin_path),
+                               "out", "src", "mapi", "shared-glapi", ".libs")
+        if not (osmesa_path and glapi_path):
+            return None
+        env["DYLD_LIBRARY_PATH"] = osmesa_path + ":" + glapi_path
+        env["GALLIUM_DRIVER"] = "softpipe"
+    return env
+
+
 class BuildNotFound(Exception):
     def __init__(self, message):
         self.message = message
@@ -261,6 +269,7 @@ class CommandBase(object):
         self.config["build"].setdefault("mode", "")
         self.config["build"].setdefault("debug-mozjs", False)
         self.config["build"].setdefault("ccache", "")
+        self.config["build"].setdefault("rustflags", "")
 
         self.config.setdefault("android", {})
         self.config["android"].setdefault("sdk", "")
@@ -286,9 +295,9 @@ class CommandBase(object):
     def rust_path(self):
         version = self.rust_version()
         if self._use_stable_rust:
-            return "%s/rustc-%s-%s" % (version, version, host_triple())
+            return os.path.join(version, "rustc-%s-%s" % (version, host_triple()))
         else:
-            return "%s/rustc-nightly-%s" % (version, host_triple())
+            return os.path.join(version, "rustc-nightly-%s" % (host_triple()))
 
     def rust_version(self):
         if self._rust_version is None or self._use_stable_rust != self._rust_version_is_stable:
@@ -300,7 +309,7 @@ class CommandBase(object):
 
     def cargo_build_id(self):
         if self._cargo_build_id is None:
-            filename = path.join(self.context.topdir, "cargo-nightly-build")
+            filename = path.join(self.context.topdir, "cargo-commit-hash")
             with open(filename) as f:
                 self._cargo_build_id = f.read().strip()
         return self._cargo_build_id
@@ -372,6 +381,26 @@ class CommandBase(object):
             env['PATH'] = env['PATH'].encode('ascii', 'ignore')
         extra_path = []
         extra_lib = []
+        if "msvc" in (target or host_triple()):
+            msvc_x64 = "64" if "x86_64" in (target or host_triple()) else ""
+            msvc_deps_dir = path.join(self.context.sharedir, "msvc-dependencies")
+
+            def package_dir(package):
+                return path.join(msvc_deps_dir, package, msvc_deps[package])
+
+            extra_path += [path.join(package_dir("cmake"), "bin")]
+            extra_path += [path.join(package_dir("ninja"), "bin")]
+            # Link openssl
+            env["OPENSSL_INCLUDE_DIR"] = path.join(package_dir("openssl"), "include")
+            env["OPENSSL_LIB_DIR"] = path.join(package_dir("openssl"), "lib" + msvc_x64)
+            env["OPENSSL_LIBS"] = "ssleay32MD:libeay32MD"
+            # Link moztools
+            env["MOZTOOLS_PATH"] = path.join(package_dir("moztools"), "bin")
+
+        if is_windows():
+            if not os.environ.get("NATIVE_WIN32_PYTHON"):
+                env["NATIVE_WIN32_PYTHON"] = sys.executable
+
         if not self.config["tools"]["system-rust"] \
                 or self.config["tools"]["rust-root"]:
             env["RUST_ROOT"] = self.config["tools"]["rust-root"]
@@ -398,8 +427,6 @@ class CommandBase(object):
             env["PATH"] = "%s%s%s" % (os.pathsep.join(extra_path), os.pathsep, env["PATH"])
 
         env["CARGO_HOME"] = self.config["tools"]["cargo-home-dir"]
-
-        env["CARGO_TARGET_DIR"] = path.join(self.context.topdir, "target")
 
         if extra_lib:
             if sys.platform == "darwin":
@@ -440,6 +467,9 @@ class CommandBase(object):
 
         env['RUSTDOC'] = path.join(self.context.topdir, 'etc', 'rustdoc-with-private')
 
+        if self.config["build"]["rustflags"]:
+            env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " " + self.config["build"]["rustflags"]
+
         # Don't run the gold linker if on Windows https://github.com/servo/servo/issues/9499
         if self.config["tools"]["rustc-with-gold"] and sys.platform not in ("win32", "msys"):
             if subprocess.call(['which', 'ld.gold'], stdout=PIPE, stderr=PIPE) == 0:
@@ -474,13 +504,13 @@ class CommandBase(object):
         return env
 
     def servo_crate(self):
-        return path.join(self.context.topdir, "components", "servo")
+        return path.join(self.context.topdir, "ports", "servo")
 
     def servo_features(self):
         """Return a list of optional features to enable for the Servo crate"""
         features = []
         if self.config["build"]["debug-mozjs"]:
-            features += ["script/debugmozjs"]
+            features += ["debugmozjs"]
         return features
 
     def android_support_dir(self):
@@ -493,6 +523,8 @@ class CommandBase(object):
         if self.context.bootstrapped:
             return
 
+        target_platform = target or host_triple()
+
         rust_root = self.config["tools"]["rust-root"]
         rustc_path = path.join(
             rust_root, "rustc", "bin", "rustc" + BIN_SUFFIX
@@ -501,8 +533,12 @@ class CommandBase(object):
 
         base_target_path = path.join(rust_root, "rustc", "lib", "rustlib")
 
-        target_path = path.join(base_target_path, target or host_triple())
+        target_path = path.join(base_target_path, target_platform)
         target_exists = path.exists(target_path)
+
+        # Always check if all needed MSVC dependencies are installed
+        if "msvc" in target_platform:
+            Registrar.dispatch("bootstrap", context=self.context)
 
         if not (self.config['tools']['system-rust'] or (rustc_binary_exists and target_exists)):
             print("looking for rustc at %s" % (rustc_path))

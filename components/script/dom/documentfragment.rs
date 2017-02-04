@@ -7,7 +7,6 @@ use dom::bindings::codegen::Bindings::DocumentFragmentBinding::DocumentFragmentM
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::codegen::UnionTypes::NodeOrString;
 use dom::bindings::error::{ErrorResult, Fallible};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::str::DOMString;
@@ -16,7 +15,8 @@ use dom::element::Element;
 use dom::htmlcollection::HTMLCollection;
 use dom::node::{Node, window_from_node};
 use dom::nodelist::NodeList;
-use string_cache::Atom;
+use dom::window::Window;
+use servo_atoms::Atom;
 
 // https://dom.spec.whatwg.org/#documentfragment
 #[dom_struct]
@@ -38,10 +38,10 @@ impl DocumentFragment {
                            DocumentFragmentBinding::Wrap)
     }
 
-    pub fn Constructor(global: GlobalRef) -> Fallible<Root<DocumentFragment>> {
-        let document = global.as_window().Document();
+    pub fn Constructor(window: &Window) -> Fallible<Root<DocumentFragment>> {
+        let document = window.Document();
 
-        Ok(DocumentFragment::new(document.r()))
+        Ok(DocumentFragment::new(&document))
     }
 }
 
@@ -57,7 +57,7 @@ impl DocumentFragmentMethods for DocumentFragment {
         let node = self.upcast::<Node>();
         let id = Atom::from(id);
         node.traverse_preorder().filter_map(Root::downcast::<Element>).find(|descendant| {
-            match descendant.get_attribute(&ns!(), &atom!("id")) {
+            match descendant.get_attribute(&ns!(), &local_name!("id")) {
                 None => false,
                 Some(attr) => *attr.value().as_atom() == id,
             }

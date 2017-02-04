@@ -3,11 +3,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use dom::bindings::codegen::UnionTypes::StringOrUnsignedLong;
-use dom::bindings::error::Error::Syntax;
+use dom::bindings::error::Error::Type;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::reflector::Reflector;
 use dom::bindings::str::DOMString;
+use dom::window::Window;
 use regex::Regex;
 
 pub type UUID = DOMString;
@@ -267,65 +267,53 @@ const BASE_UUID: &'static str = "-0000-1000-8000-00805f9b34fb";
 const SERVICE_PREFIX: &'static str = "org.bluetooth.service";
 const CHARACTERISTIC_PREFIX: &'static str = "org.bluetooth.characteristic";
 const DESCRIPTOR_PREFIX: &'static str = "org.bluetooth.descriptor";
-const VALID_UUID_REGEX: &'static str = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const VALID_UUID_REGEX: &'static str = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+// https://cs.chromium.org/chromium/src/third_party/WebKit/Source/modules/bluetooth/BluetoothUUID.cpp?l=314
+const UUID_ERROR_MESSAGE: &'static str = "It must be a valid UUID alias (e.g. 0x1234), \
+    UUID (lowercase hex characters e.g. '00001234-0000-1000-8000-00805f9b34fb'),\nor recognized standard name from";
+// https://cs.chromium.org/chromium/src/third_party/WebKit/Source/modules/bluetooth/BluetoothUUID.cpp?l=321
+const SERVICES_ERROR_MESSAGE: &'static str = "https://developer.bluetooth.org/gatt/services/Pages/ServicesHome.aspx\
+    \ne.g. 'alert_notification'.";
+// https://cs.chromium.org/chromium/src/third_party/WebKit/Source/modules/bluetooth/BluetoothUUID.cpp?l=327
+const CHARACTERISTIC_ERROR_MESSAGE: &'static str = "https://developer.bluetooth.org/gatt/characteristics/Pages/\
+    CharacteristicsHome.aspx\ne.g. 'aerobic_heart_rate_lower_limit'.";
+// https://cs.chromium.org/chromium/src/third_party/WebKit/Source/modules/bluetooth/BluetoothUUID.cpp?l=333
+const DESCRIPTOR_ERROR_MESSAGE: &'static str = "https://developer.bluetooth.org/gatt/descriptors/Pages/\
+    DescriptorsHomePage.aspx\ne.g. 'gatt.characteristic_presentation_format'.";
 
 impl BluetoothUUID {
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothuuid-canonicaluuid
-    pub fn CanonicalUUID(_: GlobalRef, alias: u32) -> UUID {
-        DOMString::from(format!("{:08x}", &alias) + BASE_UUID)
+    pub fn CanonicalUUID(_: &Window, alias: u32) -> UUID {
+        canonical_uuid(alias)
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothuuid-getservice
-    pub fn GetService(globalref: GlobalRef, name: BluetoothServiceUUID) -> Fallible<UUID> {
-      BluetoothUUID::resolve_uuid_name(globalref,
-                                       name,
-                                       BLUETOOTH_ASSIGNED_SERVICES,
-                                       DOMString::from(SERVICE_PREFIX))
+    pub fn GetService(_: &Window, name: BluetoothServiceUUID) -> Fallible<UUID> {
+        Self::service(name)
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothuuid-getcharacteristic
-    pub fn GetCharacteristic(globalref: GlobalRef, name: BluetoothCharacteristicUUID) -> Fallible<UUID> {
-        BluetoothUUID::resolve_uuid_name(globalref,
-                                         name,
-                                         BLUETOOTH_ASSIGNED_CHARCTERISTICS,
-                                         DOMString::from(CHARACTERISTIC_PREFIX))
+    pub fn GetCharacteristic(_: &Window, name: BluetoothCharacteristicUUID) -> Fallible<UUID> {
+        Self::characteristic(name)
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothuuid-getdescriptor
-    pub fn GetDescriptor(globalref: GlobalRef, name: BluetoothDescriptorUUID) -> Fallible<UUID> {
-        BluetoothUUID::resolve_uuid_name(globalref,
-                                         name,
-                                         BLUETOOTH_ASSIGNED_DESCRIPTORS,
-                                         DOMString::from(DESCRIPTOR_PREFIX))
+    pub fn GetDescriptor(_: &Window, name: BluetoothDescriptorUUID) -> Fallible<UUID> {
+        Self::descriptor(name)
+    }
+}
+
+impl BluetoothUUID {
+    pub fn service(name: BluetoothServiceUUID) -> Fallible<UUID> {
+        resolve_uuid_name(name, BLUETOOTH_ASSIGNED_SERVICES, SERVICE_PREFIX)
     }
 
-    // https://webbluetoothcg.github.io/web-bluetooth/#resolveuuidname
-    pub fn resolve_uuid_name(globalref: GlobalRef,
-                             name: StringOrUnsignedLong,
-                             assigned_numbers_table: &'static [(&'static str, u32)],
-                             prefix: DOMString)
-                             -> Fallible<DOMString> {
-        match name {
-            // Step 1
-            StringOrUnsignedLong::UnsignedLong(unsigned32) => {
-                Ok(BluetoothUUID::CanonicalUUID(globalref, unsigned32))
-            },
-            StringOrUnsignedLong::String(dstring) => {
-            // Step 2
-                let regex = Regex::new(VALID_UUID_REGEX).unwrap();
-                if regex.is_match(&*dstring) {
-                    Ok(dstring)
-                } else {
-                // Step 3
-                    let concatenated = format!("{}.{}", prefix, dstring);
-                    let is_in_table = assigned_numbers_table.iter().find(|p| p.0 == concatenated);
-                    match is_in_table {
-                        Some(&(_, alias)) => Ok(BluetoothUUID::CanonicalUUID(globalref, alias)),
-                        None => Err(Syntax),
-                    }
-                }
-            },
-        }
+    pub fn characteristic(name: BluetoothCharacteristicUUID) -> Fallible<UUID> {
+        resolve_uuid_name(name, BLUETOOTH_ASSIGNED_CHARCTERISTICS, CHARACTERISTIC_PREFIX)
+    }
+
+    pub fn descriptor(name: BluetoothDescriptorUUID) -> Fallible<UUID> {
+        resolve_uuid_name(name, BLUETOOTH_ASSIGNED_DESCRIPTORS, DESCRIPTOR_PREFIX)
     }
 }
 
@@ -335,5 +323,51 @@ impl Clone for StringOrUnsignedLong {
             &StringOrUnsignedLong::String(ref s) => StringOrUnsignedLong::String(s.clone()),
             &StringOrUnsignedLong::UnsignedLong(ul) => StringOrUnsignedLong::UnsignedLong(ul),
         }
+    }
+}
+
+fn canonical_uuid(alias: u32) -> UUID {
+    UUID::from(format!("{:08x}", &alias) + BASE_UUID)
+}
+
+// https://webbluetoothcg.github.io/web-bluetooth/#resolveuuidname
+fn resolve_uuid_name(
+        name: StringOrUnsignedLong,
+        assigned_numbers_table: &'static [(&'static str, u32)],
+        prefix: &str)
+        -> Fallible<DOMString> {
+    match name {
+        // Step 1.
+        StringOrUnsignedLong::UnsignedLong(unsigned32) => {
+            Ok(canonical_uuid(unsigned32))
+        },
+        StringOrUnsignedLong::String(dstring) => {
+        // Step 2.
+            let regex = Regex::new(VALID_UUID_REGEX).unwrap();
+            if regex.is_match(&*dstring) {
+                Ok(dstring)
+            } else {
+            // Step 3.
+                let concatenated = format!("{}.{}", prefix, dstring);
+                let is_in_table = assigned_numbers_table.iter().find(|p| p.0 == concatenated);
+                match is_in_table {
+                    Some(&(_, alias)) => Ok(canonical_uuid(alias)),
+                    None => {
+                        let (attribute_type, error_url_message) = match prefix {
+                            SERVICE_PREFIX => ("Service", SERVICES_ERROR_MESSAGE),
+                            CHARACTERISTIC_PREFIX => ("Characteristic", CHARACTERISTIC_ERROR_MESSAGE),
+                            DESCRIPTOR_PREFIX => ("Descriptor", DESCRIPTOR_ERROR_MESSAGE),
+                            _ => unreachable!(),
+                        };
+                        // Step 4.
+                        return Err(Type(format!("Invalid {} name : '{}'.\n{} {}",
+                                                attribute_type,
+                                                dstring,
+                                                UUID_ERROR_MESSAGE,
+                                                error_url_message)));
+                    },
+                }
+            }
+        },
     }
 }

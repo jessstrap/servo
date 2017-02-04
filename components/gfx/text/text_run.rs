@@ -3,8 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use app_units::Au;
-use font::ShapingOptions;
-use font::{Font, FontHandleMethods, FontMetrics, IS_WHITESPACE_SHAPING_FLAG, RunMetrics};
+use font::{Font, FontHandleMethods, FontMetrics, IS_WHITESPACE_SHAPING_FLAG, KEEP_ALL_FLAG};
+use font::{RunMetrics, ShapingOptions};
 use platform::font_template::FontTemplateData;
 use range::Range;
 use std::cell::Cell;
@@ -29,7 +29,7 @@ pub struct TextRun {
     pub font_template: Arc<FontTemplateData>,
     pub actual_pt_size: Au,
     pub font_metrics: FontMetrics,
-    pub font_key: Option<webrender_traits::FontKey>,
+    pub font_key: webrender_traits::FontKey,
     /// The glyph runs that make up this text run.
     pub glyphs: Arc<Vec<GlyphRun>>,
     pub bidi_level: u8,
@@ -206,11 +206,14 @@ impl<'a> TextRun {
             // Split off any trailing whitespace into a separate glyph run.
             let mut whitespace = slice.end..slice.end;
             if let Some((i, _)) = word.char_indices().rev()
-                                     .take_while(|&(_, c)| char_is_whitespace(c)).last() {
-                whitespace.start = slice.start + i;
-                slice.end = whitespace.start;
-            }
-
+                .take_while(|&(_, c)| char_is_whitespace(c)).last() {
+                    whitespace.start = slice.start + i;
+                    slice.end = whitespace.start;
+                } else if idx != text.len() && options.flags.contains(KEEP_ALL_FLAG) {
+                    // If there's no whitespace and word-break is set to
+                    // keep-all, try increasing the slice.
+                    continue;
+                }
             if slice.len() > 0 {
                 glyphs.push(GlyphRun {
                     glyph_store: font.shape_text(&text[slice.clone()], options),
@@ -299,6 +302,21 @@ impl<'a> TextRun {
                 None
             }
         })
+    }
+
+    /// Returns the index in the range of the first glyph advancing over given advance
+    pub fn range_index_of_advance(&self, range: &Range<ByteIndex>, advance: Au) -> usize {
+        // TODO(Issue #199): alter advance direction for RTL
+        // TODO(Issue #98): using inter-char and inter-word spacing settings when measuring text
+        let mut remaining = advance;
+        self.natural_word_slices_in_range(range)
+            .map(|slice| {
+                let (slice_index, slice_advance) =
+                    slice.glyphs.range_index_of_advance(&slice.range, remaining, self.extra_word_spacing);
+                remaining -= slice_advance;
+                slice_index
+            })
+            .sum()
     }
 
     /// Returns an iterator that will iterate over all slices of glyphs that represent natural

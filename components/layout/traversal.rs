@@ -4,86 +4,108 @@
 
 //! Traversals over the DOM and flow trees, running the layout computations.
 
+use atomic_refcell::AtomicRefCell;
 use construct::FlowConstructor;
-use context::{LayoutContext, SharedLayoutContext};
+use context::{LayoutContext, ScopedThreadLocalLayoutContext, SharedLayoutContext};
 use display_list_builder::DisplayListBuildState;
+use flow::{self, PreorderFlowTraversal};
 use flow::{CAN_BE_FRAGMENTED, Flow, ImmutableFlowUtils, PostorderFlowTraversal};
-use flow::{PreorderFlowTraversal, self};
-use gfx::display_list::OpaqueNode;
-use script_layout_interface::restyle_damage::{BUBBLE_ISIZES, REFLOW, REFLOW_OUT_OF_FLOW, REPAINT, RestyleDamage};
 use script_layout_interface::wrapper_traits::{LayoutNode, ThreadSafeLayoutNode};
-use std::mem;
-use style::context::{LocalStyleContext, SharedStyleContext, StyleContext};
-use style::dom::TNode;
-use style::selector_impl::ServoSelectorImpl;
-use style::traversal::RestyleResult;
-use style::traversal::{DomTraversalContext, remove_from_bloom_filter, recalc_style_at};
-use util::opts;
-use wrapper::{LayoutNodeLayoutData, ThreadSafeLayoutNodeHelpers};
+use servo_config::opts;
+use style::context::{SharedStyleContext, StyleContext};
+use style::data::ElementData;
+use style::dom::{NodeInfo, TElement, TNode};
+use style::selector_parser::RestyleDamage;
+use style::servo::restyle_damage::{BUBBLE_ISIZES, REFLOW, REFLOW_OUT_OF_FLOW, REPAINT};
+use style::traversal::{DomTraversal, TraversalDriver, recalc_style_at};
+use style::traversal::PerLevelTraversalData;
+use wrapper::{GetRawData, LayoutNodeHelpers, LayoutNodeLayoutData};
+use wrapper::ThreadSafeLayoutNodeHelpers;
 
-pub struct RecalcStyleAndConstructFlows<'lc> {
-    context: LayoutContext<'lc>,
-    root: OpaqueNode,
+pub struct RecalcStyleAndConstructFlows {
+    shared: SharedLayoutContext,
+    driver: TraversalDriver,
 }
 
-impl<'lc, N> DomTraversalContext<N> for RecalcStyleAndConstructFlows<'lc>
-    where N: LayoutNode + TNode,
-          N::ConcreteElement: ::selectors::Element<Impl=ServoSelectorImpl>
+impl RecalcStyleAndConstructFlows {
+    pub fn shared_layout_context(&self) -> &SharedLayoutContext {
+        &self.shared
+    }
+}
 
-{
-    type SharedContext = SharedLayoutContext;
-    #[allow(unsafe_code)]
-    fn new<'a>(shared: &'a Self::SharedContext, root: OpaqueNode) -> Self {
-        // FIXME(bholley): This transmutation from &'a to &'lc is very unfortunate, but I haven't
-        // found a way to avoid it despite spending several days on it (and consulting Manishearth,
-        // brson, and nmatsakis).
-        //
-        // The crux of the problem is that parameterizing DomTraversalContext on the lifetime of
-        // the SharedContext doesn't work for a variety of reasons [1]. However, the code in
-        // parallel.rs needs to be able to use the DomTraversalContext trait (or something similar)
-        // to stack-allocate a struct (a generalized LayoutContext<'a>) that holds a borrowed
-        // SharedContext, which means that the struct needs to be parameterized on a lifetime.
-        // Given the aforementioned constraint, the only way to accomplish this is to avoid
-        // propagating the borrow lifetime from the struct to the trait, but that means that the
-        // new() method on the trait cannot require the lifetime of its argument to match the
-        // lifetime of the Self object it creates.
-        //
-        // This could be solved with an associated type with an unbound lifetime parameter, but
-        // that would require higher-kinded types, which don't exist yet and probably aren't coming
-        // for a while.
-        //
-        // So we transmute. :-( This is safe because the DomTravesalContext is stack-allocated on
-        // the worker thread while processing a WorkUnit, whereas the borrowed SharedContext is
-        // live for the entire duration of the restyle. This really could _almost_ compile: all
-        // we'd need to do is change the signature to to |new<'a: 'lc>|, and everything would
-        // work great. But we can't do that, because that would cause a mismatch with the signature
-        // in the trait we're implementing, and we can't mention 'lc in that trait at all for the
-        // reasons described above.
-        //
-        // [1] For example, the WorkQueue type needs to be parameterized on the concrete type of
-        // DomTraversalContext::SharedContext, and the WorkQueue lifetime is similar to that of the
-        // LayoutThread, generally much longer than that of a given SharedLayoutContext borrow.
-        let shared_lc: &'lc SharedLayoutContext = unsafe { mem::transmute(shared) };
+impl RecalcStyleAndConstructFlows {
+    /// Creates a traversal context, taking ownership of the shared layout context.
+    pub fn new(shared: SharedLayoutContext, driver: TraversalDriver) -> Self {
         RecalcStyleAndConstructFlows {
-            context: LayoutContext::new(shared_lc),
-            root: root,
+            shared: shared,
+            driver: driver,
         }
     }
 
-    fn process_preorder(&self, node: N) -> RestyleResult {
+    /// Consumes this traversal context, returning ownership of the shared layout
+    /// context to the caller.
+    pub fn destroy(self) -> SharedLayoutContext {
+        self.shared
+    }
+}
+
+#[allow(unsafe_code)]
+impl<E> DomTraversal<E> for RecalcStyleAndConstructFlows
+    where E: TElement,
+          E::ConcreteNode: LayoutNode,
+{
+    type ThreadLocalContext = ScopedThreadLocalLayoutContext<E>;
+
+    fn process_preorder(&self, traversal_data: &mut PerLevelTraversalData,
+                        thread_local: &mut Self::ThreadLocalContext, node: E::ConcreteNode) {
         // FIXME(pcwalton): Stop allocating here. Ideally this should just be
         // done by the HTML parser.
         node.initialize_data();
 
-        recalc_style_at(&self.context, self.root, node)
+        if !node.is_text_node() {
+            let el = node.as_element().unwrap();
+            let mut data = el.mutate_data().unwrap();
+            let mut context = StyleContext {
+                shared: &self.shared.style_context,
+                thread_local: &mut thread_local.style_context,
+            };
+            recalc_style_at(self, traversal_data, &mut context, el, &mut data);
+        }
     }
 
-    fn process_postorder(&self, node: N) {
-        construct_flows_at(&self.context, self.root, node);
+    fn process_postorder(&self, thread_local: &mut Self::ThreadLocalContext, node: E::ConcreteNode) {
+        let context = LayoutContext::new(&self.shared);
+        construct_flows_at(&context, thread_local, node);
     }
 
-    fn local_context(&self) -> &LocalStyleContext {
-        self.context.local_context()
+    fn text_node_needs_traversal(node: E::ConcreteNode) -> bool {
+        // Text nodes never need styling. However, there are two cases they may need
+        // flow construction:
+        // (1) They child doesn't yet have layout data (preorder traversal initializes it).
+        // (2) The parent element has restyle damage (so the text flow also needs fixup).
+        node.get_raw_data().is_none() ||
+        node.parent_node().unwrap().to_threadsafe().restyle_damage() != RestyleDamage::empty()
+    }
+
+    unsafe fn ensure_element_data(element: &E) -> &AtomicRefCell<ElementData> {
+        element.as_node().initialize_data();
+        element.get_data().unwrap()
+    }
+
+    unsafe fn clear_element_data(element: &E) {
+        element.as_node().clear_data();
+    }
+
+    fn shared_context(&self) -> &SharedStyleContext {
+        &self.shared.style_context
+    }
+
+    fn create_thread_local_context(&self) -> Self::ThreadLocalContext {
+        ScopedThreadLocalLayoutContext::new(&self.shared)
+    }
+
+    fn is_parallel(&self) -> bool {
+        self.driver.is_parallel()
     }
 }
 
@@ -96,35 +118,36 @@ pub trait PostorderNodeMutTraversal<ConcreteThreadSafeLayoutNode: ThreadSafeLayo
 /// The flow construction traversal, which builds flows for styled nodes.
 #[inline]
 #[allow(unsafe_code)]
-fn construct_flows_at<'a, N: LayoutNode>(context: &'a LayoutContext<'a>, root: OpaqueNode, node: N) {
+fn construct_flows_at<'a, N>(context: &LayoutContext<'a>,
+                             _thread_local: &mut ScopedThreadLocalLayoutContext<N::ConcreteElement>,
+                             node: N)
+    where N: LayoutNode,
+{
+    debug!("construct_flows_at: {:?}", node);
+
     // Construct flows for this node.
     {
         let tnode = node.to_threadsafe();
 
         // Always reconstruct if incremental layout is turned off.
         let nonincremental_layout = opts::get().nonincremental_layout;
-        if nonincremental_layout || node.is_dirty() || node.has_dirty_descendants() {
+        if nonincremental_layout || tnode.restyle_damage() != RestyleDamage::empty() ||
+           node.as_element().map_or(false, |el| el.has_dirty_descendants()) {
             let mut flow_constructor = FlowConstructor::new(context);
             if nonincremental_layout || !flow_constructor.repair_if_possible(&tnode) {
                 flow_constructor.process(&tnode);
-                debug!("Constructed flow for {:x}: {:x}",
-                       tnode.debug_id(),
+                debug!("Constructed flow for {:?}: {:x}",
+                       tnode,
                        tnode.flow_debug_id());
             }
         }
 
-        // Reset the layout damage in this node. It's been propagated to the
-        // flow by the flow constructor.
-        tnode.set_restyle_damage(RestyleDamage::empty());
+        tnode.mutate_layout_data().unwrap().flags.insert(::data::HAS_BEEN_TRAVERSED);
     }
 
-    unsafe {
-        node.set_changed(false);
-        node.set_dirty(false);
-        node.set_dirty_descendants(false);
+    if let Some(el) = node.as_element() {
+        unsafe { el.unset_dirty_descendants(); }
     }
-
-    remove_from_bloom_filter(context, root, node);
 }
 
 /// The bubble-inline-sizes traversal, the first part of layout computation. This computes
@@ -198,7 +221,7 @@ impl<'a> PostorderFlowTraversal for AssignBSizes<'a> {
 
 #[derive(Copy, Clone)]
 pub struct ComputeAbsolutePositions<'a> {
-    pub layout_context: &'a LayoutContext<'a>,
+    pub layout_context: &'a SharedLayoutContext,
 }
 
 impl<'a> PreorderFlowTraversal for ComputeAbsolutePositions<'a> {
@@ -215,16 +238,23 @@ pub struct BuildDisplayList<'a> {
 impl<'a> BuildDisplayList<'a> {
     #[inline]
     pub fn traverse(&mut self, flow: &mut Flow) {
+        let parent_stacking_context_id = self.state.current_stacking_context_id;
+        self.state.current_stacking_context_id = flow::base(flow).stacking_context_id;
+
+        let parent_scroll_root_id = self.state.current_scroll_root_id;
+        self.state.current_scroll_root_id = flow::base(flow).scroll_root_id;
+
         if self.should_process() {
-            self.state.push_stacking_context_id(flow::base(flow).stacking_context_id);
             flow.build_display_list(&mut self.state);
             flow::mut_base(flow).restyle_damage.remove(REPAINT);
-            self.state.pop_stacking_context_id();
         }
 
         for kid in flow::child_iter_mut(flow) {
             self.traverse(kid);
         }
+
+        self.state.current_stacking_context_id = parent_stacking_context_id;
+        self.state.current_scroll_root_id = parent_scroll_root_id;
     }
 
     #[inline]

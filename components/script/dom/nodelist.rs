@@ -5,8 +5,7 @@
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::Bindings::NodeListBinding;
 use dom::bindings::codegen::Bindings::NodeListBinding::NodeListMethods;
-use dom::bindings::global::GlobalRef;
-use dom::bindings::js::{JS, MutNullableHeap, Root, RootedReference};
+use dom::bindings::js::{JS, MutNullableJS, Root, RootedReference};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::node::{ChildrenMutation, Node};
 use dom::window::Window;
@@ -38,7 +37,8 @@ impl NodeList {
     #[allow(unrooted_must_root)]
     pub fn new(window: &Window, list_type: NodeListType) -> Root<NodeList> {
         reflect_dom_object(box NodeList::new_inherited(list_type),
-                           GlobalRef::Window(window), NodeListBinding::Wrap)
+                           window,
+                           NodeListBinding::Wrap)
     }
 
     pub fn new_simple_list<T>(window: &Window, iter: T) -> Root<NodeList>
@@ -75,10 +75,8 @@ impl NodeListMethods for NodeList {
     }
 
     // https://dom.spec.whatwg.org/#dom-nodelist-item
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<Node>> {
-        let item = self.Item(index);
-        *found = item.is_some();
-        item
+    fn IndexedGetter(&self, index: u32) -> Option<Root<Node>> {
+        self.Item(index)
     }
 }
 
@@ -99,6 +97,13 @@ impl NodeList {
             panic!("called as_simple_list() on a children node list")
         }
     }
+
+    pub fn iter(&self) -> NodeListIterator {
+        NodeListIterator {
+            nodes: self,
+            offset: 0,
+        }
+    }
 }
 
 #[derive(JSTraceable, HeapSizeOf)]
@@ -106,7 +111,7 @@ impl NodeList {
 pub struct ChildrenList {
     node: JS<Node>,
     #[ignore_heap_size_of = "Defined in rust-mozjs"]
-    last_visited: MutNullableHeap<JS<Node>>,
+    last_visited: MutNullableJS<Node>,
     last_index: Cell<u32>,
 }
 
@@ -115,7 +120,7 @@ impl ChildrenList {
         let last_visited = node.GetFirstChild();
         ChildrenList {
             node: JS::from_ref(node),
-            last_visited: MutNullableHeap::new(last_visited.r()),
+            last_visited: MutNullableJS::new(last_visited.r()),
             last_index: Cell::new(0u32),
         }
     }
@@ -176,7 +181,7 @@ impl ChildrenList {
                      .nth(index as usize)
                      .unwrap()
         };
-        self.last_visited.set(Some(last_visited.r()));
+        self.last_visited.set(Some(&last_visited));
         self.last_index.set(index);
         Some(last_visited)
     }
@@ -277,5 +282,20 @@ impl ChildrenList {
     fn reset(&self) {
         self.last_visited.set(self.node.GetFirstChild().r());
         self.last_index.set(0u32);
+    }
+}
+
+pub struct NodeListIterator<'a> {
+    nodes: &'a NodeList,
+    offset: u32,
+}
+
+impl<'a> Iterator for NodeListIterator<'a> {
+    type Item = Root<Node>;
+
+    fn next(&mut self) -> Option<Root<Node>> {
+        let result = self.nodes.Item(self.offset);
+        self.offset = self.offset + 1;
+        result
     }
 }

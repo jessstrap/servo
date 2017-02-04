@@ -4,9 +4,30 @@
 
 use ipc_channel::ipc::IpcSharedMemory;
 use piston_image::{self, DynamicImage, ImageFormat};
-use util::opts;
+use webrender_traits;
 
-pub use msg::constellation_msg::{Image, PixelFormat};
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize, HeapSizeOf)]
+pub enum PixelFormat {
+    /// Luminance channel only
+    K8,
+    /// Luminance + alpha
+    KA8,
+    /// RGB, 8 bits per channel
+    RGB8,
+    /// RGB + alpha, 8 bits per channel
+    RGBA8,
+}
+
+#[derive(Clone, Deserialize, Serialize, HeapSizeOf)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    #[ignore_heap_size_of = "Defined in ipc-channel"]
+    pub bytes: IpcSharedMemory,
+    #[ignore_heap_size_of = "Defined in webrender_traits"]
+    pub id: Option<webrender_traits::ImageKey>,
+}
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize, HeapSizeOf)]
 pub struct ImageMetadata {
@@ -21,24 +42,14 @@ pub struct ImageMetadata {
 fn byte_swap_and_premultiply(data: &mut [u8]) {
     let length = data.len();
 
-    // No need to pre-multiply alpha when using direct GPU rendering.
-    let premultiply_alpha = !opts::get().use_webrender;
-
     for i in (0..length).step_by(4) {
         let r = data[i + 2];
         let g = data[i + 1];
         let b = data[i + 0];
-        let a = data[i + 3];
 
-        if premultiply_alpha {
-            data[i + 0] = ((r as u32) * (a as u32) / 255) as u8;
-            data[i + 1] = ((g as u32) * (a as u32) / 255) as u8;
-            data[i + 2] = ((b as u32) * (a as u32) / 255) as u8;
-        } else {
-            data[i + 0] = r;
-            data[i + 1] = g;
-            data[i + 2] = b;
-        }
+        data[i + 0] = r;
+        data[i + 1] = g;
+        data[i + 2] = b;
     }
 }
 
@@ -52,13 +63,13 @@ pub fn load_from_memory(buffer: &[u8]) -> Option<Image> {
         Err(msg) => {
             debug!("{}", msg);
             None
-        }
+        },
         Ok(_) => {
             match piston_image::load_from_memory(buffer) {
                 Ok(image) => {
                     let mut rgba = match image {
                         DynamicImage::ImageRgba8(rgba) => rgba,
-                        image => image.to_rgba()
+                        image => image.to_rgba(),
                     };
                     byte_swap_and_premultiply(&mut *rgba);
                     Some(Image {
@@ -68,31 +79,38 @@ pub fn load_from_memory(buffer: &[u8]) -> Option<Image> {
                         bytes: IpcSharedMemory::from_bytes(&*rgba),
                         id: None,
                     })
-                }
+                },
                 Err(e) => {
                     debug!("Image decoding error: {:?}", e);
                     None
-                }
+                },
             }
-        }
+        },
     }
 }
 
 
 // https://developer.mozilla.org/en-US/docs/Web/HTML/Element/img
 pub fn detect_image_format(buffer: &[u8]) -> Result<ImageFormat, &str> {
-    if is_gif(buffer)         { Ok(ImageFormat::GIF)
-    } else if is_jpeg(buffer) { Ok(ImageFormat::JPEG)
-    } else if is_png(buffer)  { Ok(ImageFormat::PNG)
-    } else if is_bmp(buffer)  { Ok(ImageFormat::BMP)
-    } else if is_ico(buffer)  { Ok(ImageFormat::ICO)
-    } else { Err("Image Format Not Supported") }
+    if is_gif(buffer) {
+        Ok(ImageFormat::GIF)
+    } else if is_jpeg(buffer) {
+        Ok(ImageFormat::JPEG)
+    } else if is_png(buffer) {
+        Ok(ImageFormat::PNG)
+    } else if is_bmp(buffer) {
+        Ok(ImageFormat::BMP)
+    } else if is_ico(buffer) {
+        Ok(ImageFormat::ICO)
+    } else {
+        Err("Image Format Not Supported")
+    }
 }
 
 fn is_gif(buffer: &[u8]) -> bool {
     match buffer {
-        &[b'G', b'I', b'F', b'8', n, b'a', ..] if n == b'7' || n == b'9' => true,
-        _ => false
+        &[b'G', b'I', b'F', b'8', n, b'a', _..] if n == b'7' || n == b'9' => true,
+        _ => false,
     }
 }
 

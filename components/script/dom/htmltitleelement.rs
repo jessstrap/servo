@@ -8,13 +8,11 @@ use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::str::DOMString;
-use dom::characterdata::CharacterData;
 use dom::document::Document;
 use dom::htmlelement::HTMLElement;
 use dom::node::{ChildrenMutation, Node};
-use dom::text::Text;
 use dom::virtualmethods::VirtualMethods;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 
 #[dom_struct]
 pub struct HTMLTitleElement {
@@ -22,17 +20,17 @@ pub struct HTMLTitleElement {
 }
 
 impl HTMLTitleElement {
-    fn new_inherited(localName: Atom, prefix: Option<DOMString>, document: &Document) -> HTMLTitleElement {
+    fn new_inherited(local_name: LocalName, prefix: Option<DOMString>, document: &Document) -> HTMLTitleElement {
         HTMLTitleElement {
-            htmlelement: HTMLElement::new_inherited(localName, prefix, document)
+            htmlelement: HTMLElement::new_inherited(local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLTitleElement> {
-        Node::reflect_node(box HTMLTitleElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLTitleElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLTitleElementBinding::Wrap)
     }
@@ -41,13 +39,7 @@ impl HTMLTitleElement {
 impl HTMLTitleElementMethods for HTMLTitleElement {
     // https://html.spec.whatwg.org/multipage/#dom-title-text
     fn Text(&self) -> DOMString {
-        let mut content = String::new();
-        for child in self.upcast::<Node>().children() {
-            if let Some(text) = child.downcast::<Text>() {
-                content.push_str(&text.upcast::<CharacterData>().data());
-            }
-        }
-        DOMString::from(content)
+        self.upcast::<Node>().child_text_content()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-title-text
@@ -71,9 +63,12 @@ impl VirtualMethods for HTMLTitleElement {
         }
     }
 
-    fn bind_to_tree(&self, is_in_doc: bool) {
+    fn bind_to_tree(&self, tree_in_doc: bool) {
+        if let Some(ref s) = self.super_type() {
+            s.bind_to_tree(tree_in_doc);
+        }
         let node = self.upcast::<Node>();
-        if is_in_doc {
+        if tree_in_doc {
             node.owner_doc().title_changed();
         }
     }

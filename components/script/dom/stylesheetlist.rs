@@ -4,7 +4,6 @@
 
 use dom::bindings::codegen::Bindings::StyleSheetListBinding;
 use dom::bindings::codegen::Bindings::StyleSheetListBinding::StyleSheetListMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::document::Document;
@@ -29,26 +28,29 @@ impl StyleSheetList {
     #[allow(unrooted_must_root)]
     pub fn new(window: &Window, document: JS<Document>) -> Root<StyleSheetList> {
         reflect_dom_object(box StyleSheetList::new_inherited(document),
-                           GlobalRef::Window(window), StyleSheetListBinding::Wrap)
+                           window, StyleSheetListBinding::Wrap)
     }
 }
 
 impl StyleSheetListMethods for StyleSheetList {
     // https://drafts.csswg.org/cssom/#dom-stylesheetlist-length
     fn Length(&self) -> u32 {
-       self.document.stylesheets().len() as u32
+       self.document.with_style_sheets_in_document(|s| s.len() as u32)
     }
 
     // https://drafts.csswg.org/cssom/#dom-stylesheetlist-item
-    fn Item(&self, _index: u32) -> Option<Root<StyleSheet>> {
-        None
-        //TODO Create a new StyleSheet object and return it
+    fn Item(&self, index: u32) -> Option<Root<StyleSheet>> {
+        // XXXManishearth this  doesn't handle the origin clean flag
+        // and is a cors vulnerability
+        self.document.with_style_sheets_in_document(|sheets| {
+            sheets.get(index as usize)
+                  .and_then(|sheet| sheet.node.get_cssom_stylesheet())
+                  .map(Root::upcast)
+        })
     }
 
     // check-tidy: no specs after this line
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<StyleSheet>>{
-        let item = self.Item(index);
-        *found = item.is_some();
-        item
+    fn IndexedGetter(&self, index: u32) -> Option<Root<StyleSheet>> {
+        self.Item(index)
     }
 }

@@ -10,7 +10,6 @@ function isInterfaceNuked(name) {
   }, "Historical DOM features must be removed: " + name)
 }
 var nukedInterfaces = [
-  "CDATASection",
   "DOMConfiguration",
   "DOMError",
   "DOMErrorHandler",
@@ -39,7 +38,6 @@ function isNukedFromDocument(name) {
   }, "Historical DOM features must be removed: " + name)
 }
 var documentNuked = [
-  "createCDATASection",
   "createEntityReference",
   "xmlEncoding",
   "xmlStandalone",
@@ -72,6 +70,18 @@ var elementNuked = [
   "setIdAttributeNode"
 ]
 elementNuked.forEach(isNukedFromElement)
+
+function isNukedFromAttr(name) {
+  test(function() {
+    var attr = document.createAttribute("test")
+    assert_equals(attr[name], undefined)
+  }, "Attr member must be nuked: " + name)
+}
+var attrNuked = [
+  "schemaTypeInfo",
+  "isId"
+]
+attrNuked.forEach(isNukedFromAttr)
 
 function isNukedFromDoctype(name) {
   test(function() {
@@ -131,4 +141,29 @@ var windowNuked = [
   "attachEvent"
 ]
 windowNuked.forEach(isNukedFromWindow)
+
+function isRemovedFromEvent(name) {
+  test(() => {
+    assert_equals(Event[name], undefined)
+  }, "Event should not have this constant: " + name)
+}
+var EventRemoved = [
+  "MOUSEDOWN",
+  "MOUSEUP",
+  "MOUSEOVER",
+  "MOUSEOUT",
+  "MOUSEMOVE",
+  "MOUSEDRAG",
+  "CLICK",
+  "DBLCLICK",
+  "KEYDOWN",
+  "KEYUP",
+  "KEYPRESS",
+  "DRAGDROP",
+  "FOCUS",
+  "BLUR",
+  "SELECT",
+  "CHANGE"
+]
+EventRemoved.forEach(isRemovedFromEvent)
 </script>

@@ -11,43 +11,49 @@ use dom::bindings::codegen::Bindings::FileListBinding::FileListMethods;
 use dom::bindings::codegen::Bindings::HTMLInputElementBinding;
 use dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use dom::bindings::codegen::Bindings::KeyboardEventBinding::KeyboardEventMethods;
+use dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
+use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::error::{Error, ErrorResult};
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, LayoutJS, Root, RootedReference, MutNullableHeap};
+use dom::bindings::js::{JS, LayoutJS, MutNullableJS, Root, RootedReference};
 use dom::bindings::str::DOMString;
 use dom::document::Document;
-use dom::element::{AttributeMutation, Element, RawLayoutElementHelpers, LayoutElementHelpers};
+use dom::element::{AttributeMutation, Element, LayoutElementHelpers, RawLayoutElementHelpers};
 use dom::event::{Event, EventBubbles, EventCancelable};
 use dom::eventtarget::EventTarget;
 use dom::file::File;
 use dom::filelist::FileList;
+use dom::globalscope::GlobalScope;
 use dom::htmlelement::HTMLElement;
 use dom::htmlfieldsetelement::HTMLFieldSetElement;
-use dom::htmlformelement::{FormDatumValue, FormControl, FormDatum, FormSubmitter, HTMLFormElement};
+use dom::htmlformelement::{FormControl, FormDatum, FormDatumValue, FormSubmitter, HTMLFormElement};
 use dom::htmlformelement::{ResetFrom, SubmittedFrom};
 use dom::keyboardevent::KeyboardEvent;
+use dom::mouseevent::MouseEvent;
 use dom::node::{Node, NodeDamage, UnbindContext};
 use dom::node::{document_from_node, window_from_node};
 use dom::nodelist::NodeList;
 use dom::validation::Validatable;
+use dom::validitystate::ValidationFlags;
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
 use ipc_channel::ipc::{self, IpcSender};
 use mime_guess;
-use msg::constellation_msg::Key;
+use net_traits::{CoreResourceMsg, IpcSend};
 use net_traits::blob_url_store::get_blob_origin;
 use net_traits::filemanager_thread::{FileManagerThreadMsg, FilterPattern};
-use net_traits::{IpcSend, CoreResourceMsg};
+use script_layout_interface::rpc::TextIndexResponse;
 use script_traits::ScriptMsg as ConstellationMsg;
+use servo_atoms::Atom;
 use std::borrow::ToOwned;
 use std::cell::Cell;
 use std::ops::Range;
-use string_cache::Atom;
 use style::attr::AttrValue;
 use style::element_state::*;
 use style::str::split_commas;
+use textinput::{SelectionDirection, TextInput};
 use textinput::KeyReaction::{DispatchInput, Nothing, RedrawSelection, TriggerDefaultAction};
 use textinput::Lines::Single;
-use textinput::{TextInput, SelectionDirection};
 
 const DEFAULT_SUBMIT_VALUE: &'static str = "Submit";
 const DEFAULT_RESET_VALUE: &'static str = "Reset";
@@ -85,13 +91,14 @@ pub struct HTMLInputElement {
     value_changed: Cell<bool>,
     size: Cell<u32>,
     maxlength: Cell<i32>,
+    minlength: Cell<i32>,
     #[ignore_heap_size_of = "#7193"]
     textinput: DOMRefCell<TextInput<IpcSender<ConstellationMsg>>>,
     activation_state: DOMRefCell<InputActivationState>,
     // https://html.spec.whatwg.org/multipage/#concept-input-value-dirty-flag
     value_dirty: Cell<bool>,
 
-    filelist: MutNullableHeap<JS<FileList>>,
+    filelist: MutNullableJS<FileList>,
 }
 
 #[derive(JSTraceable)]
@@ -123,39 +130,46 @@ impl InputActivationState {
 
 static DEFAULT_INPUT_SIZE: u32 = 20;
 static DEFAULT_MAX_LENGTH: i32 = -1;
+static DEFAULT_MIN_LENGTH: i32 = -1;
 
 impl HTMLInputElement {
-    fn new_inherited(localName: Atom, prefix: Option<DOMString>, document: &Document) -> HTMLInputElement {
-        let chan = document.window().constellation_chan().clone();
+    fn new_inherited(local_name: LocalName, prefix: Option<DOMString>, document: &Document) -> HTMLInputElement {
+        let chan = document.window().upcast::<GlobalScope>().constellation_chan().clone();
         HTMLInputElement {
             htmlelement:
                 HTMLElement::new_inherited_with_state(IN_ENABLED_STATE | IN_READ_WRITE_STATE,
-                                                      localName, prefix, document),
+                                                      local_name, prefix, document),
             input_type: Cell::new(InputType::InputText),
             placeholder: DOMRefCell::new(DOMString::new()),
             checked_changed: Cell::new(false),
             value_changed: Cell::new(false),
             maxlength: Cell::new(DEFAULT_MAX_LENGTH),
+            minlength: Cell::new(DEFAULT_MIN_LENGTH),
             size: Cell::new(DEFAULT_INPUT_SIZE),
-            textinput: DOMRefCell::new(TextInput::new(Single, DOMString::new(), chan, None, SelectionDirection::None)),
+            textinput: DOMRefCell::new(TextInput::new(Single,
+                                                      DOMString::new(),
+                                                      chan,
+                                                      None,
+                                                      None,
+                                                      SelectionDirection::None)),
             activation_state: DOMRefCell::new(InputActivationState::new()),
             value_dirty: Cell::new(false),
-            filelist: MutNullableHeap::new(None),
+            filelist: MutNullableJS::new(None),
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLInputElement> {
-        Node::reflect_node(box HTMLInputElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLInputElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLInputElementBinding::Wrap)
     }
 
     pub fn type_(&self) -> Atom {
         self.upcast::<Element>()
-            .get_attribute(&ns!(), &atom!("type"))
+            .get_attribute(&ns!(), &local_name!("type"))
             .map_or_else(|| atom!(""), |a| a.value().as_atom().to_owned())
     }
 
@@ -200,7 +214,7 @@ impl LayoutHTMLInputElementHelpers for LayoutJS<HTMLInputElement> {
         unsafe fn get_raw_attr_value(input: LayoutJS<HTMLInputElement>, default: &str) -> String {
             let elem = input.upcast::<Element>();
             let value = (*elem.unsafe_get())
-                .get_attr_val_for_layout(&ns!(), &atom!("value"))
+                .get_attr_val_for_layout(&ns!(), &local_name!("value"))
                 .unwrap_or(default);
             String::from(value)
         }
@@ -345,13 +359,13 @@ impl HTMLInputElementMethods for HTMLInputElement {
     make_enumerated_getter!(Type,
                             "type",
                             "text",
-                            ("hidden") | ("search") | ("tel") |
-                            ("url") | ("email") | ("password") |
-                            ("datetime") | ("date") | ("month") |
-                            ("week") | ("time") | ("datetime-local") |
-                            ("number") | ("range") | ("color") |
-                            ("checkbox") | ("radio") | ("file") |
-                            ("submit") | ("image") | ("reset") | ("button"));
+                            "hidden" | "search" | "tel" |
+                            "url" | "email" | "password" |
+                            "datetime" | "date" | "month" |
+                            "week" | "time" | "datetime-local" |
+                            "number" | "range" | "color" |
+                            "checkbox" | "radio" | "file" |
+                            "submit" | "image" | "reset" | "button");
 
     // https://html.spec.whatwg.org/multipage/#dom-input-type
     make_atomic_setter!(SetType, "type");
@@ -362,13 +376,13 @@ impl HTMLInputElementMethods for HTMLInputElement {
             ValueMode::Value => self.textinput.borrow().get_content(),
             ValueMode::Default => {
                 self.upcast::<Element>()
-                    .get_attribute(&ns!(), &atom!("value"))
+                    .get_attribute(&ns!(), &local_name!("value"))
                     .map_or(DOMString::from(""),
                             |a| DOMString::from(a.summarize().value))
             }
             ValueMode::DefaultOn => {
                 self.upcast::<Element>()
-                    .get_attribute(&ns!(), &atom!("value"))
+                    .get_attribute(&ns!(), &local_name!("value"))
                     .map_or(DOMString::from("on"),
                             |a| DOMString::from(a.summarize().value))
             }
@@ -398,12 +412,12 @@ impl HTMLInputElementMethods for HTMLInputElement {
             }
             ValueMode::Default |
             ValueMode::DefaultOn => {
-                self.upcast::<Element>().set_string_attribute(&atom!("value"), value);
+                self.upcast::<Element>().set_string_attribute(&local_name!("value"), value);
             }
             ValueMode::Filename => {
                 if value.is_empty() {
                     let window = window_from_node(self);
-                    let fl = FileList::new(window.r(), vec![]);
+                    let fl = FileList::new(&window, vec![]);
                     self.filelist.set(Some(&fl));
                 } else {
                     return Err(Error::InvalidState);
@@ -444,13 +458,13 @@ impl HTMLInputElementMethods for HTMLInputElement {
     make_enumerated_getter!(FormEnctype,
                             "formenctype",
                             "application/x-www-form-urlencoded",
-                            ("text/plain") | ("multipart/form-data"));
+                            "text/plain" | "multipart/form-data");
 
     // https://html.spec.whatwg.org/multipage/#dom-input-formenctype
     make_setter!(SetFormEnctype, "formenctype");
 
     // https://html.spec.whatwg.org/multipage/#dom-input-formmethod
-    make_enumerated_getter!(FormMethod, "formmethod", "get", ("post") | ("dialog"));
+    make_enumerated_getter!(FormMethod, "formmethod", "get", "post" | "dialog");
 
     // https://html.spec.whatwg.org/multipage/#dom-input-formmethod
     make_setter!(SetFormMethod, "formmethod");
@@ -478,6 +492,12 @@ impl HTMLInputElementMethods for HTMLInputElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-input-maxlength
     make_limited_int_setter!(SetMaxLength, "maxlength", DEFAULT_MAX_LENGTH);
+
+    // https://html.spec.whatwg.org/multipage/#dom-input-minlength
+    make_int_getter!(MinLength, "minlength", DEFAULT_MIN_LENGTH);
+
+    // https://html.spec.whatwg.org/multipage/#dom-input-minlength
+    make_limited_int_setter!(SetMinLength, "minlength", DEFAULT_MIN_LENGTH);
 
     // https://html.spec.whatwg.org/multipage/#dom-input-min
     make_getter!(Min, "min");
@@ -580,7 +600,7 @@ impl HTMLInputElementMethods for HTMLInputElement {
             atom!("select"),
             EventBubbles::Bubbles,
             EventCancelable::NotCancelable,
-            window.r());
+            &window);
         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
     }
 
@@ -616,7 +636,7 @@ fn broadcast_radio_checked(broadcaster: &HTMLInputElement, group: Option<&Atom>)
                         owner: Option<&HTMLFormElement>, group: Option<&Atom>) {
         let iter = doc_node.query_selector_iter(DOMString::from("input[type=radio]")).unwrap()
                 .filter_map(Root::downcast::<HTMLInputElement>)
-                .filter(|r| in_same_group(r.r(), owner, group) && broadcaster != r.r());
+                .filter(|r| in_same_group(&r, owner, group) && broadcaster != &**r);
         for ref r in iter {
             if r.Checked() {
                 r.SetChecked(false);
@@ -719,7 +739,7 @@ impl HTMLInputElement {
     fn radio_group_name(&self) -> Option<Atom> {
         //TODO: determine form owner
         self.upcast::<Element>()
-            .get_attribute(&ns!(), &atom!("name"))
+            .get_attribute(&ns!(), &local_name!("name"))
             .map(|name| name.value().as_atom().clone())
     }
 
@@ -780,7 +800,7 @@ impl HTMLInputElement {
     fn select_files(&self, opt_test_paths: Option<Vec<DOMString>>) {
         let window = window_from_node(self);
         let origin = get_blob_origin(&window.get_url());
-        let resource_threads = window.resource_threads();
+        let resource_threads = window.upcast::<GlobalScope>().resource_threads();
 
         let mut files: Vec<Root<File>> = vec![];
         let mut error = None;
@@ -798,7 +818,7 @@ impl HTMLInputElement {
             match recv.recv().expect("IpcSender side error") {
                 Ok(selected_files) => {
                     for selected in selected_files {
-                        files.push(File::new_from_selected(window.r(), selected));
+                        files.push(File::new_from_selected(&window, selected));
                     }
                 },
                 Err(err) => error = Some(err),
@@ -821,7 +841,7 @@ impl HTMLInputElement {
 
             match recv.recv().expect("IpcSender side error") {
                 Ok(selected) => {
-                    files.push(File::new_from_selected(window.r(), selected));
+                    files.push(File::new_from_selected(&window, selected));
                 },
                 Err(err) => error = Some(err),
             };
@@ -830,15 +850,11 @@ impl HTMLInputElement {
         if let Some(err) = error {
             debug!("Input file select error: {:?}", err);
         } else {
-            let filelist = FileList::new(window.r(), files);
+            let filelist = FileList::new(&window, files);
             self.filelist.set(Some(&filelist));
 
-            target.fire_event("input",
-                              EventBubbles::Bubbles,
-                              EventCancelable::NotCancelable);
-            target.fire_event("change",
-                              EventBubbles::Bubbles,
-                              EventCancelable::NotCancelable);
+            target.fire_bubbling_event(atom!("input"));
+            target.fire_bubbling_event(atom!("change"));
         }
     }
 }
@@ -852,7 +868,7 @@ impl VirtualMethods for HTMLInputElement {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
 
         match attr.local_name() {
-            &atom!("disabled") => {
+            &local_name!("disabled") => {
                 let disabled_state = match mutation {
                     AttributeMutation::Set(None) => true,
                     AttributeMutation::Set(Some(_)) => {
@@ -871,7 +887,7 @@ impl VirtualMethods for HTMLInputElement {
                     el.set_read_write_state(read_write);
                 }
             },
-            &atom!("checked") if !self.checked_changed.get() => {
+            &local_name!("checked") if !self.checked_changed.get() => {
                 let checked_state = match mutation {
                     AttributeMutation::Set(None) => true,
                     AttributeMutation::Set(Some(_)) => {
@@ -882,13 +898,13 @@ impl VirtualMethods for HTMLInputElement {
                 };
                 self.update_checked_state(checked_state, false);
             },
-            &atom!("size") => {
+            &local_name!("size") => {
                 let size = mutation.new_value(attr).map(|value| {
                     value.as_uint()
                 });
                 self.size.set(size.unwrap_or(DEFAULT_INPUT_SIZE));
             }
-            &atom!("type") => {
+            &local_name!("type") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -916,7 +932,7 @@ impl VirtualMethods for HTMLInputElement {
 
                         if new_type == InputType::InputFile {
                             let window = window_from_node(self);
-                            let filelist = FileList::new(window.r(), vec![]);
+                            let filelist = FileList::new(&window, vec![]);
                             self.filelist.set(Some(&filelist));
                         }
 
@@ -933,7 +949,7 @@ impl VirtualMethods for HTMLInputElement {
                             // Step 2
                             (_, _, ValueMode::Value) if old_value_mode != ValueMode::Value => {
                                 self.SetValue(self.upcast::<Element>()
-                                                  .get_attribute(&ns!(), &atom!("value"))
+                                                  .get_attribute(&ns!(), &local_name!("value"))
                                                   .map_or(DOMString::from(""),
                                                           |a| DOMString::from(a.summarize().value)))
                                     .expect("Failed to set input value on type change to ValueMode::Value.");
@@ -972,17 +988,17 @@ impl VirtualMethods for HTMLInputElement {
 
                 self.update_placeholder_shown_state();
             },
-            &atom!("value") if !self.value_changed.get() => {
+            &local_name!("value") if !self.value_changed.get() => {
                 let value = mutation.new_value(attr).map(|value| (**value).to_owned());
                 self.textinput.borrow_mut().set_content(
                     value.map_or(DOMString::new(), DOMString::from));
                 self.update_placeholder_shown_state();
             },
-            &atom!("name") if self.input_type.get() == InputType::InputRadio => {
+            &local_name!("name") if self.input_type.get() == InputType::InputRadio => {
                 self.radio_group_updated(
                     mutation.new_value(attr).as_ref().map(|name| name.as_atom()));
             },
-            &atom!("maxlength") => {
+            &local_name!("maxlength") => {
                 match *attr.value() {
                     AttrValue::Int(_, value) => {
                         if value < 0 {
@@ -993,8 +1009,20 @@ impl VirtualMethods for HTMLInputElement {
                     },
                     _ => panic!("Expected an AttrValue::Int"),
                 }
-            }
-            &atom!("placeholder") => {
+            },
+            &local_name!("minlength") => {
+                match *attr.value() {
+                    AttrValue::Int(_, value) => {
+                        if value < 0 {
+                            self.textinput.borrow_mut().min_length = None
+                        } else {
+                            self.textinput.borrow_mut().min_length = Some(value as usize)
+                        }
+                    },
+                    _ => panic!("Expected an AttrValue::Int"),
+                }
+            },
+            &local_name!("placeholder") => {
                 {
                     let mut placeholder = self.placeholder.borrow_mut();
                     placeholder.clear();
@@ -1005,7 +1033,7 @@ impl VirtualMethods for HTMLInputElement {
                 }
                 self.update_placeholder_shown_state();
             },
-            &atom!("readonly") if self.input_type.get() == InputType::InputText => {
+            &local_name!("readonly") if self.input_type.get() == InputType::InputText => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -1020,13 +1048,14 @@ impl VirtualMethods for HTMLInputElement {
         }
     }
 
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &atom!("accept") => AttrValue::from_comma_separated_tokenlist(value.into()),
-            &atom!("name") => AttrValue::from_atomic(value.into()),
-            &atom!("size") => AttrValue::from_limited_u32(value.into(), DEFAULT_INPUT_SIZE),
-            &atom!("type") => AttrValue::from_atomic(value.into()),
-            &atom!("maxlength") => AttrValue::from_limited_i32(value.into(), DEFAULT_MAX_LENGTH),
+            &local_name!("accept") => AttrValue::from_comma_separated_tokenlist(value.into()),
+            &local_name!("name") => AttrValue::from_atomic(value.into()),
+            &local_name!("size") => AttrValue::from_limited_u32(value.into(), DEFAULT_INPUT_SIZE),
+            &local_name!("type") => AttrValue::from_atomic(value.into()),
+            &local_name!("maxlength") => AttrValue::from_limited_i32(value.into(), DEFAULT_MAX_LENGTH),
+            &local_name!("minlength") => AttrValue::from_limited_i32(value.into(), DEFAULT_MIN_LENGTH),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }
@@ -1063,6 +1092,33 @@ impl VirtualMethods for HTMLInputElement {
             //TODO: set the editing position for text inputs
 
             document_from_node(self).request_focus(self.upcast());
+            if (self.input_type.get() == InputType::InputText ||
+                self.input_type.get() == InputType::InputPassword) &&
+                // Check if we display a placeholder. Layout doesn't know about this.
+                !self.textinput.borrow().is_empty() {
+                    if let Some(mouse_event) = event.downcast::<MouseEvent>() {
+                        // dispatch_key_event (document.rs) triggers a click event when releasing
+                        // the space key. There's no nice way to catch this so let's use this for
+                        // now.
+                        if !(mouse_event.ScreenX() == 0 && mouse_event.ScreenY() == 0 &&
+                            mouse_event.GetRelatedTarget().is_none()) {
+                                let window = window_from_node(self);
+                                let translated_x = mouse_event.ClientX() + window.PageXOffset();
+                                let translated_y = mouse_event.ClientY() + window.PageYOffset();
+                                let TextIndexResponse(index) = window.text_index_query(
+                                    self.upcast::<Node>().to_trusted_node_address(),
+                                    translated_x,
+                                    translated_y
+                                );
+                                if let Some(i) = index {
+                                    self.textinput.borrow_mut().edit_point.index = i as usize;
+                                    // trigger redraw
+                                    self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
+                                    event.PreventDefault();
+                                }
+                            }
+                    }
+                }
         } else if event.type_() == atom!("keydown") && !event.DefaultPrevented() &&
             (self.input_type.get() == InputType::InputText ||
              self.input_type.get() == InputType::InputPassword) {
@@ -1072,50 +1128,52 @@ impl VirtualMethods for HTMLInputElement {
                     let action = self.textinput.borrow_mut().handle_keydown(keyevent);
                     match action {
                         TriggerDefaultAction => {
-                            if let Some(key) = keyevent.get_key() {
-                                match key {
-                                    Key::Enter | Key::KpEnter =>
-                                        self.implicit_submission(keyevent.CtrlKey(),
-                                                                 keyevent.ShiftKey(),
-                                                                 keyevent.AltKey(),
-                                                                 keyevent.MetaKey()),
-                                    // Issue #12071: Tab should not submit forms
-                                    // TODO(3982): Implement form keyboard navigation
-                                    _ => (),
-                                }
-                            };
+                            self.implicit_submission(keyevent.CtrlKey(),
+                                                     keyevent.ShiftKey(),
+                                                     keyevent.AltKey(),
+                                                     keyevent.MetaKey());
                         },
                         DispatchInput => {
                             self.value_changed.set(true);
                             self.update_placeholder_shown_state();
-
-                            if event.IsTrusted() {
-                                let window = window_from_node(self);
-                                let _ = window.user_interaction_task_source().queue_event(
-                                    &self.upcast(),
-                                    atom!("input"),
-                                    EventBubbles::Bubbles,
-                                    EventCancelable::NotCancelable,
-                                    window.r());
-                            }
-
                             self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
-                            event.PreventDefault();
+                            event.mark_as_handled();
                         }
                         RedrawSelection => {
                             self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
-                            event.PreventDefault();
+                            event.mark_as_handled();
                         }
                         Nothing => (),
                     }
                 }
-        }
+        } else if event.type_() == atom!("keypress") && !event.DefaultPrevented() &&
+            (self.input_type.get() == InputType::InputText ||
+             self.input_type.get() == InputType::InputPassword) {
+                if event.IsTrusted() {
+                    let window = window_from_node(self);
+                    let _ = window.user_interaction_task_source()
+                                  .queue_event(&self.upcast(),
+                                               atom!("input"),
+                                               EventBubbles::Bubbles,
+                                               EventCancelable::NotCancelable,
+                                               &window);
+                }
+            }
     }
 }
 
 impl FormControl for HTMLInputElement {}
 
-impl Validatable for HTMLInputElement {}
+impl Validatable for HTMLInputElement {
+    fn is_instance_validatable(&self) -> bool {
+        // https://html.spec.whatwg.org/multipage/#candidate-for-constraint-validation
+        true
+    }
+    fn validate(&self, _validate_flags: ValidationFlags) -> bool {
+        // call stub methods defined in validityState.rs file here according to the flags set in validate_flags
+        true
+    }
+}
 
 impl Activatable for HTMLInputElement {
     fn as_element(&self) -> &Element {
@@ -1172,7 +1230,7 @@ impl Activatable for HTMLInputElement {
                             .unwrap()
                             .filter_map(Root::downcast::<HTMLInputElement>)
                             .find(|r| {
-                                in_same_group(r.r(), owner.r(), group.as_ref()) &&
+                                in_same_group(&*r, owner.r(), group.as_ref()) &&
                                 r.Checked()
                             });
                     cache.checked_radio = checked_member.r().map(JS::from_ref);
@@ -1261,12 +1319,8 @@ impl Activatable for HTMLInputElement {
                 // https://html.spec.whatwg.org/multipage/#radio-button-state-(type=radio):activation-behavior
                 // Check if document owner is fully active
                 let target = self.upcast::<EventTarget>();
-                target.fire_event("input",
-                                  EventBubbles::Bubbles,
-                                  EventCancelable::NotCancelable);
-                target.fire_event("change",
-                                  EventBubbles::Bubbles,
-                                  EventCancelable::NotCancelable);
+                target.fire_bubbling_event(atom!("input"));
+                target.fire_bubbling_event(atom!("change"));
             },
             InputType::InputFile => self.select_files(None),
             _ => ()
@@ -1275,7 +1329,7 @@ impl Activatable for HTMLInputElement {
 
     // https://html.spec.whatwg.org/multipage/#implicit-submission
     #[allow(unsafe_code)]
-    fn implicit_submission(&self, ctrlKey: bool, shiftKey: bool, altKey: bool, metaKey: bool) {
+    fn implicit_submission(&self, ctrl_key: bool, shift_key: bool, alt_key: bool, meta_key: bool) {
         let doc = document_from_node(self);
         let node = doc.upcast::<Node>();
         let owner = self.form_owner();
@@ -1295,10 +1349,10 @@ impl Activatable for HTMLInputElement {
             Some(ref button) => {
                 if button.is_instance_activatable() {
                     synthetic_click_activation(button.as_element(),
-                                               ctrlKey,
-                                               shiftKey,
-                                               altKey,
-                                               metaKey,
+                                               ctrl_key,
+                                               shift_key,
+                                               alt_key,
+                                               meta_key,
                                                ActivationSource::NotFromClick)
                 }
             }
@@ -1321,7 +1375,7 @@ impl Activatable for HTMLInputElement {
                     return;
                 }
                 form.submit(SubmittedFrom::NotFromForm,
-                            FormSubmitter::FormElement(form.r()));
+                            FormSubmitter::FormElement(&form));
             }
         }
     }

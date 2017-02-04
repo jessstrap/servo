@@ -8,7 +8,7 @@
  */
 
 // https://dom.spec.whatwg.org/#interface-document
-[Constructor, Exposed=(Window,Worker)]
+[Constructor]
 interface Document : Node {
   [SameObject]
   readonly attribute DOMImplementation implementation;
@@ -28,8 +28,8 @@ interface Document : Node {
   readonly attribute DocumentType? doctype;
   [Pure]
   readonly attribute Element? documentElement;
-  HTMLCollection getElementsByTagName(DOMString localName);
-  HTMLCollection getElementsByTagNameNS(DOMString? namespace, DOMString localName);
+  HTMLCollection getElementsByTagName(DOMString qualifiedName);
+  HTMLCollection getElementsByTagNameNS(DOMString? namespace, DOMString qualifiedName);
   HTMLCollection getElementsByClassName(DOMString classNames);
 
   [NewObject, Throws]
@@ -111,11 +111,15 @@ partial /*sealed*/ interface Document {
   readonly attribute HTMLScriptElement? currentScript;
 
   // dynamic markup insertion
-  // Document open(optional DOMString type = "text/html", optional DOMString replace = "");
+  [Throws]
+  Document open(optional DOMString type = "text/html", optional DOMString replace = "");
   // WindowProxy open(DOMString url, DOMString name, DOMString features, optional boolean replace = false);
-  // void close();
-  // void write(DOMString... text);
-  // void writeln(DOMString... text);
+  [Throws]
+  void close();
+  [Throws]
+  void write(DOMString... text);
+  [Throws]
+  void writeln(DOMString... text);
 
   // user interaction
   readonly attribute Window?/*Proxy?*/ defaultView;
@@ -187,4 +191,16 @@ partial interface Document {
 // https://drafts.csswg.org/cssom/#extensions-to-the-document-interface
 partial interface Document {
   [SameObject] readonly attribute StyleSheetList styleSheets;
+};
+
+// https://fullscreen.spec.whatwg.org/#api
+partial interface Document {
+  [LenientSetter] readonly attribute boolean fullscreenEnabled;
+  [LenientSetter] readonly attribute Element? fullscreenElement;
+  [LenientSetter] readonly attribute boolean fullscreen; // historical
+
+  Promise<void> exitFullscreen();
+
+  attribute EventHandler onfullscreenchange;
+  attribute EventHandler onfullscreenerror;
 };

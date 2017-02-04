@@ -2,37 +2,47 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use app_units::Au;
+use app_units::{Au, AU_PER_PX};
+use dom::activation::Activatable;
 use dom::attr::Attr;
 use dom::bindings::cell::DOMRefCell;
+use dom::bindings::codegen::Bindings::DOMRectBinding::DOMRectBinding::DOMRectMethods;
+use dom::bindings::codegen::Bindings::ElementBinding::ElementBinding::ElementMethods;
 use dom::bindings::codegen::Bindings::HTMLImageElementBinding;
 use dom::bindings::codegen::Bindings::HTMLImageElementBinding::HTMLImageElementMethods;
+use dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::{LayoutJS, Root};
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::str::DOMString;
 use dom::document::Document;
 use dom::element::{AttributeMutation, Element, RawLayoutElementHelpers};
+use dom::element::{reflect_cross_origin_attribute, set_cross_origin_attribute};
+use dom::event::Event;
 use dom::eventtarget::EventTarget;
+use dom::htmlareaelement::HTMLAreaElement;
 use dom::htmlelement::HTMLElement;
+use dom::htmlmapelement::HTMLMapElement;
+use dom::mouseevent::MouseEvent;
 use dom::node::{Node, NodeDamage, document_from_node, window_from_node};
 use dom::values::UNSIGNED_LONG_MAX;
 use dom::virtualmethods::VirtualMethods;
+use dom::window::Window;
+use euclid::point::Point2D;
+use html5ever_atoms::LocalName;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
 use net_traits::image::base::{Image, ImageMetadata};
 use net_traits::image_cache_thread::{ImageResponder, ImageResponse};
-use script_runtime::CommonScriptMsg;
-use script_runtime::ScriptThreadEventCategory::UpdateReplacedElement;
+use num_traits::ToPrimitive;
 use script_thread::Runnable;
+use servo_url::ServoUrl;
+use std::i32;
 use std::sync::Arc;
-use string_cache::Atom;
 use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 use task_source::TaskSource;
-use url::Url;
 
 #[derive(JSTraceable, HeapSizeOf)]
 #[allow(dead_code)]
@@ -45,8 +55,9 @@ enum State {
 #[derive(JSTraceable, HeapSizeOf)]
 struct ImageRequest {
     state: State,
-    parsed_url: Option<Url>,
+    parsed_url: Option<ServoUrl>,
     source_url: Option<DOMString>,
+    #[ignore_heap_size_of = "Arc"]
     image: Option<Arc<Image>>,
     metadata: Option<ImageMetadata>,
 }
@@ -58,7 +69,7 @@ pub struct HTMLImageElement {
 }
 
 impl HTMLImageElement {
-    pub fn get_url(&self) -> Option<Url> {
+    pub fn get_url(&self) -> Option<ServoUrl> {
         self.current_request.borrow().parsed_url.clone()
     }
 }
@@ -85,18 +96,17 @@ impl Runnable for ImageResponseHandlerRunnable {
     fn handler(self: Box<Self>) {
         // Update the image field
         let element = self.element.root();
-        let element_ref = element.r();
-        let (image, metadata, trigger_image_load) = match self.image {
+        let (image, metadata, trigger_image_load, trigger_image_error) = match self.image {
             ImageResponse::Loaded(image) | ImageResponse::PlaceholderLoaded(image) => {
-                (Some(image.clone()), Some(ImageMetadata { height: image.height, width: image.width } ), true)
+                (Some(image.clone()), Some(ImageMetadata { height: image.height, width: image.width } ), true, false)
             }
             ImageResponse::MetadataLoaded(meta) => {
-                (None, Some(meta), false)
+                (None, Some(meta), false, false)
             }
-            ImageResponse::None => (None, None, true)
+            ImageResponse::None => (None, None, false, true)
         };
-        element_ref.current_request.borrow_mut().image = image;
-        element_ref.current_request.borrow_mut().metadata = metadata;
+        element.current_request.borrow_mut().image = image;
+        element.current_request.borrow_mut().metadata = metadata;
 
         // Mark the node dirty
         let document = document_from_node(&*element);
@@ -104,11 +114,16 @@ impl Runnable for ImageResponseHandlerRunnable {
 
         // Fire image.onload
         if trigger_image_load {
-            element.upcast::<EventTarget>().fire_simple_event("load");
+            element.upcast::<EventTarget>().fire_event(atom!("load"));
+        }
+
+        // Fire image.onerror
+        if trigger_image_error {
+            element.upcast::<EventTarget>().fire_event(atom!("error"));
         }
 
         // Trigger reflow
-        let window = window_from_node(document.r());
+        let window = window_from_node(&*document);
         window.add_pending_reflow();
     }
 }
@@ -116,7 +131,7 @@ impl Runnable for ImageResponseHandlerRunnable {
 impl HTMLImageElement {
     /// Makes the local `image` member match the status of the `src` attribute and starts
     /// prefetching the image. This method must be called after `src` is changed.
-    fn update_image(&self, value: Option<(DOMString, Url)>) {
+    fn update_image(&self, value: Option<(DOMString, ServoUrl)>) {
         let document = document_from_node(self);
         let window = document.window();
         let image_cache = window.image_cache_thread();
@@ -134,7 +149,7 @@ impl HTMLImageElement {
 
                     let trusted_node = Trusted::new(self);
                     let (responder_sender, responder_receiver) = ipc::channel().unwrap();
-                    let script_chan = window.networking_task_source();
+                    let task_source = window.networking_task_source();
                     let wrapper = window.get_runnable_wrapper();
                     ROUTER.add_route(responder_receiver.to_opaque(), box move |message| {
                         // Return the image via a message to the script thread, which marks the element
@@ -142,12 +157,10 @@ impl HTMLImageElement {
                         let image_response = message.to().unwrap();
                         let runnable = box ImageResponseHandlerRunnable::new(
                             trusted_node.clone(), image_response);
-                        let runnable = wrapper.wrap_runnable(runnable);
-                        let _ = script_chan.send(CommonScriptMsg::RunnableMsg(
-                            UpdateReplacedElement, runnable));
+                        let _ = task_source.queue_with_wrapper(runnable, &wrapper);
                     });
 
-                    image_cache.request_image_and_metadata(img_url,
+                    image_cache.request_image_and_metadata(img_url.into(),
                                               window.image_cache_chan(),
                                               Some(ImageResponder::new(responder_sender)));
                 } else {
@@ -174,8 +187,8 @@ impl HTMLImageElement {
                             // Step 11, substep 5
                             let img = self.img.root();
                             img.current_request.borrow_mut().source_url = Some(self.src.into());
-                            img.upcast::<EventTarget>().fire_simple_event("error");
-                            img.upcast::<EventTarget>().fire_simple_event("loadend");
+                            img.upcast::<EventTarget>().fire_event(atom!("error"));
+                            img.upcast::<EventTarget>().fire_event(atom!("loadend"));
                         }
                     }
 
@@ -184,14 +197,14 @@ impl HTMLImageElement {
                         src: src.into(),
                     };
                     let task = window.dom_manipulation_task_source();
-                    let _ = task.queue(runnable, GlobalRef::Window(window));
+                    let _ = task.queue(runnable, window.upcast());
                 }
             }
         }
     }
-    fn new_inherited(localName: Atom, prefix: Option<DOMString>, document: &Document) -> HTMLImageElement {
+    fn new_inherited(local_name: LocalName, prefix: Option<DOMString>, document: &Document) -> HTMLImageElement {
         HTMLImageElement {
-            htmlelement: HTMLElement::new_inherited(localName, prefix, document),
+            htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             current_request: DOMRefCell::new(ImageRequest {
                 state: State::Unavailable,
                 parsed_url: None,
@@ -210,19 +223,19 @@ impl HTMLImageElement {
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLImageElement> {
-        Node::reflect_node(box HTMLImageElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLImageElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLImageElementBinding::Wrap)
     }
 
-    pub fn Image(global: GlobalRef,
+    pub fn Image(window: &Window,
                  width: Option<u32>,
                  height: Option<u32>) -> Fallible<Root<HTMLImageElement>> {
-        let document = global.as_window().Document();
-        let image = HTMLImageElement::new(atom!("img"), None, document.r());
+        let document = window.Document();
+        let image = HTMLImageElement::new(local_name!("img"), None, &document);
         if let Some(w) = width {
             image.SetWidth(w);
         }
@@ -232,6 +245,38 @@ impl HTMLImageElement {
 
         Ok(image)
     }
+    pub fn areas(&self) -> Option<Vec<Root<HTMLAreaElement>>> {
+        let elem = self.upcast::<Element>();
+        let usemap_attr;
+        if elem.has_attribute(&LocalName::from("usemap")) {
+            usemap_attr = elem.get_string_attribute(&local_name!("usemap"));
+        } else {
+            return None;
+        }
+
+        let (first, last) = usemap_attr.split_at(1);
+
+        match first {
+            "#" => {},
+            _ => return None,
+        };
+
+        match last.len() {
+            0 => return None,
+            _ => {},
+        };
+
+        let map = self.upcast::<Node>()
+                      .following_siblings()
+                      .filter_map(Root::downcast::<HTMLMapElement>)
+                      .find(|n| n.upcast::<Element>().get_string_attribute(&LocalName::from("name")) == last);
+
+        let elements: Vec<Root<HTMLAreaElement>> = map.unwrap().upcast::<Node>()
+                      .children()
+                      .filter_map(Root::downcast::<HTMLAreaElement>)
+                      .collect();
+        Some(elements)
+    }
 }
 
 pub trait LayoutHTMLImageElementHelpers {
@@ -239,7 +284,7 @@ pub trait LayoutHTMLImageElementHelpers {
     unsafe fn image(&self) -> Option<Arc<Image>>;
 
     #[allow(unsafe_code)]
-    unsafe fn image_url(&self) -> Option<Url>;
+    unsafe fn image_url(&self) -> Option<ServoUrl>;
 
     fn get_width(&self) -> LengthOrPercentageOrAuto;
     fn get_height(&self) -> LengthOrPercentageOrAuto;
@@ -252,7 +297,7 @@ impl LayoutHTMLImageElementHelpers for LayoutJS<HTMLImageElement> {
     }
 
     #[allow(unsafe_code)]
-    unsafe fn image_url(&self) -> Option<Url> {
+    unsafe fn image_url(&self) -> Option<ServoUrl> {
         (*self.unsafe_get()).current_request.borrow_for_layout().parsed_url.clone()
     }
 
@@ -260,7 +305,7 @@ impl LayoutHTMLImageElementHelpers for LayoutJS<HTMLImageElement> {
     fn get_width(&self) -> LengthOrPercentageOrAuto {
         unsafe {
             (*self.upcast::<Element>().unsafe_get())
-                .get_attr_for_layout(&ns!(), &atom!("width"))
+                .get_attr_for_layout(&ns!(), &local_name!("width"))
                 .map(AttrValue::as_dimension)
                 .cloned()
                 .unwrap_or(LengthOrPercentageOrAuto::Auto)
@@ -271,7 +316,7 @@ impl LayoutHTMLImageElementHelpers for LayoutJS<HTMLImageElement> {
     fn get_height(&self) -> LengthOrPercentageOrAuto {
         unsafe {
             (*self.upcast::<Element>().unsafe_get())
-                .get_attr_for_layout(&ns!(), &atom!("height"))
+                .get_attr_for_layout(&ns!(), &local_name!("height"))
                 .map(AttrValue::as_dimension)
                 .cloned()
                 .unwrap_or(LengthOrPercentageOrAuto::Auto)
@@ -291,9 +336,14 @@ impl HTMLImageElementMethods for HTMLImageElement {
     make_setter!(SetSrc, "src");
 
     // https://html.spec.whatwg.org/multipage/#dom-img-crossOrigin
-    make_enumerated_getter!(CrossOrigin, "crossorigin", "anonymous", ("use-credentials"));
+    fn GetCrossOrigin(&self) -> Option<DOMString> {
+        reflect_cross_origin_attribute(self.upcast::<Element>())
+    }
+
     // https://html.spec.whatwg.org/multipage/#dom-img-crossOrigin
-    make_setter!(SetCrossOrigin, "crossorigin");
+    fn SetCrossOrigin(&self, value: Option<DOMString>) {
+        set_cross_origin_attribute(self.upcast::<Element>(), value);
+    }
 
     // https://html.spec.whatwg.org/multipage/#dom-img-usemap
     make_getter!(UseMap, "usemap");
@@ -308,25 +358,29 @@ impl HTMLImageElementMethods for HTMLImageElement {
     // https://html.spec.whatwg.org/multipage/#dom-img-width
     fn Width(&self) -> u32 {
         let node = self.upcast::<Node>();
-        let rect = node.bounding_content_box();
-        rect.size.width.to_px() as u32
+        match node.bounding_content_box() {
+            Some(rect) => rect.size.width.to_px() as u32,
+            None => self.NaturalWidth(),
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-img-width
     fn SetWidth(&self, value: u32) {
-        image_dimension_setter(self.upcast(), atom!("width"), value);
+        image_dimension_setter(self.upcast(), local_name!("width"), value);
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-img-height
     fn Height(&self) -> u32 {
         let node = self.upcast::<Node>();
-        let rect = node.bounding_content_box();
-        rect.size.height.to_px() as u32
+        match node.bounding_content_box() {
+            Some(rect) => rect.size.height.to_px() as u32,
+            None => self.NaturalHeight(),
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-img-height
     fn SetHeight(&self, value: u32) {
-        image_dimension_setter(self.upcast(), atom!("height"), value);
+        image_dimension_setter(self.upcast(), local_name!("height"), value);
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-img-naturalwidth
@@ -409,7 +463,7 @@ impl VirtualMethods for HTMLImageElement {
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
         match attr.local_name() {
-            &atom!("src") => {
+            &local_name!("src") => {
                 self.update_image(mutation.new_value(attr).map(|value| {
                     // FIXME(ajeffrey): convert directly from AttrValue to DOMString
                     (DOMString::from(&**value), document_from_node(self).base_url())
@@ -419,17 +473,54 @@ impl VirtualMethods for HTMLImageElement {
         }
     }
 
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &atom!("name") => AttrValue::from_atomic(value.into()),
-            &atom!("width") | &atom!("height") => AttrValue::from_dimension(value.into()),
-            &atom!("hspace") | &atom!("vspace") => AttrValue::from_u32(value.into(), 0),
+            &local_name!("name") => AttrValue::from_atomic(value.into()),
+            &local_name!("width") | &local_name!("height") => AttrValue::from_dimension(value.into()),
+            &local_name!("hspace") | &local_name!("vspace") => AttrValue::from_u32(value.into(), 0),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }
+
+    fn handle_event(&self, event: &Event) {
+       if (event.type_() == atom!("click")) {
+           let area_elements = self.areas();
+           let elements = if let Some(x) = area_elements {
+               x
+           } else {
+               return
+           };
+
+           // Fetch click coordinates
+           let mouse_event = if let Some(x) = event.downcast::<MouseEvent>() {
+               x
+           } else {
+               return;
+           };
+
+           let point = Point2D::new(mouse_event.ClientX().to_f32().unwrap(), mouse_event.ClientY().to_f32().unwrap());
+           // Walk HTMLAreaElements
+           let mut index = 0;
+           while index < elements.len() {
+               let shape = elements[index].get_shape_from_coords();
+               let p = Point2D::new(self.upcast::<Element>().GetBoundingClientRect().X() as f32,
+               self.upcast::<Element>().GetBoundingClientRect().Y() as f32);
+               let shp = if let Some(x) = shape {
+                   x.absolute_coords(p)
+               } else {
+                   return
+               };
+               if shp.hit_test(point) {
+                   elements[index].activation_behavior(event, self.upcast());
+                   return
+               }
+               index += 1;
+           }
+       }
+    }
 }
 
-fn image_dimension_setter(element: &Element, attr: Atom, value: u32) {
+fn image_dimension_setter(element: &Element, attr: LocalName, value: u32) {
     // This setter is a bit weird: the IDL type is unsigned long, but it's parsed as
     // a dimension for rendering.
     let value = if value > UNSIGNED_LONG_MAX {
@@ -437,7 +528,19 @@ fn image_dimension_setter(element: &Element, attr: Atom, value: u32) {
     } else {
         value
     };
-    let dim = LengthOrPercentageOrAuto::Length(Au::from_px(value as i32));
+
+    // FIXME: There are probably quite a few more cases of this. This is the
+    // only overflow that was hitting on automation, but we should consider what
+    // to do in the general case case.
+    //
+    // See <https://github.com/servo/app_units/issues/22>
+    let pixel_value = if value > (i32::MAX / AU_PER_PX) as u32 {
+        0
+    } else {
+        value
+    };
+
+    let dim = LengthOrPercentageOrAuto::Length(Au::from_px(pixel_value as i32));
     let value = AttrValue::Dimension(value.to_string(), dim);
     element.set_attribute(&attr, value);
 }

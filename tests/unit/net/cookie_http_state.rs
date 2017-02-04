@@ -6,12 +6,12 @@ use hyper::header::{Header, SetCookie};
 use net::cookie::Cookie;
 use net::cookie_storage::CookieStorage;
 use net_traits::CookieSource;
-use url::Url;
+use servo_url::ServoUrl;
 
 
 fn run(set_location: &str, set_cookies: &[&str], final_location: &str) -> String {
-    let mut storage = CookieStorage::new();
-    let url = Url::parse(set_location).unwrap();
+    let mut storage = CookieStorage::new(150);
+    let url = ServoUrl::parse(set_location).unwrap();
     let source = CookieSource::HTTP;
 
     // Add all cookies to the store
@@ -21,14 +21,14 @@ fn run(set_location: &str, set_cookies: &[&str], final_location: &str) -> String
         if let Ok(SetCookie(cookies)) = header {
             for bare_cookie in cookies {
                 if let Some(cookie) = Cookie::new_wrapped(bare_cookie, &url, source) {
-                    storage.push(cookie, source);
+                    storage.push(cookie, &url, source);
                 }
             }
         }
     }
 
     // Get cookies for the test location
-    let url = Url::parse(final_location).unwrap();
+    let url = ServoUrl::parse(final_location).unwrap();
     storage.cookies_for_url(&url, source).unwrap_or("".to_string())
 }
 

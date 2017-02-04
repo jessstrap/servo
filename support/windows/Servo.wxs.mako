@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Name="Servo Tech Demo"
+  <Product Id="*"
+           Name="Servo Tech Demo"
            Manufacturer="Mozilla Research"
-           Id="5807391a-3a17-476b-a5d2-5f1912569762"
            UpgradeCode="060cd15d-eab1-4614-b438-3988e3efdcf1"
            Language="1033"
            Codepage="1252"
@@ -16,6 +16,7 @@
              Languages="1033"
              SummaryCodepage="1252"
              Compressed="yes"/>
+    <MajorUpgrade AllowDowngrades="yes"/>
     <Media Id="1"
            Cabinet="Servo.cab"
            EmbedCab="yes"/>
@@ -37,148 +38,13 @@
                           WorkingDirectory="INSTALLDIR"
                           Icon="Servo.ico"
                           IconIndex="0"
-                          Arguments="-w --pref dom.mozbrowser.enabled --pref shell.builtin-key-shortcuts.enabled=false browserhtml\index.html"
                           Advertise="yes"/>
               </File>
-              <File Id="ServoManifest"
-                    Name="servo.exe.manifest"
-                    Source="${windowize(exe_path)}\servo.exe.manifest"
-                    DiskId="1"/>
-
-              <File Id="StdcxxDLL"
-                    Name="libstdc++-6.dll"
-                    Source="C:\msys64\mingw64\bin\libstdc++-6.dll"
-                    DiskId="1"/>
-              <File Id="WinpthreadDll"
-                    Name="libwinpthread-1.dll"
-                    Source="C:\msys64\mingw64\bin\libwinpthread-1.dll"
-                    DiskId="1"/>
-              <File Id="Bzip2Dll"
-                    Name="libbz2-1.dll"
-                    Source="C:\msys64\mingw64\bin\libbz2-1.dll"
-                    DiskId="1"/>
-              <File Id="GccsehDll"
-                    Name="libgcc_s_seh-1.dll"
-                    Source="C:\msys64\mingw64\bin\libgcc_s_seh-1.dll"
-                    DiskId="1"/>
-              <File Id="ExpatDll"
-                    Name="libexpat-1.dll"
-                    Source="C:\msys64\mingw64\bin\libexpat-1.dll"
-                    DiskId="1"/>
-              <File Id="ZlibDll"
-                    Name="zlib1.dll"
-                    Source="C:\msys64\mingw64\bin\zlib1.dll"
-                    DiskId="1"/>
-              <File Id="PngDll"
-                    Name="libpng16-16.dll"
-                    Source="C:\msys64\mingw64\bin\libpng16-16.dll"
-                    DiskId="1"/>
-              <File Id="IconvDll"
-                    Name="libiconv-2.dll"
-                    Source="C:\msys64\mingw64\bin\libiconv-2.dll"
-                    DiskId="1"/>
-              <File Id="GlibDll"
-                    Name="libglib-2.0-0.dll"
-                    Source="C:\msys64\mingw64\bin\libglib-2.0-0.dll"
-                    DiskId="1"/>
-              <File Id="GraphiteDll"
-                    Name="libgraphite2.dll"
-                    Source="C:\msys64\mingw64\bin\libgraphite2.dll"
-                    DiskId="1"/>
-              <File Id="IntlDll"
-                    Name="libintl-8.dll"
-                    Source="C:\msys64\mingw64\bin\libintl-8.dll"
-                    DiskId="1"/>
-              <File Id="PcreDll"
-                    Name="libpcre-1.dll"
-                    Source="C:\msys64\mingw64\bin\libpcre-1.dll"
-                    DiskId="1"/>
-              <File Id="Eay32Dll"
-                    Name="libeay32.dll"
-                    Source="C:\msys64\mingw64\bin\libeay32.dll"
-                    DiskId="1"/>
-              <File Id="Ssleay32Dll"
-                    Name="ssleay32.dll"
-                    Source="C:\msys64\mingw64\bin\ssleay32.dll"
-                    DiskId="1"/>
-              <File Id="HarfbuzzDll"
-                    Name="libharfbuzz-0.dll"
-                    Source="C:\msys64\mingw64\bin\libharfbuzz-0.dll"
-                    DiskId="1"/>
-              <File Id="FreetypeDll"
-                    Name="libfreetype-6.dll"
-                    Source="C:\msys64\mingw64\bin\libfreetype-6.dll"
-                    DiskId="1"/>
-              <File Id="FontconfigDll"
-                    Name="libfontconfig-1.dll"
-                    Source="C:\msys64\mingw64\bin\libfontconfig-1.dll"
-                    DiskId="1"/>
-              <File Id="AVCodecDll"
-                    Name="avcodec-57.dll"
-                    Source="C:\msys64\mingw64\bin\avcodec-57.dll"
-                    DiskId="1"/>
-              <File Id="AVDeviceDll"
-                    Name="avdevice-57.dll"
-                    Source="C:\msys64\mingw64\bin\avdevice-57.dll"
-                    DiskId="1"/>
-              <File Id="AVFilterDll"
-                    Name="avfilter-6.dll"
-                    Source="C:\msys64\mingw64\bin\avfilter-6.dll"
-                    DiskId="1"/>
-              <File Id="AVFormatDll"
-                    Name="avformat-57.dll"
-                    Source="c:\msys64\mingw64\bin\avformat-57.DLL"
-                    DiskId="1"/>
-              <File Id="AVUtilDll"
-                    Name="avutil-55.dll"
-                    Source="C:\msys64\mingw64\bin\avutil-55.dll"
-                    DiskId="1"/>
-              <File Id="LibRTMPDll"
-                    Name="librtmp-1.dll"
-                    Source="C:\msys64\mingw64\bin\librtmp-1.dll"
-                    DiskId="1"/>
-              <File Id="LibBluRayDll"
-                    Name="libbluray-1.dll"
-                    Source="C:\msys64\mingw64\bin\libbluray-1.dll"
-                    DiskId="1"/>
-              <File Id="LibModPlugDll"
-                    Name="libmodplug-1.dll"
-                    Source="c:\msys64\mingw64\bin\libmodplug-1.dll"
-                    DiskId="1"/>
-              <File Id="LibCeltDll"
-                    Name="libcelt0-2.dll"
-                    Source="C:\msys64\mingw64\bin\libcelt0-2.dll"
-                    DiskId="1"/>
-              <File Id="PostprocDll"
-                    Name="postproc-54.dll"
-                    Source="c:\msys64\mingw64\bin\postproc-54.DLL"
-                    DiskId="1"/>
-              <File Id="SWResampleDll"
-                    Name="swresample-2.dll"
-                    Source="c:\msys64\mingw64\bin\swresample-2.DLL"
-                    DiskId="1"/>
-              <File Id="SWScaleDll"
-                    Name="swscale-4.dll"
-                    Source="c:\msys64\mingw64\bin\swscale-4.DLL"
-                    DiskId="1"/>
+              ${include_dependencies()}
             </Component>
 
-            <Directory Id="EtcDir" Name="etc">
-              <Directory Id="FontsDir" Name="fonts">
-                <Component Id="FontsDir"
-                           Guid="8d37ee61-9237-438d-b976-f163bd6b0578"
-                           Win64="yes">
-                  <File Id="ServoFontsConfig"
-                        KeyPath="yes"
-                        Name="fonts.conf"
-                        Source="${windowize(top_path)}\support\windows\fonts.conf"
-                        DiskId="1"/>
-                </Component>
-              </Directory>
-            </Directory>
-
-            ${include_directory(path.join(top_path, "resources"), "resources")}
-            ${include_directory(browserhtml_path, "browserhtml")}
+            ${include_directory(resources_path, "resources")}
+            ${include_directory(path.join(dir_to_temp, "browserhtml"), "browserhtml")}
           </Directory>
         </Directory>
       </Directory>
@@ -186,7 +52,7 @@
       <Directory Id="ProgramMenuFolder" Name="Programs">
         <Directory Id="ProgramMenuDir" Name="Servo Tech Demo">
           <Component Id="ProgramMenuDir" Guid="e04737ce-16eb-4977-9b4c-ed2db8a5a77d">
-            <RemoveFolder Id="ProgramMenuDir" On="uninstall"/>
+            <RemoveFolder Id="ProgramMenuDir" On="both"/>
             <RegistryValue Root="HKCU"
                            Key="Software\Mozilla Research\Servo Tech Demo"
                            Type="string"
@@ -199,14 +65,13 @@
 
     <Feature Id="Complete" Level="1">
       <ComponentRef Id="Servo"/>
-      <ComponentRef Id="FontsDir"/>
       % for c in components:
       <ComponentRef Id="${c}"/>
       % endfor
       <ComponentRef Id="ProgramMenuDir"/>
     </Feature>
 
-    <Icon Id="Servo.ico" SourceFile="${windowize(top_path)}\resources\Servo.ico"/>
+    <Icon Id="Servo.ico" SourceFile="${windowize(resources_path)}\Servo.ico"/>
   </Product>
 </Wix>
 <%!
@@ -214,9 +79,11 @@ import os
 import os.path as path
 import re
 import uuid
+from servo.command_base import host_triple
 
 def make_id(s):
-    return "Id{}".format(s.replace("-", "_").replace("/", "_"))
+    s = s.replace("-", "_").replace("/", "_").replace("\\", "_")
+    return "Id{}".format(s)
 
 def listfiles(directory):
     return [f for f in os.listdir(directory)
@@ -226,6 +93,9 @@ def listdirs(directory):
     return [f for f in os.listdir(directory)
             if path.isdir(path.join(directory, f))]
 
+def listdeps(temp_dir):
+    return [path.join(temp_dir, f) for f in os.listdir(temp_dir) if os.path.isfile(path.join(temp_dir, f)) and f != "servo.exe"]
+
 def windowize(p):
     if not p.startswith("/"):
         return p
@@ -233,6 +103,16 @@ def windowize(p):
 
 components = []
 %>
+
+<%def name="include_dependencies()">
+% for f in listdeps(dir_to_temp):
+              <File Id="${make_id(path.basename(f)).replace(".","").replace("+","x")}"
+                    Name="${path.basename(f)}"
+                    Source="${f}"
+                    DiskId="1"/>
+% endfor
+</%def>
+
 <%def name="include_directory(d, n)">
 <Directory Id="${make_id(path.basename(d))}" Name="${n}">
   <Component Id="${make_id(path.basename(d))}"
@@ -241,7 +121,7 @@ components = []
     <CreateFolder/>
     <% components.append(make_id(path.basename(d))) %>
     % for f in listfiles(d):
-    <File Id="${make_id(path.join(d, f))}"
+    <File Id="${make_id(path.join(d, f).replace(dir_to_temp, ""))}"
           Name="${f}"
           Source="${windowize(path.join(d, f))}"
           DiskId="1"/>

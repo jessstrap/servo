@@ -5,7 +5,6 @@
 use dom::attr::Attr;
 use dom::bindings::codegen::Bindings::HTMLDetailsElementBinding;
 use dom::bindings::codegen::Bindings::HTMLDetailsElementBinding::HTMLDetailsElementMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::refcounted::Trusted;
@@ -16,9 +15,9 @@ use dom::eventtarget::EventTarget;
 use dom::htmlelement::HTMLElement;
 use dom::node::{Node, window_from_node};
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
 use script_thread::Runnable;
 use std::cell::Cell;
-use string_cache::Atom;
 use task_source::TaskSource;
 
 #[dom_struct]
@@ -28,21 +27,21 @@ pub struct HTMLDetailsElement {
 }
 
 impl HTMLDetailsElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLDetailsElement {
         HTMLDetailsElement {
             htmlelement:
-                HTMLElement::new_inherited(localName, prefix, document),
+                HTMLElement::new_inherited(local_name, prefix, document),
             toggle_counter: Cell::new(0)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLDetailsElement> {
-        Node::reflect_node(box HTMLDetailsElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLDetailsElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLDetailsElementBinding::Wrap)
     }
@@ -68,7 +67,7 @@ impl VirtualMethods for HTMLDetailsElement {
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
 
-        if attr.local_name() == &atom!("open") {
+        if attr.local_name() == &local_name!("open") {
             let counter = self.toggle_counter.get() + 1;
             self.toggle_counter.set(counter);
 
@@ -79,7 +78,7 @@ impl VirtualMethods for HTMLDetailsElement {
                 element: details,
                 toggle_number: counter
             };
-            let _ = task_source.queue(runnable, GlobalRef::Window(&window));
+            let _ = task_source.queue(runnable, window.upcast());
         }
     }
 }
@@ -95,7 +94,7 @@ impl Runnable for DetailsNotificationRunnable {
     fn handler(self: Box<DetailsNotificationRunnable>) {
         let target = self.element.root();
         if target.check_toggle_count(self.toggle_number) {
-            target.upcast::<EventTarget>().fire_simple_event("toggle");
+            target.upcast::<EventTarget>().fire_event(atom!("toggle"));
         }
     }
 }

@@ -15,12 +15,15 @@ extern crate euclid;
 extern crate hyper;
 extern crate image;
 extern crate ipc_channel;
+#[macro_use]
+extern crate log;
 extern crate msg;
+extern crate net_traits;
 extern crate regex;
 extern crate rustc_serialize;
 extern crate script_traits;
-extern crate url;
-extern crate util;
+extern crate servo_config;
+extern crate servo_url;
 extern crate uuid;
 extern crate webdriver;
 
@@ -31,29 +34,28 @@ use hyper::method::Method::{self, Post};
 use image::{DynamicImage, ImageFormat, RgbImage};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use keys::keycodes_to_keys;
-use msg::constellation_msg::{FrameId, LoadData, PipelineId};
-use msg::constellation_msg::{TraversalDirection, PixelFormat};
+use msg::constellation_msg::{FrameId, PipelineId, TraversalDirection};
+use net_traits::image::base::PixelFormat;
 use regex::Captures;
 use rustc_serialize::base64::{CharacterSet, Config, Newline, ToBase64};
 use rustc_serialize::json::{Json, ToJson};
+use script_traits::{ConstellationMsg, LoadData, WebDriverCommandMsg};
 use script_traits::webdriver_msg::{LoadStatus, WebDriverCookieError, WebDriverFrameId};
 use script_traits::webdriver_msg::{WebDriverJSError, WebDriverJSResult, WebDriverScriptCommand};
-use script_traits::{ConstellationMsg, WebDriverCommandMsg};
+use servo_config::prefs::{PREFS, PrefValue};
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
-use url::Url;
-use util::prefs::{PREFS, PrefValue};
-use util::thread::spawn_named;
 use uuid::Uuid;
-use webdriver::command::WindowSizeParameters;
 use webdriver::command::{AddCookieParameters, GetParameters, JavascriptCommandParameters};
 use webdriver::command::{LocatorParameters, Parameters};
 use webdriver::command::{SendKeysParameters, SwitchToFrameParameters, TimeoutsParameters};
 use webdriver::command::{WebDriverCommand, WebDriverExtensionCommand, WebDriverMessage};
+use webdriver::command::WindowSizeParameters;
 use webdriver::common::{Date, LocatorStrategy, Nullable, WebElement};
 use webdriver::error::{ErrorStatus, WebDriverError, WebDriverResult};
 use webdriver::httpapi::WebDriverExtensionRoute;
@@ -78,10 +80,6 @@ fn cookie_msg_to_cookie(cookie: cookie_rs::Cookie) -> Cookie {
             Some(time) => Nullable::Value(Date::new(time.to_timespec().sec as u64)),
             None => Nullable::Null
         },
-        maxAge: match cookie.max_age {
-            Some(time) => Nullable::Value(Date::new(time)),
-            None => Nullable::Null
-        },
         secure: cookie.secure,
         httpOnly: cookie.httponly,
     }
@@ -89,25 +87,49 @@ fn cookie_msg_to_cookie(cookie: cookie_rs::Cookie) -> Cookie {
 
 pub fn start_server(port: u16, constellation_chan: Sender<ConstellationMsg>) {
     let handler = Handler::new(constellation_chan);
-    spawn_named("WebdriverHttpServer".to_owned(), move || {
+    thread::Builder::new().name("WebdriverHttpServer".to_owned()).spawn(move || {
         let address = SocketAddrV4::new("0.0.0.0".parse().unwrap(), port);
-        server::start(SocketAddr::V4(address), handler,
-                      extension_routes());
-    });
+        match server::start(SocketAddr::V4(address), handler, &extension_routes()) {
+            Ok(listening) => info!("WebDriver server listening on {}", listening.socket),
+            Err(_) => panic!("Unable to start WebDriver HTTPD server"),
+         }
+    }).expect("Thread spawning failed");
 }
 
+/// Represents the current WebDriver session and holds relevant session state.
 struct WebDriverSession {
     id: Uuid,
-    frame_id: Option<FrameId>
+    frame_id: Option<FrameId>,
+
+    /// Time to wait for injected scripts to run before interrupting them.  A [`None`] value
+    /// specifies that the script should run indefinitely.
+    script_timeout: Option<u32>,
+
+    /// Time to wait for a page to finish loading upon navigation.
+    load_timeout: u32,
+
+    /// Time to wait for the element location strategy when retrieving elements, and when
+    /// waiting for an element to become interactable.
+    implicit_wait_timeout: u32,
+}
+
+impl WebDriverSession {
+    pub fn new() -> WebDriverSession {
+        WebDriverSession {
+            id: Uuid::new_v4(),
+            frame_id: None,
+
+            script_timeout: Some(30_000),
+            load_timeout: 300_000,
+            implicit_wait_timeout: 0,
+        }
+    }
 }
 
 struct Handler {
     session: Option<WebDriverSession>,
     constellation_chan: Sender<ConstellationMsg>,
-    script_timeout: u32,
-    load_timeout: u32,
     resize_timeout: u32,
-    implicit_wait_timeout: u32
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -230,28 +252,16 @@ impl ToJson for SetPrefsParameters {
     }
 }
 
-impl WebDriverSession {
-    pub fn new() -> WebDriverSession {
-        WebDriverSession {
-            id: Uuid::new_v4(),
-            frame_id: None
-        }
-    }
-}
-
 impl Handler {
     pub fn new(constellation_chan: Sender<ConstellationMsg>) -> Handler {
         Handler {
             session: None,
             constellation_chan: constellation_chan,
-            script_timeout: 30_000,
-            load_timeout: 300_000,
             resize_timeout: 500,
-            implicit_wait_timeout: 0
         }
     }
 
-    fn pipeline(&self, frame_id: Option<FrameId>) -> WebDriverResult<PipelineId> {
+    fn pipeline_id(&self, frame_id: Option<FrameId>) -> WebDriverResult<PipelineId> {
         let interval = 20;
         let iterations = 30_000 / interval;
         let (sender, receiver) = ipc::channel().unwrap();
@@ -260,7 +270,7 @@ impl Handler {
             let msg = ConstellationMsg::GetPipeline(frame_id, sender.clone());
             self.constellation_chan.send(msg).unwrap();
             // Wait until the document is ready before returning the pipeline id.
-            if let Some((x, true)) = receiver.recv().unwrap() {
+            if let Some(x) = receiver.recv().unwrap() {
                 return Ok(x);
             }
             thread::sleep(Duration::from_millis(interval));
@@ -271,11 +281,11 @@ impl Handler {
     }
 
     fn root_pipeline(&self) -> WebDriverResult<PipelineId> {
-        self.pipeline(None)
+        self.pipeline_id(None)
     }
 
     fn frame_pipeline(&self) -> WebDriverResult<PipelineId> {
-        self.pipeline(self.session.as_ref().and_then(|session| session.frame_id))
+        self.pipeline_id(self.session.as_ref().and_then(|session| session.frame_id))
     }
 
     fn session(&self) -> WebDriverResult<&WebDriverSession> {
@@ -303,9 +313,7 @@ impl Handler {
             let mut capabilities = BTreeMap::new();
             capabilities.insert("browserName".to_owned(), "servo".to_json());
             capabilities.insert("browserVersion".to_owned(), "0.0.1".to_json());
-            capabilities.insert("acceptSslCerts".to_owned(), false.to_json());
-            capabilities.insert("takeScreenshot".to_owned(), true.to_json());
-            capabilities.insert("takeElementScreenshot".to_owned(), false.to_json());
+            capabilities.insert("acceptInsecureCerts".to_owned(), false.to_json());
             let rv = Ok(WebDriverResponse::NewSession(
                 NewSessionResponse::new(
                     session.id.to_string(),
@@ -336,7 +344,7 @@ impl Handler {
     }
 
     fn handle_get(&self, parameters: &GetParameters) -> WebDriverResult<WebDriverResponse> {
-        let url = match Url::parse(&parameters.url[..]) {
+        let url = match ServoUrl::parse(&parameters.url[..]) {
             Ok(url) => url,
             Err(_) => return Err(WebDriverError::new(ErrorStatus::InvalidArgument,
                                                "Invalid URL"))
@@ -355,19 +363,25 @@ impl Handler {
 
     fn wait_for_load(&self,
                      sender: IpcSender<LoadStatus>,
-                     receiver: IpcReceiver<LoadStatus>) -> WebDriverResult<WebDriverResponse> {
-        let timeout = self.load_timeout;
+                     receiver: IpcReceiver<LoadStatus>)
+                     -> WebDriverResult<WebDriverResponse> {
+        let session = try!(self.session
+            .as_ref()
+            .ok_or(WebDriverError::new(ErrorStatus::SessionNotCreated, "")));
+
+        let timeout = session.load_timeout;
         let timeout_chan = sender;
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(timeout as u64));
             let _ = timeout_chan.send(LoadStatus::LoadTimeout);
         });
 
-        //Wait to get a load event
+        // wait to get a load event
         match receiver.recv().unwrap() {
             LoadStatus::LoadComplete => Ok(WebDriverResponse::Void),
-            LoadStatus::LoadTimeout => Err(WebDriverError::new(ErrorStatus::Timeout,
-                                                               "Load timed out"))
+            LoadStatus::LoadTimeout => {
+                Err(WebDriverError::new(ErrorStatus::Timeout, "Load timed out"))
+            }
         }
     }
 
@@ -683,15 +697,23 @@ impl Handler {
         }
     }
 
-    fn handle_set_timeouts(&mut self, parameters: &TimeoutsParameters) -> WebDriverResult<WebDriverResponse> {
-        //TODO: this conversion is crazy, spec should limit these to u32 and check upstream
+    fn handle_set_timeouts(&mut self,
+                           parameters: &TimeoutsParameters)
+                           -> WebDriverResult<WebDriverResponse> {
+        let mut session = try!(self.session
+            .as_mut()
+            .ok_or(WebDriverError::new(ErrorStatus::SessionNotCreated, "")));
+
+        // TODO: this conversion is crazy, spec should limit these to u32 and check upstream
         let value = parameters.ms as u32;
         match &parameters.type_[..] {
-            "implicit" => self.implicit_wait_timeout = value,
-            "page load" => self.load_timeout = value,
-            "script" => self.script_timeout = value,
-            x => return Err(WebDriverError::new(ErrorStatus::InvalidSelector,
-                                                format!("Unknown timeout type {}", x)))
+            "script" => session.script_timeout = Some(value),
+            "page load" => session.load_timeout = value,
+            "implicit" => session.implicit_wait_timeout = value,
+            x => {
+                return Err(WebDriverError::new(ErrorStatus::InvalidSelector,
+                                               format!("Unknown timeout type {}", x)))
+            }
         }
         Ok(WebDriverResponse::Void)
     }
@@ -712,13 +734,24 @@ impl Handler {
     }
 
     fn handle_execute_async_script(&self,
-                                   parameters: &JavascriptCommandParameters) -> WebDriverResult<WebDriverResponse> {
+                                   parameters: &JavascriptCommandParameters)
+                                   -> WebDriverResult<WebDriverResponse> {
+        let session = try!(self.session
+            .as_ref()
+            .ok_or(WebDriverError::new(ErrorStatus::SessionNotCreated, "")));
+
         let func_body = &parameters.script;
         let args_string = "window.webdriverCallback";
 
-        let script = format!(
-            "setTimeout(webdriverTimeout, {}); (function(callback) {{ {} }})({})",
-            self.script_timeout, func_body, args_string);
+        let script = match session.script_timeout {
+            Some(timeout) => {
+                format!("setTimeout(webdriverTimeout, {}); (function(callback) {{ {} }})({})",
+                        timeout,
+                        func_body,
+                        args_string)
+            }
+            None => format!("(function(callback) {{ {} }})({})", func_body, args_string),
+        };
 
         let (sender, receiver) = ipc::channel().unwrap();
         let command = WebDriverScriptCommand::ExecuteAsyncScript(script, sender);
@@ -772,7 +805,7 @@ impl Handler {
         let mut img = None;
         let pipeline_id = try!(self.root_pipeline());
 
-        let interval = 20;
+        let interval = 1000;
         let iterations = 30_000 / interval;
 
         for _ in 0..iterations {
@@ -847,18 +880,18 @@ impl Handler {
 impl WebDriverHandler<ServoExtensionRoute> for Handler {
     fn handle_command(&mut self,
                       _session: &Option<Session>,
-                      msg: &WebDriverMessage<ServoExtensionRoute>) -> WebDriverResult<WebDriverResponse> {
+                      msg: WebDriverMessage<ServoExtensionRoute>) -> WebDriverResult<WebDriverResponse> {
         // Unless we are trying to create a new session, we need to ensure that a
         // session has previously been created
         match msg.command {
-            WebDriverCommand::NewSession => {},
+            WebDriverCommand::NewSession(_) => {},
             _ => {
                 try!(self.session());
             }
         }
 
         match msg.command {
-            WebDriverCommand::NewSession => self.handle_new_session(),
+            WebDriverCommand::NewSession(_) => self.handle_new_session(),
             WebDriverCommand::DeleteSession => self.handle_delete_session(),
             WebDriverCommand::AddCookie(ref parameters) => self.handle_add_cookie(parameters),
             WebDriverCommand::Get(ref parameters) => self.handle_get(parameters),
@@ -877,7 +910,7 @@ impl WebDriverHandler<ServoExtensionRoute> for Handler {
             WebDriverCommand::SwitchToParentFrame => self.handle_switch_to_parent_frame(),
             WebDriverCommand::FindElement(ref parameters) => self.handle_find_element(parameters),
             WebDriverCommand::FindElements(ref parameters) => self.handle_find_elements(parameters),
-            WebDriverCommand::GetCookie(ref name) => self.handle_get_cookie(name),
+            WebDriverCommand::GetNamedCookie(ref name) => self.handle_get_cookie(name),
             WebDriverCommand::GetCookies => self.handle_get_cookies(),
             WebDriverCommand::GetActiveElement => self.handle_active_element(),
             WebDriverCommand::GetElementRect(ref element) => self.handle_element_rect(element),

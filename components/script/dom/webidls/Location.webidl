@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#location
-[Exposed=(Window,Worker), Unforgeable] interface Location {
+[Exposed=Window, Unforgeable] interface Location {
   /*stringifier*/ attribute USVString href;
   readonly attribute USVString origin;
            attribute USVString protocol;
@@ -14,8 +14,10 @@
            attribute USVString search;
            attribute USVString hash;
 
+  [Throws]
   void assign(USVString url);
-  //void replace(USVString url);
+  [Throws]
+  void replace(USVString url);
   void reload();
 
   //[SameObject] readonly attribute USVString[] ancestorOrigins;

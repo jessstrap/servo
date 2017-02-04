@@ -13,7 +13,7 @@
 
 use core::nonzero::NonZero;
 use dom::bindings::js::Root;
-use dom::bindings::reflector::Reflectable;
+use dom::bindings::reflector::DomObject;
 use dom::bindings::trace::JSTraceable;
 use heapsize::HeapSizeOf;
 use js::jsapi::{JSTracer, JS_GetReservedSlot, JS_SetReservedSlot};
@@ -46,7 +46,7 @@ pub struct WeakBox<T: WeakReferenceable> {
 }
 
 /// Trait implemented by weak-referenceable interfaces.
-pub trait WeakReferenceable: Reflectable + Sized {
+pub trait WeakReferenceable: DomObject + Sized {
     /// Downgrade a DOM object reference to a weak one.
     fn downgrade(&self) -> WeakRef<Self> {
         unsafe {
@@ -55,7 +55,7 @@ pub trait WeakReferenceable: Reflectable + Sized {
                                              DOM_WEAK_SLOT)
                               .to_private() as *mut WeakBox<Self>;
             if ptr.is_null() {
-                debug!("Creating new WeakBox holder for {:p}.", self);
+                trace!("Creating new WeakBox holder for {:p}.", self);
                 ptr = Box::into_raw(box WeakBox {
                     count: Cell::new(1),
                     value: Cell::new(Some(NonZero::new(self))),
@@ -65,7 +65,7 @@ pub trait WeakReferenceable: Reflectable + Sized {
             let box_ = &*ptr;
             assert!(box_.value.get().is_some());
             let new_count = box_.count.get() + 1;
-            debug!("Incrementing WeakBox refcount for {:p} to {}.",
+            trace!("Incrementing WeakBox refcount for {:p} to {}.",
                    self,
                    new_count);
             box_.count.set(new_count);
@@ -133,7 +133,11 @@ impl<T: WeakReferenceable> PartialEq<T> for WeakRef<T> {
     }
 }
 
-no_jsmanaged_fields!(WeakRef<T: WeakReferenceable>);
+unsafe impl<T: WeakReferenceable> JSTraceable for WeakRef<T> {
+    unsafe fn trace(&self, _: *mut JSTracer) {
+        // Do nothing.
+    }
+}
 
 impl<T: WeakReferenceable> Drop for WeakRef<T> {
     fn drop(&mut self) {
@@ -188,17 +192,15 @@ impl<T: WeakReferenceable> HeapSizeOf for MutableWeakRef<T> {
     }
 }
 
-impl<T: WeakReferenceable> JSTraceable for MutableWeakRef<T> {
-    fn trace(&self, _: *mut JSTracer) {
+unsafe impl<T: WeakReferenceable> JSTraceable for MutableWeakRef<T> {
+    unsafe fn trace(&self, _: *mut JSTracer) {
         let ptr = self.cell.get();
-        unsafe {
-            let should_drop = match *ptr {
-                Some(ref value) => !value.is_alive(),
-                None => false,
-            };
-            if should_drop {
-                mem::drop((*ptr).take().unwrap());
-            }
+        let should_drop = match *ptr {
+            Some(ref value) => !value.is_alive(),
+            None => false,
+        };
+        if should_drop {
+            mem::drop((*ptr).take().unwrap());
         }
     }
 }

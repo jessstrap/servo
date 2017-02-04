@@ -4,8 +4,7 @@
 
 // https://fetch.spec.whatwg.org/#headers-class
 
-// TODO support OpenEndedDictionary<ByteString>
-typedef (Headers or sequence<sequence<ByteString>>) HeadersInit;
+typedef (Headers or sequence<sequence<ByteString>> or MozMap<ByteString>) HeadersInit;
 
 [Constructor(optional HeadersInit init),
  Exposed=(Window,Worker)]
@@ -20,5 +19,5 @@ interface Headers {
   boolean has(ByteString name);
   [Throws]
   void set(ByteString name, ByteString value);
-  // iterable<ByteString, ByteString>; // TODO see issue #12628
+  iterable<ByteString, ByteString>;
 };

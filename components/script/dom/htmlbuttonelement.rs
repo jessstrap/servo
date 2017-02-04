@@ -15,16 +15,16 @@ use dom::event::Event;
 use dom::eventtarget::EventTarget;
 use dom::htmlelement::HTMLElement;
 use dom::htmlfieldsetelement::HTMLFieldSetElement;
-use dom::htmlformelement::HTMLFormElement;
 use dom::htmlformelement::{FormControl, FormDatum, FormDatumValue};
 use dom::htmlformelement::{FormSubmitter, ResetFrom, SubmittedFrom};
+use dom::htmlformelement::HTMLFormElement;
 use dom::node::{Node, UnbindContext, document_from_node, window_from_node};
 use dom::nodelist::NodeList;
 use dom::validation::Validatable;
-use dom::validitystate::ValidityState;
+use dom::validitystate::{ValidityState, ValidationFlags};
 use dom::virtualmethods::VirtualMethods;
+use html5ever_atoms::LocalName;
 use std::cell::Cell;
-use string_cache::Atom;
 use style::element_state::*;
 
 #[derive(JSTraceable, PartialEq, Copy, Clone)]
@@ -43,22 +43,22 @@ pub struct HTMLButtonElement {
 }
 
 impl HTMLButtonElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLButtonElement {
         HTMLButtonElement {
             htmlelement:
                 HTMLElement::new_inherited_with_state(IN_ENABLED_STATE,
-                                                      localName, prefix, document),
+                                                      local_name, prefix, document),
             button_type: Cell::new(ButtonType::Submit)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLButtonElement> {
-        Node::reflect_node(box HTMLButtonElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLButtonElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLButtonElementBinding::Wrap)
     }
@@ -68,7 +68,7 @@ impl HTMLButtonElementMethods for HTMLButtonElement {
     // https://html.spec.whatwg.org/multipage/#dom-cva-validity
     fn Validity(&self) -> Root<ValidityState> {
         let window = window_from_node(self);
-        ValidityState::new(window.r(), self.upcast())
+        ValidityState::new(&window, self.upcast())
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-fe-disabled
@@ -83,7 +83,7 @@ impl HTMLButtonElementMethods for HTMLButtonElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-button-type
-    make_enumerated_getter!(Type, "type", "submit", ("reset") | ("button") | ("menu"));
+    make_enumerated_getter!(Type, "type", "submit", "reset" | "button" | "menu");
 
     // https://html.spec.whatwg.org/multipage/#dom-button-type
     make_setter!(SetType, "type");
@@ -98,13 +98,13 @@ impl HTMLButtonElementMethods for HTMLButtonElement {
     make_enumerated_getter!(FormEnctype,
                             "formenctype",
                             "application/x-www-form-urlencoded",
-                            ("text/plain") | ("multipart/form-data"));
+                            "text/plain" | "multipart/form-data");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-formenctype
     make_setter!(SetFormEnctype, "formenctype");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-formmethod
-    make_enumerated_getter!(FormMethod, "formmethod", "get", ("post") | ("dialog"));
+    make_enumerated_getter!(FormMethod, "formmethod", "get", "post" | "dialog");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-formmethod
     make_setter!(SetFormMethod, "formmethod");
@@ -180,7 +180,7 @@ impl VirtualMethods for HTMLButtonElement {
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
         match attr.local_name() {
-            &atom!("disabled") => {
+            &local_name!("disabled") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(Some(_)) => {}
@@ -195,7 +195,7 @@ impl VirtualMethods for HTMLButtonElement {
                     }
                 }
             },
-            &atom!("type") => {
+            &local_name!("type") => {
                 match mutation {
                     AttributeMutation::Set(_) => {
                         let value = match &**attr.value() {
@@ -238,7 +238,16 @@ impl VirtualMethods for HTMLButtonElement {
 
 impl FormControl for HTMLButtonElement {}
 
-impl Validatable for HTMLButtonElement {}
+impl Validatable for HTMLButtonElement {
+    fn is_instance_validatable(&self) -> bool {
+        true
+    }
+    fn validate(&self, validate_flags: ValidationFlags) -> bool {
+        if validate_flags.is_empty() {}
+        // Need more flag check for different validation types later
+        true
+    }
+}
 
 impl Activatable for HTMLButtonElement {
     fn as_element(&self) -> &Element {
@@ -283,7 +292,7 @@ impl Activatable for HTMLButtonElement {
 
     // https://html.spec.whatwg.org/multipage/#implicit-submission
     #[allow(unsafe_code)]
-    fn implicit_submission(&self, ctrlKey: bool, shiftKey: bool, altKey: bool, metaKey: bool) {
+    fn implicit_submission(&self, ctrl_key: bool, shift_key: bool, alt_key: bool, meta_key: bool) {
         let doc = document_from_node(self);
         let node = doc.upcast::<Node>();
         let owner = self.form_owner();
@@ -293,11 +302,11 @@ impl Activatable for HTMLButtonElement {
         node.query_selector_iter(DOMString::from("button[type=submit]")).unwrap()
             .filter_map(Root::downcast::<HTMLButtonElement>)
             .find(|r| r.form_owner() == owner)
-            .map(|s| synthetic_click_activation(s.r().as_element(),
-                                                ctrlKey,
-                                                shiftKey,
-                                                altKey,
-                                                metaKey,
+            .map(|s| synthetic_click_activation(s.as_element(),
+                                                ctrl_key,
+                                                shift_key,
+                                                alt_key,
+                                                meta_key,
                                                 ActivationSource::NotFromClick));
     }
 }

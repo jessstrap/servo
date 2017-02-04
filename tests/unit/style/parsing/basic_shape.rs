@@ -2,16 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use cssparser::Parser;
+use media_queries::CSSErrorReporterTest;
 use parsing::parse;
-use style::parser::Parse;
+use style::parser::{Parse, ParserContext};
+use style::stylesheets::Origin;
 use style::values::specified::basic_shape::*;
+use style_traits::ToCss;
 
 // Ensure that basic-shape sub-functions parse as both basic shapes
 // and their individual components
 macro_rules! assert_roundtrip_basicshape {
     ($fun:expr, $input:expr, $output:expr) => {
-        assert_roundtrip!($fun, $input, $output);
-        assert_roundtrip!(BasicShape::parse, $input, $output);
+        assert_roundtrip_with_context!($fun, $input, $output);
+        assert_roundtrip_with_context!(BasicShape::parse, $input, $output);
     }
 }
 
@@ -21,14 +25,14 @@ macro_rules! assert_border_radius_values {
         let input = parse(BorderRadius::parse, $input)
                           .expect(&format!("Failed parsing {} as border radius",
                                   $input));
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.top_left.0.width), $tlw);
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.top_right.0.width), $trw);
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.bottom_right.0.width), $brw);
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.bottom_left.0.width), $blw);
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.top_left.0.height), $tlh);
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.top_right.0.height), $trh);
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.bottom_right.0.height), $brh);
-        assert_eq!(::cssparser::ToCss::to_css_string(&input.bottom_left.0.height), $blh);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_left.0.width), $tlw);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_right.0.width), $trw);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_right.0.width), $brw);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_left.0.width), $blw);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_left.0.height), $tlh);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_right.0.height), $trh);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_right.0.height), $brh);
+        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_left.0.height), $blh);
     }
 }
 
@@ -96,8 +100,20 @@ fn test_circle() {
     assert_roundtrip_basicshape!(Circle::parse, "circle(calc(1px + 50%) at center)",
                                                 "circle(calc(1px + 50%) at 50% 50%)");
 
-    assert!(parse(Circle::parse, "circle(at top 40%)").is_err());
+    assert_roundtrip_basicshape!(Circle::parse, "circle(at right 5px bottom 10px)",
+                                                "circle(at right 5px bottom 10px)");
+    assert_roundtrip_basicshape!(Circle::parse, "circle(at bottom 5px right 10px)",
+                                                "circle(at right 10px bottom 5px)");
+    assert_roundtrip_basicshape!(Circle::parse, "circle(at right 5% top 0px)",
+                                                "circle(at 95% 0%)");
+    assert_roundtrip_basicshape!(Circle::parse, "circle(at right 5% bottom 0px)",
+                                                "circle(at 95% 100%)");
+    assert_roundtrip_basicshape!(Circle::parse, "circle(at right 5% bottom 1px)",
+                                                "circle(at right 5% bottom 1px)");
+    assert_roundtrip_basicshape!(Circle::parse, "circle(at 5% bottom 1px)",
+                                                "circle(at left 5% bottom 1px)");
 
+    assert!(parse(Circle::parse, "circle(at top 40%)").is_err());
 }
 
 #[test]

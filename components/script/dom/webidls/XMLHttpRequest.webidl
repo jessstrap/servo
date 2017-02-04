@@ -53,7 +53,7 @@ interface XMLHttpRequest : XMLHttpRequestEventTarget {
            attribute boolean withCredentials;
   readonly attribute XMLHttpRequestUpload upload;
   [Throws]
-  void send(optional /*Document or*/ BodyInit? data = null);
+  void send(optional (Document or BodyInit)? data = null);
   void abort();
 
   // response
@@ -69,6 +69,5 @@ interface XMLHttpRequest : XMLHttpRequestEventTarget {
   readonly attribute any response;
   [Throws]
   readonly attribute USVString responseText;
-  [Throws]
-  /*[Exposed=Window]*/ readonly attribute Document? responseXML;
+  [Throws, Exposed=Window] readonly attribute Document? responseXML;
 };

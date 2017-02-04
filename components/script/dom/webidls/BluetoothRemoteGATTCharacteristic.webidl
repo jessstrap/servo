@@ -4,28 +4,28 @@
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattcharacteristic
 
-[Pref="dom.bluetooth.enabled", Exposed=(Window,Worker)]
-interface BluetoothRemoteGATTCharacteristic {
+[Pref="dom.bluetooth.enabled"]
+interface BluetoothRemoteGATTCharacteristic : EventTarget {
+  [SameObject]
   readonly attribute BluetoothRemoteGATTService service;
   readonly attribute DOMString uuid;
   readonly attribute BluetoothCharacteristicProperties properties;
   readonly attribute ByteString? value;
-  [Throws]
-  BluetoothRemoteGATTDescriptor getDescriptor(BluetoothDescriptorUUID descriptor);
-  [Throws]
-  sequence<BluetoothRemoteGATTDescriptor> getDescriptors(optional BluetoothDescriptorUUID descriptor);
-  //Promise<BluetoothRemoteGATTDescriptor> getDescriptor(BluetoothDescriptorUUID descriptor);
-  //Promise<sequence<BluetoothRemoteGATTDescriptor>>
-  //getDescriptors(optional BluetoothDescriptorUUID descriptor);
-  [Throws]
-  ByteString readValue();
+  Promise<BluetoothRemoteGATTDescriptor> getDescriptor(BluetoothDescriptorUUID descriptor);
+  Promise<sequence<BluetoothRemoteGATTDescriptor>>
+  getDescriptors(optional BluetoothDescriptorUUID descriptor);
+  Promise<ByteString> readValue();
   //Promise<DataView> readValue();
-  [Throws]
-  void writeValue(sequence<octet> value);
+  Promise<void> writeValue(sequence<octet> value);
   //Promise<void> writeValue(BufferSource value);
-  //Promise<void> startNotifications();
-  //Promise<void> stopNotifications();
+  Promise<BluetoothRemoteGATTCharacteristic> startNotifications();
+  Promise<BluetoothRemoteGATTCharacteristic> stopNotifications();
 };
 
-//BluetootRemoteGATTCharacteristic implements EventTarget;
-//BluetootRemoteGATTCharacteristic implements CharacteristicEventHandlers;
+[NoInterfaceObject]
+interface CharacteristicEventHandlers {
+  attribute EventHandler oncharacteristicvaluechanged;
+};
+
+// BluetoothRemoteGATTCharacteristic implements EventTarget;
+BluetoothRemoteGATTCharacteristic implements CharacteristicEventHandlers;

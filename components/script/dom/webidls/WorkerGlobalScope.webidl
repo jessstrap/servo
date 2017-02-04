@@ -4,12 +4,12 @@
 
 // https://html.spec.whatwg.org/multipage/#workerglobalscope
 [Abstract, Exposed=Worker]
-interface WorkerGlobalScope : EventTarget {
+interface WorkerGlobalScope : GlobalScope {
   [BinaryName="Self_"] readonly attribute WorkerGlobalScope self;
   readonly attribute WorkerLocation location;
 
   //void close();
-  //         attribute OnErrorEventHandler onerror;
+  attribute OnErrorEventHandler onerror;
   //         attribute EventHandler onlanguagechange;
   //         attribute EventHandler onoffline;
   //         attribute EventHandler ononline;
@@ -24,10 +24,3 @@ partial interface WorkerGlobalScope { // not obsolete
 };
 WorkerGlobalScope implements WindowTimers;
 WorkerGlobalScope implements WindowBase64;
-
-// Proprietary
-[Exposed=Worker]
-partial interface WorkerGlobalScope {
-  [Replaceable]
-  readonly attribute Console console;
-};

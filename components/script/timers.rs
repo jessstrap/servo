@@ -5,10 +5,11 @@
 use dom::bindings::callback::ExceptionHandling::Report;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::FunctionBinding::Function;
-use dom::bindings::global::GlobalRef;
-use dom::bindings::reflector::Reflectable;
+use dom::bindings::reflector::DomObject;
 use dom::bindings::str::DOMString;
-use dom::window::ScriptHelpers;
+use dom::eventsource::EventSourceTimeoutCallback;
+use dom::globalscope::GlobalScope;
+use dom::testbinding::TestBindingCallback;
 use dom::xmlhttprequest::XHRTimeoutCallback;
 use euclid::length::Length;
 use heapsize::HeapSizeOf;
@@ -17,12 +18,12 @@ use js::jsapi::{HandleValue, Heap};
 use js::jsval::{JSVal, UndefinedValue};
 use script_traits::{MsDuration, precise_time_ms};
 use script_traits::{TimerEvent, TimerEventId, TimerEventRequest, TimerSource};
+use servo_config::prefs::PREFS;
 use std::cell::Cell;
 use std::cmp::{self, Ord, Ordering};
 use std::collections::HashMap;
 use std::default::Default;
 use std::rc::Rc;
-use util::prefs::PREFS;
 
 #[derive(JSTraceable, PartialEq, Eq, Copy, Clone, HeapSizeOf, Hash, PartialOrd, Ord, Debug)]
 pub struct OneshotTimerHandle(i32);
@@ -63,18 +64,22 @@ struct OneshotTimer {
 
 // This enum is required to work around the fact that trait objects do not support generic methods.
 // A replacement trait would have a method such as
-//     `invoke<T: Reflectable>(self: Box<Self>, this: &T, js_timers: &JsTimers);`.
+//     `invoke<T: DomObject>(self: Box<Self>, this: &T, js_timers: &JsTimers);`.
 #[derive(JSTraceable, HeapSizeOf)]
 pub enum OneshotTimerCallback {
     XhrTimeout(XHRTimeoutCallback),
+    EventSourceTimeout(EventSourceTimeoutCallback),
     JsTimer(JsTimerTask),
+    TestBindingCallback(TestBindingCallback),
 }
 
 impl OneshotTimerCallback {
-    fn invoke<T: Reflectable>(self, this: &T, js_timers: &JsTimers) {
+    fn invoke<T: DomObject>(self, this: &T, js_timers: &JsTimers) {
         match self {
             OneshotTimerCallback::XhrTimeout(callback) => callback.invoke(),
+            OneshotTimerCallback::EventSourceTimeout(callback) => callback.invoke(),
             OneshotTimerCallback::JsTimer(task) => task.invoke(this, js_timers),
+            OneshotTimerCallback::TestBindingCallback(callback) => callback.invoke(),
         }
     }
 }
@@ -165,7 +170,7 @@ impl OneshotTimers {
         }
     }
 
-    pub fn fire_timer<T: Reflectable>(&self, id: TimerEventId, this: &T) {
+    pub fn fire_timer(&self, id: TimerEventId, global: &GlobalScope) {
         let expected_id = self.expected_event_id.get();
         if expected_id != id {
             debug!("ignoring timer fire event {:?} (expected {:?})", id, expected_id);
@@ -198,7 +203,7 @@ impl OneshotTimers {
 
         for timer in timers_to_run {
             let callback = timer.callback;
-            callback.invoke(this, &self.js_timers);
+            callback.invoke(global, &self.js_timers);
         }
 
         self.schedule_timer_call();
@@ -223,20 +228,24 @@ impl OneshotTimers {
     }
 
     pub fn suspend(&self) {
-        assert!(self.suspended_since.get().is_none());
+        // Suspend is idempotent: do nothing if the timers are already suspended.
+        if self.suspended_since.get().is_some() {
+            return warn!("Suspending an already suspended timer.");
+        }
 
+        debug!("Suspending timers.");
         self.suspended_since.set(Some(precise_time_ms()));
         self.invalidate_expected_event_id();
     }
 
     pub fn resume(&self) {
-        assert!(self.suspended_since.get().is_some());
-
+        // Suspend is idempotent: do nothing if the timers are already suspended.
         let additional_offset = match self.suspended_since.get() {
             Some(suspended_since) => precise_time_ms() - suspended_since,
-            None => panic!("Timers are not suspended.")
+            None => return warn!("Resuming an already resumed timer."),
         };
 
+        debug!("Resuming timers.");
         self.suspension_offset.set(self.suspension_offset.get() + additional_offset);
         self.suspended_since.set(None);
 
@@ -245,7 +254,7 @@ impl OneshotTimers {
 
     fn schedule_timer_call(&self) {
         if self.suspended_since.get().is_some() {
-            // The timer will be scheduled when the pipeline is thawed.
+            // The timer will be scheduled when the pipeline is fully activated.
             return;
         }
 
@@ -270,7 +279,7 @@ impl OneshotTimers {
     }
 
     pub fn set_timeout_or_interval(&self,
-                               global: GlobalRef,
+                               global: &GlobalScope,
                                callback: TimerCallback,
                                arguments: Vec<HandleValue>,
                                timeout: i32,
@@ -285,7 +294,7 @@ impl OneshotTimers {
                                                source)
     }
 
-    pub fn clear_timeout_or_interval(&self, global: GlobalRef, handle: i32) {
+    pub fn clear_timeout_or_interval(&self, global: &GlobalScope, handle: i32) {
         self.js_timers.clear_timeout_or_interval(global, handle)
     }
 }
@@ -362,7 +371,7 @@ impl JsTimers {
 
     // see https://html.spec.whatwg.org/multipage/#timer-initialisation-steps
     pub fn set_timeout_or_interval(&self,
-                               global: GlobalRef,
+                               global: &GlobalScope,
                                callback: TimerCallback,
                                arguments: Vec<HandleValue>,
                                timeout: i32,
@@ -412,7 +421,7 @@ impl JsTimers {
         new_handle
     }
 
-    pub fn clear_timeout_or_interval(&self, global: GlobalRef, handle: i32) {
+    pub fn clear_timeout_or_interval(&self, global: &GlobalScope, handle: i32) {
         let mut active_timers = self.active_timers.borrow_mut();
 
         if let Some(entry) = active_timers.remove(&JsTimerHandle(handle)) {
@@ -439,7 +448,7 @@ impl JsTimers {
     }
 
     // see https://html.spec.whatwg.org/multipage/#timer-initialisation-steps
-    fn initialize_and_schedule(&self, global: GlobalRef, mut task: JsTimerTask) {
+    fn initialize_and_schedule(&self, global: &GlobalScope, mut task: JsTimerTask) {
         let handle = task.handle;
         let mut active_timers = self.active_timers.borrow_mut();
 
@@ -476,8 +485,7 @@ fn clamp_duration(nesting_level: u32, unclamped: MsDuration) -> MsDuration {
 
 impl JsTimerTask {
     // see https://html.spec.whatwg.org/multipage/#timer-initialisation-steps
-    #[allow(unsafe_code)]
-    pub fn invoke<T: Reflectable>(self, this: &T, timers: &JsTimers) {
+    pub fn invoke<T: DomObject>(self, this: &T, timers: &JsTimers) {
         // step 4.1 can be ignored, because we proactively prevent execution
         // of this task when its scheduled execution is canceled.
 
@@ -485,19 +493,17 @@ impl JsTimerTask {
         timers.nesting_level.set(self.nesting_level);
 
         // step 4.2
-        match *&self.callback {
+        match self.callback {
             InternalTimerCallback::StringTimerCallback(ref code_str) => {
-                let cx = this.global().r().get_cx();
+                let global = this.global();
+                let cx = global.get_cx();
                 rooted!(in(cx) let mut rval = UndefinedValue());
 
-                this.evaluate_js_on_global_with_result(code_str, rval.handle_mut());
+                global.evaluate_js_on_global_with_result(
+                    code_str, rval.handle_mut());
             },
             InternalTimerCallback::FunctionTimerCallback(ref function, ref arguments) => {
-                let arguments: Vec<JSVal> = arguments.iter().map(|arg| arg.get()).collect();
-                let arguments = arguments.iter().by_ref().map(|arg| unsafe {
-                    HandleValue::from_marked_location(arg)
-                }).collect();
-
+                let arguments = arguments.iter().map(|arg| arg.handle()).collect();
                 let _ = function.Call_(this, arguments, Report);
             },
         };
@@ -510,7 +516,7 @@ impl JsTimerTask {
         // reschedule repeating timers when they were not canceled as part of step 4.2.
         if self.is_interval == IsInterval::Interval &&
             timers.active_timers.borrow().contains_key(&self.handle) {
-            timers.initialize_and_schedule(this.global().r(), self);
+            timers.initialize_and_schedule(&this.global(), self);
         }
     }
 }

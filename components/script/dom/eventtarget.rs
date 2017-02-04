@@ -18,12 +18,11 @@ use dom::bindings::codegen::UnionTypes::EventOrString;
 use dom::bindings::error::{Error, Fallible, report_pending_exception};
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
-use dom::bindings::reflector::{Reflectable, Reflector};
+use dom::bindings::reflector::{DomObject, Reflector};
 use dom::bindings::str::DOMString;
 use dom::element::Element;
 use dom::errorevent::ErrorEvent;
-use dom::event::{Event, EventBubbles, EventCancelable};
-use dom::eventdispatcher::dispatch_event;
+use dom::event::{Event, EventBubbles, EventCancelable, EventStatus};
 use dom::node::document_from_node;
 use dom::virtualmethods::VirtualMethods;
 use dom::window::Window;
@@ -32,6 +31,8 @@ use heapsize::HeapSizeOf;
 use js::jsapi::{CompileFunction, JS_GetFunctionObject, JSAutoCompartment};
 use js::rust::{AutoObjectVectorWrapper, CompileOptionsWrapper};
 use libc::{c_char, size_t};
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::default::Default;
@@ -41,8 +42,6 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::rc::Rc;
-use string_cache::Atom;
-use url::Url;
 
 #[derive(PartialEq, Clone, JSTraceable)]
 pub enum CommonEventHandler {
@@ -69,15 +68,15 @@ pub enum ListenerPhase {
 
 /// https://html.spec.whatwg.org/multipage/#internal-raw-uncompiled-handler
 #[derive(JSTraceable, Clone, PartialEq)]
-pub struct InternalRawUncompiledHandler {
+struct InternalRawUncompiledHandler {
     source: DOMString,
-    url: Url,
+    url: ServoUrl,
     line: usize,
 }
 
 /// A representation of an event handler, either compiled or uncompiled raw source, or null.
 #[derive(JSTraceable, PartialEq, Clone)]
-pub enum InlineEventListener {
+enum InlineEventListener {
     Uncompiled(InternalRawUncompiledHandler),
     Compiled(CommonEventHandler),
     Null,
@@ -140,11 +139,12 @@ pub enum CompiledEventListener {
 }
 
 impl CompiledEventListener {
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#the-event-handler-processing-algorithm
-    pub fn call_or_handle_event<T: Reflectable>(&self,
-                                                object: &T,
-                                                event: &Event,
-                                                exception_handle: ExceptionHandling) {
+    pub fn call_or_handle_event<T: DomObject>(&self,
+                                              object: &T,
+                                              event: &Event,
+                                              exception_handle: ExceptionHandling) {
         // Step 3
         match *self {
             CompiledEventListener::Listener(ref listener) => {
@@ -154,9 +154,8 @@ impl CompiledEventListener {
                 match *handler {
                     CommonEventHandler::ErrorEventHandler(ref handler) => {
                         if let Some(event) = event.downcast::<ErrorEvent>() {
-                            let global = object.global();
-                            let cx = global.r().get_cx();
-                            rooted!(in(cx) let error = event.Error(cx));
+                            let cx = object.global().get_cx();
+                            rooted!(in(cx) let error = unsafe { event.Error(cx) });
                             let return_value = handler.Call_(object,
                                                              EventOrString::String(event.Message()),
                                                              Some(event.Filename()),
@@ -201,8 +200,7 @@ impl CompiledEventListener {
 
                     CommonEventHandler::EventHandler(ref handler) => {
                         if let Ok(value) = handler.Call_(object, event, exception_handle) {
-                            let global = object.global();
-                            let cx = global.r().get_cx();
+                            let cx = object.global().get_cx();
                             rooted!(in(cx) let value = value);
                             let value = value.handle();
 
@@ -300,18 +298,22 @@ impl EventTarget {
 
     pub fn dispatch_event_with_target(&self,
                                       target: &EventTarget,
-                                      event: &Event) -> bool {
-        dispatch_event(self, Some(target), event)
+                                      event: &Event) -> EventStatus {
+        event.dispatch(self, Some(target))
     }
 
-    pub fn dispatch_event(&self, event: &Event) -> bool {
-        dispatch_event(self, None, event)
+    pub fn dispatch_event(&self, event: &Event) -> EventStatus {
+        event.dispatch(self, None)
+    }
+
+    pub fn remove_all_listeners(&self) {
+        *self.handlers.borrow_mut() = Default::default();
     }
 
     /// https://html.spec.whatwg.org/multipage/#event-handler-attributes:event-handlers-11
-    pub fn set_inline_event_listener(&self,
-                                     ty: Atom,
-                                     listener: Option<InlineEventListener>) {
+    fn set_inline_event_listener(&self,
+                                 ty: Atom,
+                                 listener: Option<InlineEventListener>) {
         let mut handlers = self.handlers.borrow_mut();
         let entries = match handlers.entry(ty) {
             Occupied(entry) => entry.into_mut(),
@@ -349,7 +351,7 @@ impl EventTarget {
     /// Store the raw uncompiled event handler for on-demand compilation later.
     /// https://html.spec.whatwg.org/multipage/#event-handler-attributes:event-handler-content-attributes-3
     pub fn set_event_handler_uncompiled(&self,
-                                        url: Url,
+                                        url: ServoUrl,
                                         line: usize,
                                         ty: &str,
                                         source: DOMString) {
@@ -364,10 +366,10 @@ impl EventTarget {
 
     // https://html.spec.whatwg.org/multipage/#getting-the-current-value-of-the-event-handler
     #[allow(unsafe_code)]
-    pub fn get_compiled_event_handler(&self,
-                                      handler: InternalRawUncompiledHandler,
-                                      ty: &Atom)
-                                      -> Option<CommonEventHandler> {
+    fn get_compiled_event_handler(&self,
+                                  handler: InternalRawUncompiledHandler,
+                                  ty: &Atom)
+                                  -> Option<CommonEventHandler> {
         // Step 1.1
         let element = self.downcast::<Element>();
         let document = match element {
@@ -375,7 +377,10 @@ impl EventTarget {
             None => self.downcast::<Window>().unwrap().Document(),
         };
 
-        // TODO step 1.2 (browsing context/scripting enabled)
+        // Step 1.2
+        if !document.is_scripting_enabled() {
+            return None;
+        }
 
         // Step 1.3
         let body: Vec<u16> = handler.source.encode_utf16().collect();
@@ -426,7 +431,9 @@ impl EventTarget {
         if !rv || handler.get().is_null() {
             // Step 1.8.2
             unsafe {
-                report_pending_exception(cx, self.reflector().get_jsobject().get());
+                let _ac = JSAutoCompartment::new(cx, self.reflector().get_jsobject().get());
+                // FIXME(#13152): dispatch error event.
+                report_pending_exception(cx, false);
             }
             // Step 1.8.1 / 1.8.3
             return None;
@@ -437,13 +444,13 @@ impl EventTarget {
         assert!(!funobj.is_null());
         // Step 1.14
         if is_error {
-            Some(CommonEventHandler::ErrorEventHandler(OnErrorEventHandlerNonNull::new(funobj)))
+            Some(CommonEventHandler::ErrorEventHandler(OnErrorEventHandlerNonNull::new(cx, funobj)))
         } else {
             if ty == &atom!("beforeunload") {
                 Some(CommonEventHandler::BeforeUnloadEventHandler(
-                        OnBeforeUnloadEventHandlerNonNull::new(funobj)))
+                        OnBeforeUnloadEventHandlerNonNull::new(cx, funobj)))
             } else {
-                Some(CommonEventHandler::EventHandler(EventHandlerNonNull::new(funobj)))
+                Some(CommonEventHandler::EventHandler(EventHandlerNonNull::new(cx, funobj)))
             }
         }
     }
@@ -451,58 +458,89 @@ impl EventTarget {
     pub fn set_event_handler_common<T: CallbackContainer>(
         &self, ty: &str, listener: Option<Rc<T>>)
     {
+        let cx = self.global().get_cx();
+
         let event_listener = listener.map(|listener|
                                           InlineEventListener::Compiled(
                                               CommonEventHandler::EventHandler(
-                                                  EventHandlerNonNull::new(listener.callback()))));
+                                                  EventHandlerNonNull::new(cx, listener.callback()))));
         self.set_inline_event_listener(Atom::from(ty), event_listener);
     }
 
     pub fn set_error_event_handler<T: CallbackContainer>(
         &self, ty: &str, listener: Option<Rc<T>>)
     {
+        let cx = self.global().get_cx();
+
         let event_listener = listener.map(|listener|
                                           InlineEventListener::Compiled(
                                               CommonEventHandler::ErrorEventHandler(
-                                                  OnErrorEventHandlerNonNull::new(listener.callback()))));
+                                                  OnErrorEventHandlerNonNull::new(cx, listener.callback()))));
         self.set_inline_event_listener(Atom::from(ty), event_listener);
     }
 
     pub fn set_beforeunload_event_handler<T: CallbackContainer>(&self, ty: &str,
-            listener: Option<Rc<T>>) {
+                                                                listener: Option<Rc<T>>) {
+        let cx = self.global().get_cx();
+
         let event_listener = listener.map(|listener|
             InlineEventListener::Compiled(
                 CommonEventHandler::BeforeUnloadEventHandler(
-                    OnBeforeUnloadEventHandlerNonNull::new(listener.callback())))
+                    OnBeforeUnloadEventHandlerNonNull::new(cx, listener.callback())))
         );
         self.set_inline_event_listener(Atom::from(ty), event_listener);
     }
 
+    #[allow(unsafe_code)]
     pub fn get_event_handler_common<T: CallbackContainer>(&self, ty: &str) -> Option<Rc<T>> {
+        let cx = self.global().get_cx();
         let listener = self.get_inline_event_listener(&Atom::from(ty));
-        listener.map(|listener| CallbackContainer::new(listener.parent().callback()))
+        unsafe {
+            listener.map(|listener|
+                         CallbackContainer::new(cx, listener.parent().callback_holder().get()))
+        }
     }
 
     pub fn has_handlers(&self) -> bool {
         !self.handlers.borrow().is_empty()
     }
 
-    // https://html.spec.whatwg.org/multipage/#fire-a-simple-event
-    pub fn fire_simple_event(&self, name: &str) -> Root<Event> {
-        self.fire_event(name, EventBubbles::DoesNotBubble,
-                        EventCancelable::NotCancelable)
+    // https://dom.spec.whatwg.org/#concept-event-fire
+    pub fn fire_event(&self, name: Atom) -> Root<Event> {
+        self.fire_event_with_params(name,
+                                    EventBubbles::DoesNotBubble,
+                                    EventCancelable::NotCancelable)
     }
 
     // https://dom.spec.whatwg.org/#concept-event-fire
-    pub fn fire_event(&self, name: &str,
-                      bubbles: EventBubbles,
-                      cancelable: EventCancelable)
-                      -> Root<Event> {
-        let global = self.global();
-        let event = Event::new(global.r(), Atom::from(name), bubbles, cancelable);
+    pub fn fire_bubbling_event(&self, name: Atom) -> Root<Event> {
+        self.fire_event_with_params(name,
+                                    EventBubbles::Bubbles,
+                                    EventCancelable::NotCancelable)
+    }
 
+    // https://dom.spec.whatwg.org/#concept-event-fire
+    pub fn fire_cancelable_event(&self, name: Atom) -> Root<Event> {
+        self.fire_event_with_params(name,
+                                    EventBubbles::DoesNotBubble,
+                                    EventCancelable::Cancelable)
+    }
+
+    // https://dom.spec.whatwg.org/#concept-event-fire
+    pub fn fire_bubbling_cancelable_event(&self, name: Atom) -> Root<Event> {
+        self.fire_event_with_params(name,
+                                    EventBubbles::Bubbles,
+                                    EventCancelable::Cancelable)
+    }
+
+    // https://dom.spec.whatwg.org/#concept-event-fire
+    pub fn fire_event_with_params(&self,
+                                  name: Atom,
+                                  bubbles: EventBubbles,
+                                  cancelable: EventCancelable)
+                                  -> Root<Event> {
+        let event = Event::new(&self.global(), name, bubbles, cancelable);
         event.fire(self);
-
         event
     }
 }
@@ -513,21 +551,23 @@ impl EventTargetMethods for EventTarget {
                         ty: DOMString,
                         listener: Option<Rc<EventListener>>,
                         capture: bool) {
-        if let Some(listener) = listener {
-            let mut handlers = self.handlers.borrow_mut();
-            let entry = match handlers.entry(Atom::from(ty)) {
-                Occupied(entry) => entry.into_mut(),
-                Vacant(entry) => entry.insert(EventListeners(vec!())),
-            };
+        let listener = match listener {
+            Some(l) => l,
+            None => return,
+        };
+        let mut handlers = self.handlers.borrow_mut();
+        let entry = match handlers.entry(Atom::from(ty)) {
+            Occupied(entry) => entry.into_mut(),
+            Vacant(entry) => entry.insert(EventListeners(vec!())),
+        };
 
-            let phase = if capture { ListenerPhase::Capturing } else { ListenerPhase::Bubbling };
-            let new_entry = EventListenerEntry {
-                phase: phase,
-                listener: EventListenerType::Additive(listener)
-            };
-            if !entry.contains(&new_entry) {
-                entry.push(new_entry);
-            }
+        let phase = if capture { ListenerPhase::Capturing } else { ListenerPhase::Bubbling };
+        let new_entry = EventListenerEntry {
+            phase: phase,
+            listener: EventListenerType::Additive(listener)
+        };
+        if !entry.contains(&new_entry) {
+            entry.push(new_entry);
         }
     }
 
@@ -536,18 +576,20 @@ impl EventTargetMethods for EventTarget {
                            ty: DOMString,
                            listener: Option<Rc<EventListener>>,
                            capture: bool) {
-        if let Some(ref listener) = listener {
-            let mut handlers = self.handlers.borrow_mut();
-            let entry = handlers.get_mut(&Atom::from(ty));
-            for entry in entry {
-                let phase = if capture { ListenerPhase::Capturing } else { ListenerPhase::Bubbling };
-                let old_entry = EventListenerEntry {
-                    phase: phase,
-                    listener: EventListenerType::Additive(listener.clone())
-                };
-                if let Some(position) = entry.iter().position(|e| *e == old_entry) {
-                    entry.remove(position);
-                }
+        let ref listener = match listener {
+            Some(l) => l,
+            None => return,
+        };
+        let mut handlers = self.handlers.borrow_mut();
+        let entry = handlers.get_mut(&Atom::from(ty));
+        for entry in entry {
+            let phase = if capture { ListenerPhase::Capturing } else { ListenerPhase::Bubbling };
+            let old_entry = EventListenerEntry {
+                phase: phase,
+                listener: EventListenerType::Additive(listener.clone())
+            };
+            if let Some(position) = entry.iter().position(|e| *e == old_entry) {
+                entry.remove(position);
             }
         }
     }
@@ -558,7 +600,10 @@ impl EventTargetMethods for EventTarget {
             return Err(Error::InvalidState);
         }
         event.set_trusted(false);
-        Ok(self.dispatch_event(event))
+        Ok(match self.dispatch_event(event) {
+            EventStatus::Canceled => false,
+            EventStatus::NotCanceled => true
+        })
     }
 }
 

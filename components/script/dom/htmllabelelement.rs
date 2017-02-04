@@ -16,7 +16,7 @@ use dom::htmlelement::HTMLElement;
 use dom::htmlformelement::{FormControl, HTMLFormElement};
 use dom::node::{document_from_node, Node};
 use dom::virtualmethods::VirtualMethods;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 use style::attr::AttrValue;
 
 #[dom_struct]
@@ -25,20 +25,20 @@ pub struct HTMLLabelElement {
 }
 
 impl HTMLLabelElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLLabelElement {
         HTMLLabelElement {
             htmlelement:
-                HTMLElement::new_inherited(localName, prefix, document)
+                HTMLElement::new_inherited(local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLLabelElement> {
-        Node::reflect_node(box HTMLLabelElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLLabelElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLLabelElementBinding::Wrap)
     }
@@ -76,7 +76,7 @@ impl Activatable for HTMLLabelElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#implicit-submission
-    fn implicit_submission(&self, _ctrlKey: bool, _shiftKey: bool, _altKey: bool, _metaKey: bool) {
+    fn implicit_submission(&self, _ctrl_key: bool, _shift_key: bool, _alt_key: bool, _meta_key: bool) {
         //FIXME: Investigate and implement implicit submission for label elements
         // Issue filed at https://github.com/servo/servo/issues/8263
     }
@@ -102,7 +102,7 @@ impl HTMLLabelElementMethods for HTMLLabelElement {
             return None;
         }
 
-        let for_attr = match self.upcast::<Element>().get_attribute(&ns!(), &atom!("for")) {
+        let for_attr = match self.upcast::<Element>().get_attribute(&ns!(), &local_name!("for")) {
             Some(for_attr) => for_attr,
             None => return self.first_labelable_descendant(),
         };
@@ -121,9 +121,9 @@ impl VirtualMethods for HTMLLabelElement {
         Some(self.upcast::<HTMLElement>() as &VirtualMethods)
     }
 
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &atom!("for") => AttrValue::from_atomic(value.into()),
+            &local_name!("for") => AttrValue::from_atomic(value.into()),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }

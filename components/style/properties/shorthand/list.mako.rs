@@ -5,8 +5,10 @@
 <%namespace name="helpers" file="/helpers.mako.rs" />
 
 <%helpers:shorthand name="list-style"
-                    sub_properties="list-style-image list-style-position list-style-type">
+                    sub_properties="list-style-image list-style-position list-style-type"
+                    spec="https://drafts.csswg.org/css-lists/#propdef-list-style">
     use properties::longhands::{list_style_image, list_style_position, list_style_type};
+    use values::{Either, None_};
 
     pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
         // `none` is ambiguous until we've finished parsing the shorthands, so we count the number
@@ -56,7 +58,7 @@
             (true, 2, None, None) => {
                 Ok(Longhands {
                     list_style_position: position,
-                    list_style_image: Some(list_style_image::SpecifiedValue::None),
+                    list_style_image: Some(Either::Second(None_)),
                     list_style_type: Some(list_style_type::SpecifiedValue::none),
                 })
             }
@@ -70,14 +72,14 @@
             (true, 1, Some(list_style_type), None) => {
                 Ok(Longhands {
                     list_style_position: position,
-                    list_style_image: Some(list_style_image::SpecifiedValue::None),
+                    list_style_image: Some(Either::Second(None_)),
                     list_style_type: Some(list_style_type),
                 })
             }
             (true, 1, None, None) => {
                 Ok(Longhands {
                     list_style_position: position,
-                    list_style_image: Some(list_style_image::SpecifiedValue::None),
+                    list_style_image: Some(Either::Second(None_)),
                     list_style_type: Some(list_style_type::SpecifiedValue::none),
                 })
             }
@@ -92,8 +94,8 @@
         }
     }
 
-    impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    impl<'a> LonghandsToSerialize<'a>  {
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
             match *self.list_style_position {
                 DeclaredValue::Initial => try!(write!(dest, "outside")),
                 _ => try!(self.list_style_position.to_css(dest))

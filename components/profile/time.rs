@@ -8,7 +8,9 @@ use heartbeats;
 use ipc_channel::ipc::{self, IpcReceiver};
 use profile_traits::energy::{energy_interval_ms, read_energy_uj};
 use profile_traits::time::{ProfilerCategory, ProfilerChan, ProfilerMsg, TimerMetadata};
-use profile_traits::time::{TimerMetadataReflowType, TimerMetadataFrameType};
+use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
+use servo_config::opts::OutputOptions;
+use std::{f64, thread, u32, u64};
 use std::borrow::ToOwned;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -19,11 +21,8 @@ use std::io::{self, Write};
 use std::path;
 use std::path::Path;
 use std::time::Duration;
-use std::{f64, thread, u32, u64};
 use std_time::precise_time_ns;
 use trace_dump::TraceDump;
-use util::opts::OutputOptions;
-use util::thread::spawn_named;
 
 pub trait Formattable {
     fn format(&self, output: &Option<OutputOptions>) -> String;
@@ -138,6 +137,7 @@ impl Formattable for ProfilerCategory {
             ProfilerCategory::ScriptInputEvent => "Script Input Event",
             ProfilerCategory::ScriptNetworkEvent => "Script Network Event",
             ProfilerCategory::ScriptParseHTML => "Script Parse HTML",
+            ProfilerCategory::ScriptParseXML => "Script Parse XML",
             ProfilerCategory::ScriptPlannedNavigation => "Script Planned Navigation",
             ProfilerCategory::ScriptResize => "Script Resize",
             ProfilerCategory::ScriptEvent => "Script Event",
@@ -149,6 +149,9 @@ impl Formattable for ProfilerCategory {
             ProfilerCategory::ScriptWebSocketEvent => "Script Web Socket Event",
             ProfilerCategory::ScriptWorkerEvent => "Script Worker Event",
             ProfilerCategory::ScriptServiceWorkerEvent => "Script Service Worker Event",
+            ProfilerCategory::ScriptEnterFullscreen => "Script Enter Fullscreen",
+            ProfilerCategory::ScriptExitFullscreen => "Script Exit Fullscreen",
+            ProfilerCategory::ScriptWebVREvent => "Script WebVR Event",
             ProfilerCategory::ApplicationHeartbeat => "Application Heartbeat",
         };
         format!("{}{}", padding, name)
@@ -173,28 +176,28 @@ impl Profiler {
             Some(ref option) => {
                 // Spawn the time profiler thread
                 let outputoption = option.clone();
-                spawn_named("Time profiler".to_owned(), move || {
+                thread::Builder::new().name("Time profiler".to_owned()).spawn(move || {
                     let trace = file_path.as_ref()
                         .map(path::Path::new)
                         .map(fs::File::create)
                         .map(|res| TraceDump::new(res.unwrap()));
                     let mut profiler = Profiler::new(port, trace, Some(outputoption));
                     profiler.start();
-                });
+                }).expect("Thread spawning failed");
                 // decide if we need to spawn the timer thread
                 match option {
                     &OutputOptions::FileName(_) => { /* no timer thread needed */ },
                     &OutputOptions::Stdout(period) => {
                         // Spawn a timer thread
                         let chan = chan.clone();
-                        spawn_named("Time profiler timer".to_owned(), move || {
+                        thread::Builder::new().name("Time profiler timer".to_owned()).spawn(move || {
                             loop {
                                 thread::sleep(duration_from_seconds(period));
                                 if chan.send(ProfilerMsg::Print).is_err() {
                                     break;
                                 }
                             }
-                        });
+                        }).expect("Thread spawning failed");
                     },
                 }
             },
@@ -202,17 +205,17 @@ impl Profiler {
                 // this is when the -p option hasn't been specified
                 if file_path.is_some() {
                     // Spawn the time profiler
-                    spawn_named("Time profiler".to_owned(), move || {
+                    thread::Builder::new().name("Time profiler".to_owned()).spawn(move || {
                         let trace = file_path.as_ref()
                             .map(path::Path::new)
                             .map(fs::File::create)
                             .map(|res| TraceDump::new(res.unwrap()));
                         let mut profiler = Profiler::new(port, trace, None);
                         profiler.start();
-                    });
+                    }).expect("Thread spawning failed");
                 } else {
                     // No-op to handle messages when the time profiler is not printing:
-                    spawn_named("Time profiler".to_owned(), move || {
+                    thread::Builder::new().name("Time profiler".to_owned()).spawn(move || {
                         loop {
                             match port.recv() {
                                 Err(_) => break,
@@ -223,7 +226,7 @@ impl Profiler {
                                 _ => {}
                             }
                         }
-                    });
+                    }).expect("Thread spawning failed");
                 }
             }
         }
@@ -244,7 +247,7 @@ impl Profiler {
             const MAX_ENERGY_INTERVAL_MS: u32 = 1000;
             let interval_ms = enforce_range(MIN_ENERGY_INTERVAL_MS, MAX_ENERGY_INTERVAL_MS, energy_interval_ms());
             let loop_count: u32 = (interval_ms as f32 / SLEEP_MS as f32).ceil() as u32;
-            spawn_named("Application heartbeat profiler".to_owned(), move || {
+            thread::Builder::new().name("Application heartbeat profiler".to_owned()).spawn(move || {
                 let mut start_time = precise_time_ns();
                 let mut start_energy = read_energy_uj();
                 loop {
@@ -260,16 +263,15 @@ impl Profiler {
                     // send using the inner channel
                     // (using ProfilerChan.send() forces an unwrap and sometimes panics for this background profiler)
                     let ProfilerChan(ref c) = profiler_chan;
-                    match c.send(ProfilerMsg::Time((ProfilerCategory::ApplicationHeartbeat, None),
-                                                   (start_time, end_time),
-                                                   (start_energy, end_energy))) {
-                        Ok(_) => {},
-                        Err(_) => return,
-                    };
+                    if let Err(_) = c.send(ProfilerMsg::Time((ProfilerCategory::ApplicationHeartbeat, None),
+                                                             (start_time, end_time),
+                                                             (start_energy, end_energy))) {
+                        return;
+                    }
                     start_time = end_time;
                     start_energy = end_energy;
                 }
-            });
+            }).expect("Thread spawning failed");
         }
 
         profiler_chan
@@ -294,12 +296,7 @@ impl Profiler {
     }
 
     fn find_or_insert(&mut self, k: (ProfilerCategory, Option<TimerMetadata>), t: f64) {
-        match self.buckets.get_mut(&k) {
-            None => {},
-            Some(v) => { v.push(t); return; },
-        }
-
-        self.buckets.insert(k, vec!(t));
+        self.buckets.entry(k).or_insert_with(Vec::new).push(t);
     }
 
     fn handle_msg(&mut self, msg: ProfilerMsg) -> bool {

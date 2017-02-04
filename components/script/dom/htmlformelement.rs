@@ -12,18 +12,17 @@ use dom::bindings::codegen::Bindings::HTMLFormElementBinding::HTMLFormElementMet
 use dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
 use dom::bindings::conversions::DerivedFrom;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
-use dom::bindings::js::{JS, MutNullableHeap, Root};
+use dom::bindings::js::{MutNullableJS, Root};
 use dom::bindings::refcounted::Trusted;
-use dom::bindings::reflector::Reflectable;
+use dom::bindings::reflector::DomObject;
 use dom::bindings::str::DOMString;
 use dom::blob::Blob;
 use dom::document::Document;
 use dom::element::Element;
-use dom::event::{EventBubbles, EventCancelable};
 use dom::eventtarget::EventTarget;
 use dom::file::File;
+use dom::globalscope::GlobalScope;
 use dom::htmlbuttonelement::HTMLButtonElement;
 use dom::htmlcollection::CollectionFilter;
 use dom::htmldatalistelement::HTMLDataListElement;
@@ -36,19 +35,21 @@ use dom::htmloutputelement::HTMLOutputElement;
 use dom::htmlselectelement::HTMLSelectElement;
 use dom::htmltextareaelement::HTMLTextAreaElement;
 use dom::node::{Node, document_from_node, window_from_node};
+use dom::validitystate::ValidationFlags;
 use dom::virtualmethods::VirtualMethods;
 use encoding::EncodingRef;
 use encoding::all::UTF_8;
 use encoding::label::encoding_from_whatwg_label;
+use html5ever_atoms::LocalName;
 use hyper::header::{Charset, ContentDisposition, ContentType, DispositionParam, DispositionType};
 use hyper::method::Method;
-use msg::constellation_msg::{LoadData, PipelineId};
-use rand::random;
+use msg::constellation_msg::PipelineId;
 use script_thread::{MainThreadScriptMsg, Runnable};
+use script_traits::LoadData;
+use servo_rand::random;
 use std::borrow::ToOwned;
 use std::cell::Cell;
 use std::sync::mpsc::Sender;
-use string_cache::Atom;
 use style::attr::AttrValue;
 use style::str::split_html_space_chars;
 use task_source::TaskSource;
@@ -60,16 +61,16 @@ pub struct GenerationId(u32);
 pub struct HTMLFormElement {
     htmlelement: HTMLElement,
     marked_for_reset: Cell<bool>,
-    elements: MutNullableHeap<JS<HTMLFormControlsCollection>>,
+    elements: MutNullableJS<HTMLFormControlsCollection>,
     generation_id: Cell<GenerationId>
 }
 
 impl HTMLFormElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLFormElement {
         HTMLFormElement {
-            htmlelement: HTMLElement::new_inherited(localName, prefix, document),
+            htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             marked_for_reset: Cell::new(false),
             elements: Default::default(),
             generation_id: Cell::new(GenerationId(0))
@@ -77,16 +78,12 @@ impl HTMLFormElement {
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLFormElement> {
-        Node::reflect_node(box HTMLFormElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLFormElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLFormElementBinding::Wrap)
-    }
-
-    pub fn generation_id(&self) -> GenerationId {
-        self.generation_id.get()
     }
 }
 
@@ -98,13 +95,13 @@ impl HTMLFormElementMethods for HTMLFormElement {
     make_setter!(SetAcceptCharset, "accept-charset");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-action
-    make_url_or_base_getter!(Action, "action");
+    make_string_or_document_url_getter!(Action, "action");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-action
     make_setter!(SetAction, "action");
 
     // https://html.spec.whatwg.org/multipage/#dom-form-autocomplete
-    make_enumerated_getter!(Autocomplete, "autocomplete", "on", ("off"));
+    make_enumerated_getter!(Autocomplete, "autocomplete", "on", "off");
 
     // https://html.spec.whatwg.org/multipage/#dom-form-autocomplete
     make_setter!(SetAutocomplete, "autocomplete");
@@ -113,7 +110,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
     make_enumerated_getter!(Enctype,
                             "enctype",
                             "application/x-www-form-urlencoded",
-                            ("text/plain") | ("multipart/form-data"));
+                            "text/plain" | "multipart/form-data");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-enctype
     make_setter!(SetEnctype, "enctype");
@@ -129,7 +126,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-method
-    make_enumerated_getter!(Method, "method", "get", ("post") | ("dialog"));
+    make_enumerated_getter!(Method, "method", "get", "post" | "dialog");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-method
     make_setter!(SetMethod, "method");
@@ -203,7 +200,8 @@ impl HTMLFormElementMethods for HTMLFormElement {
                                 elem.downcast::<HTMLTextAreaElement>().unwrap().form_owner()
                             }
                             _ => {
-                                debug_assert!(!elem.downcast::<HTMLElement>().unwrap().is_listed_element());
+                                debug_assert!(!elem.downcast::<HTMLElement>().unwrap().is_listed_element() ||
+                                              elem.local_name() == &local_name!("keygen"));
                                 return false;
                             }
                         }
@@ -219,7 +217,7 @@ impl HTMLFormElementMethods for HTMLFormElement {
         }
         let filter = box ElementsFilter { form: Root::from_ref(self) };
         let window = window_from_node(self);
-        let elements = HTMLFormControlsCollection::new(window.r(), self.upcast(), filter);
+        let elements = HTMLFormControlsCollection::new(&window, self.upcast(), filter);
         self.elements.set(Some(&elements));
         elements
     }
@@ -230,9 +228,9 @@ impl HTMLFormElementMethods for HTMLFormElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-form-item
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<Element>> {
+    fn IndexedGetter(&self, index: u32) -> Option<Root<Element>> {
         let elements = self.Elements();
-        elements.IndexedGetter(index, found)
+        elements.IndexedGetter(index)
     }
 }
 
@@ -253,9 +251,9 @@ impl HTMLFormElement {
     // https://html.spec.whatwg.org/multipage/#picking-an-encoding-for-the-form
     fn pick_encoding(&self) -> EncodingRef {
         // Step 2
-        if self.upcast::<Element>().has_attribute(&atom!("accept-charset")) {
+        if self.upcast::<Element>().has_attribute(&local_name!("accept-charset")) {
             // Substep 1
-            let input = self.upcast::<Element>().get_string_attribute(&atom!("accept-charset"));
+            let input = self.upcast::<Element>().get_string_attribute(&local_name!("accept-charset"));
 
             // Substep 2, 3, 4
             let mut candidate_encodings = split_html_space_chars(&*input).filter_map(encoding_from_whatwg_label);
@@ -295,7 +293,7 @@ impl HTMLFormElement {
     pub fn submit(&self, submit_method_flag: SubmittedFrom, submitter: FormSubmitter) {
         // Step 1
         let doc = document_from_node(self);
-        let base = doc.url();
+        let base = doc.base_url();
         // TODO: Handle browsing contexts (Step 2, 3)
         // Step 4
         if submit_method_flag == SubmittedFrom::NotFromForm &&
@@ -303,16 +301,14 @@ impl HTMLFormElement {
         {
             if self.interactive_validation().is_err() {
                 // TODO: Implement event handlers on all form control elements
-                self.upcast::<EventTarget>().fire_simple_event("invalid");
+                self.upcast::<EventTarget>().fire_event(atom!("invalid"));
                 return;
             }
         }
         // Step 5
         if submit_method_flag == SubmittedFrom::NotFromForm {
             let event = self.upcast::<EventTarget>()
-                .fire_event("submit",
-                            EventBubbles::Bubbles,
-                            EventCancelable::Cancelable);
+                .fire_bubbling_cancelable_event(atom!("submit"));
             if event.DefaultPrevented() {
                 return;
             }
@@ -342,7 +338,7 @@ impl HTMLFormElement {
         let _target = submitter.target();
         // TODO: Handle browsing contexts, partially loaded documents (step 16-17)
 
-        let mut load_data = LoadData::new(action_components, doc.get_referrer_policy(), Some(doc.url().clone()));
+        let mut load_data = LoadData::new(action_components, doc.get_referrer_policy(), Some(doc.url()));
 
         // Step 18
         match (&*scheme, method) {
@@ -381,10 +377,12 @@ impl HTMLFormElement {
     fn mutate_action_url(&self, form_data: &mut Vec<FormDatum>, mut load_data: LoadData, encoding: EncodingRef) {
         let charset = &*encoding.whatwg_name().unwrap();
 
-        load_data.url.query_pairs_mut().clear()
-                 .encoding_override(Some(self.pick_encoding()))
-                 .extend_pairs(form_data.into_iter()
-                                        .map(|field| (field.name.clone(), field.replace_value(charset))));
+        if let Some(ref mut url) = load_data.url.as_mut_url() {
+            url.query_pairs_mut().clear()
+               .encoding_override(Some(self.pick_encoding()))
+               .extend_pairs(form_data.into_iter()
+                                      .map(|field| (field.name.clone(), field.replace_value(charset))));
+        }
 
         self.plan_to_navigate(load_data);
     }
@@ -395,16 +393,18 @@ impl HTMLFormElement {
         let boundary = generate_boundary();
         let bytes = match enctype {
             FormEncType::UrlEncoded => {
-                let mut url = load_data.url.clone();
                 let charset = &*encoding.whatwg_name().unwrap();
                 load_data.headers.set(ContentType::form_url_encoded());
 
-                url.query_pairs_mut().clear()
-                   .encoding_override(Some(self.pick_encoding()))
-                   .extend_pairs(form_data.into_iter()
-                                          .map(|field| (field.name.clone(), field.replace_value(charset))));
 
-                url.query().unwrap_or("").to_string().into_bytes()
+                if let Some(ref mut url) = load_data.url.as_mut_url() {
+                    url.query_pairs_mut().clear()
+                       .encoding_override(Some(self.pick_encoding()))
+                       .extend_pairs(form_data.into_iter()
+                       .map(|field| (field.name.clone(), field.replace_value(charset))));
+                }
+
+                load_data.url.query().unwrap_or("").to_string().into_bytes()
             }
             FormEncType::FormDataEncoded => {
                 let mime = mime!(Multipart / FormData; Boundary =(&boundary));
@@ -435,14 +435,14 @@ impl HTMLFormElement {
         // Step 2
         let nav = box PlannedNavigation {
             load_data: load_data,
-            pipeline_id: window.pipeline(),
+            pipeline_id: window.upcast::<GlobalScope>().pipeline_id(),
             script_chan: window.main_thread_script_chan().clone(),
             generation_id: self.generation_id.get(),
             form: Trusted::new(self)
         };
 
         // Step 3
-        window.dom_manipulation_task_source().queue(nav, GlobalRef::Window(&window)).unwrap();
+        window.dom_manipulation_task_source().queue(nav, window.upcast()).unwrap();
     }
 
     /// Interactively validate the constraints of form elements
@@ -467,12 +467,22 @@ impl HTMLFormElement {
         //               form, refactor this when html5ever's form owner PR lands
         // Step 1-3
         let invalid_controls = node.traverse_preorder().filter_map(|field| {
-            if let Some(_el) = field.downcast::<Element>() {
-                None // Remove this line if you decide to refactor
-
-                // XXXKiChjang: Form control elements should each have a candidate_for_validation
-                //              and satisfies_constraints methods
-
+            if let Some(el) = field.downcast::<Element>() {
+                if el.disabled_state() {
+                    None
+                } else {
+                    let validatable = match el.as_maybe_validatable() {
+                        Some(v) => v,
+                        None => return None
+                    };
+                    if !validatable.is_instance_validatable() {
+                        None
+                    } else if validatable.validate(ValidationFlags::empty()) {
+                        None
+                    } else {
+                        Some(FormSubmittableElement::from_element(&el))
+                    }
+                }
             } else {
                 None
             }
@@ -482,9 +492,7 @@ impl HTMLFormElement {
         // Step 5-6
         let unhandled_invalid_controls = invalid_controls.into_iter().filter_map(|field| {
             let event = field.as_event_target()
-                .fire_event("invalid",
-                            EventBubbles::DoesNotBubble,
-                            EventCancelable::Cancelable);
+                .fire_cancelable_event(atom!("invalid"));
             if !event.DefaultPrevented() { return Some(field); }
             None
         }).collect::<Vec<FormSubmittableElement>>();
@@ -593,7 +601,7 @@ impl HTMLFormElement {
                 "file" | "textarea" => (), // TODO
                 _ => {
                     datum.name = clean_crlf(&datum.name);
-                    datum.value = FormDatumValue::String(clean_crlf( match datum.value {
+                    datum.value = FormDatumValue::String(clean_crlf(match datum.value {
                         FormDatumValue::String(ref s) => s,
                         FormDatumValue::File(_) => unreachable!()
                     }));
@@ -613,9 +621,7 @@ impl HTMLFormElement {
         }
 
         let event = self.upcast::<EventTarget>()
-            .fire_event("reset",
-                        EventBubbles::Bubbles,
-                        EventCancelable::Cancelable);
+            .fire_bubbling_cancelable_event(atom!("reset"));
         if event.DefaultPrevented() {
             return;
         }
@@ -633,8 +639,7 @@ impl HTMLFormElement {
                 //    {}
                 //}
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLSelectElement)) => {
-                    // Unimplemented
-                    {}
+                    child.downcast::<HTMLSelectElement>().unwrap().reset();
                 }
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTextAreaElement)) => {
                     child.downcast::<HTMLTextAreaElement>().unwrap().reset();
@@ -653,6 +658,7 @@ impl HTMLFormElement {
 
 #[derive(JSTraceable, HeapSizeOf, Clone)]
 pub enum FormDatumValue {
+    #[allow(dead_code)]
     File(Root<File>),
     String(DOMString)
 }
@@ -692,6 +698,7 @@ pub enum FormMethod {
 }
 
 #[derive(HeapSizeOf)]
+#[allow(dead_code)]
 pub enum FormSubmittableElement {
     ButtonElement(Root<HTMLButtonElement>),
     InputElement(Root<HTMLInputElement>),
@@ -699,17 +706,37 @@ pub enum FormSubmittableElement {
     // KeygenElement(&'a HTMLKeygenElement),
     ObjectElement(Root<HTMLObjectElement>),
     SelectElement(Root<HTMLSelectElement>),
-    TextAreaElement(Root<HTMLTextAreaElement>)
+    TextAreaElement(Root<HTMLTextAreaElement>),
 }
 
 impl FormSubmittableElement {
     fn as_event_target(&self) -> &EventTarget {
         match *self {
-            FormSubmittableElement::ButtonElement(ref button) => button.r().upcast(),
-            FormSubmittableElement::InputElement(ref input) => input.r().upcast(),
-            FormSubmittableElement::ObjectElement(ref object) => object.r().upcast(),
-            FormSubmittableElement::SelectElement(ref select) => select.r().upcast(),
-            FormSubmittableElement::TextAreaElement(ref textarea) => textarea.r().upcast()
+            FormSubmittableElement::ButtonElement(ref button) => button.upcast(),
+            FormSubmittableElement::InputElement(ref input) => input.upcast(),
+            FormSubmittableElement::ObjectElement(ref object) => object.upcast(),
+            FormSubmittableElement::SelectElement(ref select) => select.upcast(),
+            FormSubmittableElement::TextAreaElement(ref textarea) => textarea.upcast()
+        }
+    }
+
+    fn from_element(element: &Element) -> FormSubmittableElement {
+        if let Some(input) = element.downcast::<HTMLInputElement>() {
+            FormSubmittableElement::InputElement(Root::from_ref(&input))
+        }
+        else if let Some(input) = element.downcast::<HTMLButtonElement>() {
+            FormSubmittableElement::ButtonElement(Root::from_ref(&input))
+        }
+        else if let Some(input) = element.downcast::<HTMLObjectElement>() {
+            FormSubmittableElement::ObjectElement(Root::from_ref(&input))
+        }
+        else if let Some(input) = element.downcast::<HTMLSelectElement>() {
+            FormSubmittableElement::SelectElement(Root::from_ref(&input))
+        }
+        else if let Some(input) = element.downcast::<HTMLTextAreaElement>() {
+            FormSubmittableElement::TextAreaElement(Root::from_ref(&input))
+        } else {
+            unreachable!()
         }
     }
 }
@@ -727,12 +754,12 @@ impl<'a> FormSubmitter<'a> {
         match *self {
             FormSubmitter::FormElement(form) => form.Action(),
             FormSubmitter::InputElement(input_element) => {
-                input_element.get_form_attribute(&atom!("formaction"),
+                input_element.get_form_attribute(&local_name!("formaction"),
                                                  |i| i.FormAction(),
                                                  |f| f.Action())
             },
             FormSubmitter::ButtonElement(button_element) => {
-                button_element.get_form_attribute(&atom!("formaction"),
+                button_element.get_form_attribute(&local_name!("formaction"),
                                                   |i| i.FormAction(),
                                                   |f| f.Action())
             }
@@ -743,12 +770,12 @@ impl<'a> FormSubmitter<'a> {
         let attr = match *self {
             FormSubmitter::FormElement(form) => form.Enctype(),
             FormSubmitter::InputElement(input_element) => {
-                input_element.get_form_attribute(&atom!("formenctype"),
+                input_element.get_form_attribute(&local_name!("formenctype"),
                                                  |i| i.FormEnctype(),
                                                  |f| f.Enctype())
             },
             FormSubmitter::ButtonElement(button_element) => {
-                button_element.get_form_attribute(&atom!("formenctype"),
+                button_element.get_form_attribute(&local_name!("formenctype"),
                                                   |i| i.FormEnctype(),
                                                   |f| f.Enctype())
             }
@@ -766,12 +793,12 @@ impl<'a> FormSubmitter<'a> {
         let attr = match *self {
             FormSubmitter::FormElement(form) => form.Method(),
             FormSubmitter::InputElement(input_element) => {
-                input_element.get_form_attribute(&atom!("formmethod"),
+                input_element.get_form_attribute(&local_name!("formmethod"),
                                                  |i| i.FormMethod(),
                                                  |f| f.Method())
             },
             FormSubmitter::ButtonElement(button_element) => {
-                button_element.get_form_attribute(&atom!("formmethod"),
+                button_element.get_form_attribute(&local_name!("formmethod"),
                                                   |i| i.FormMethod(),
                                                   |f| f.Method())
             }
@@ -787,12 +814,12 @@ impl<'a> FormSubmitter<'a> {
         match *self {
             FormSubmitter::FormElement(form) => form.Target(),
             FormSubmitter::InputElement(input_element) => {
-                input_element.get_form_attribute(&atom!("formtarget"),
+                input_element.get_form_attribute(&local_name!("formtarget"),
                                                  |i| i.FormTarget(),
                                                  |f| f.Target())
             },
             FormSubmitter::ButtonElement(button_element) => {
-                button_element.get_form_attribute(&atom!("formtarget"),
+                button_element.get_form_attribute(&local_name!("formtarget"),
                                                   |i| i.FormTarget(),
                                                   |f| f.Target())
             }
@@ -803,12 +830,12 @@ impl<'a> FormSubmitter<'a> {
         match *self {
             FormSubmitter::FormElement(form) => form.NoValidate(),
             FormSubmitter::InputElement(input_element) => {
-                input_element.get_form_boolean_attribute(&atom!("formnovalidate"),
+                input_element.get_form_boolean_attribute(&local_name!("formnovalidate"),
                                                  |i| i.FormNoValidate(),
                                                  |f| f.NoValidate())
             }
             FormSubmitter::ButtonElement(button_element) => {
-                button_element.get_form_boolean_attribute(&atom!("formnovalidate"),
+                button_element.get_form_boolean_attribute(&local_name!("formnovalidate"),
                                                   |i| i.FormNoValidate(),
                                                   |f| f.NoValidate())
             }
@@ -816,13 +843,13 @@ impl<'a> FormSubmitter<'a> {
     }
 }
 
-pub trait FormControl: DerivedFrom<Element> + Reflectable {
+pub trait FormControl: DerivedFrom<Element> + DomObject {
     // FIXME: This is wrong (https://github.com/servo/servo/issues/3553)
     //        but we need html5ever to do it correctly
     fn form_owner(&self) -> Option<Root<HTMLFormElement>> {
         // https://html.spec.whatwg.org/multipage/#reset-the-form-owner
         let elem = self.to_element();
-        let owner = elem.get_string_attribute(&atom!("form"));
+        let owner = elem.get_string_attribute(&local_name!("form"));
         if !owner.is_empty() {
             let doc = document_from_node(elem);
             let owner = doc.GetElementById(owner);
@@ -837,7 +864,7 @@ pub trait FormControl: DerivedFrom<Element> + Reflectable {
     }
 
     fn get_form_attribute<InputFn, OwnerFn>(&self,
-                                            attr: &Atom,
+                                            attr: &LocalName,
                                             input: InputFn,
                                             owner: OwnerFn)
                                             -> DOMString
@@ -847,12 +874,12 @@ pub trait FormControl: DerivedFrom<Element> + Reflectable {
         if self.to_element().has_attribute(attr) {
             input(self)
         } else {
-            self.form_owner().map_or(DOMString::new(), |t| owner(t.r()))
+            self.form_owner().map_or(DOMString::new(), |t| owner(&t))
         }
     }
 
     fn get_form_boolean_attribute<InputFn, OwnerFn>(&self,
-                                            attr: &Atom,
+                                            attr: &LocalName,
                                             input: InputFn,
                                             owner: OwnerFn)
                                             -> bool
@@ -862,7 +889,7 @@ pub trait FormControl: DerivedFrom<Element> + Reflectable {
         if self.to_element().has_attribute(attr) {
             input(self)
         } else {
-            self.form_owner().map_or(false, |t| owner(t.r()))
+            self.form_owner().map_or(false, |t| owner(&t))
         }
     }
 
@@ -880,9 +907,9 @@ impl VirtualMethods for HTMLFormElement {
         Some(self.upcast::<HTMLElement>() as &VirtualMethods)
     }
 
-    fn parse_plain_attribute(&self, name: &Atom, value: DOMString) -> AttrValue {
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &atom!("name") => AttrValue::from_atomic(value.into()),
+            &local_name!("name") => AttrValue::from_atomic(value.into()),
             _ => self.super_type().unwrap().parse_plain_attribute(name, value),
         }
     }
@@ -902,7 +929,7 @@ impl Runnable for PlannedNavigation {
     fn handler(self: Box<PlannedNavigation>) {
         if self.generation_id == self.form.root().generation_id.get() {
             let script_chan = self.script_chan.clone();
-            script_chan.send(MainThreadScriptMsg::Navigate(self.pipeline_id, self.load_data)).unwrap();
+            script_chan.send(MainThreadScriptMsg::Navigate(self.pipeline_id, self.load_data, false)).unwrap();
         }
     }
 }

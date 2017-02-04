@@ -5,16 +5,16 @@
 use cookie_storage::CookieStorage;
 use http_loader;
 use hyper::header::Host;
+use net_traits::{WebSocketCommunicate, WebSocketConnectData, WebSocketDomAction, WebSocketNetworkEvent};
 use net_traits::MessageData;
 use net_traits::hosts::replace_hosts;
 use net_traits::unwrap_websocket_protocol;
-use net_traits::{WebSocketCommunicate, WebSocketConnectData, WebSocketDomAction, WebSocketNetworkEvent};
+use servo_url::ServoUrl;
 use std::ascii::AsciiExt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use util::thread::spawn_named;
-use websocket::client::request::Url;
+use websocket::{Client, Message};
 use websocket::header::{Headers, Origin, WebSocketProtocol};
 use websocket::message::Type;
 use websocket::receiver::Receiver;
@@ -24,10 +24,9 @@ use websocket::stream::WebSocketStream;
 use websocket::ws::receiver::Receiver as WSReceiver;
 use websocket::ws::sender::Sender as Sender_Object;
 use websocket::ws::util::url::parse_url;
-use websocket::{Client, Message};
 
 /// *Establish a WebSocket Connection* as defined in RFC 6455.
-fn establish_a_websocket_connection(resource_url: &Url, net_url: (Host, String, bool),
+fn establish_a_websocket_connection(resource_url: &ServoUrl, net_url: (Host, String, bool),
                                     origin: String, protocols: Vec<String>,
                                     cookie_jar: Arc<RwLock<CookieStorage>>)
     -> WebSocketResult<(Headers, Sender<WebSocketStream>, Receiver<WebSocketStream>)> {
@@ -64,14 +63,14 @@ fn establish_a_websocket_connection(resource_url: &Url, net_url: (Host, String, 
 }
 
 pub fn init(connect: WebSocketCommunicate, connect_data: WebSocketConnectData, cookie_jar: Arc<RwLock<CookieStorage>>) {
-    spawn_named(format!("WebSocket connection to {}", connect_data.resource_url), move || {
+    thread::Builder::new().name(format!("WebSocket connection to {}", connect_data.resource_url)).spawn(move || {
         // Step 8: Protocols.
 
         // Step 9.
 
         // URL that we actually fetch from the network, after applying the replacements
         // specified in the hosts file.
-        let net_url_result = parse_url(&replace_hosts(&connect_data.resource_url));
+        let net_url_result = parse_url(replace_hosts(&connect_data.resource_url).as_url().unwrap());
         let net_url = match net_url_result {
             Ok(net_url) => net_url,
             Err(e) => {
@@ -162,5 +161,5 @@ pub fn init(connect: WebSocketCommunicate, connect_data: WebSocketConnectData, c
                 }
             }
         });
-    });
+    }).expect("Thread spawning failed");
 }

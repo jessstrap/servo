@@ -6,39 +6,39 @@ use dom::bindings::codegen::Bindings::CloseEventBinding;
 use dom::bindings::codegen::Bindings::CloseEventBinding::CloseEventMethods;
 use dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use dom::bindings::error::Fallible;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::Root;
 use dom::bindings::reflector::reflect_dom_object;
 use dom::bindings::str::DOMString;
 use dom::event::{Event, EventBubbles, EventCancelable};
-use string_cache::Atom;
+use dom::globalscope::GlobalScope;
+use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct CloseEvent {
     event: Event,
-    wasClean: bool,
+    was_clean: bool,
     code: u16,
     reason: DOMString,
 }
 
 impl CloseEvent {
-    pub fn new_inherited(wasClean: bool, code: u16, reason: DOMString) -> CloseEvent {
+    pub fn new_inherited(was_clean: bool, code: u16, reason: DOMString) -> CloseEvent {
         CloseEvent {
             event: Event::new_inherited(),
-            wasClean: wasClean,
+            was_clean: was_clean,
             code: code,
             reason: reason,
         }
     }
 
-    pub fn new_uninitialized(global: GlobalRef) -> Root<CloseEvent> {
+    pub fn new_uninitialized(global: &GlobalScope) -> Root<CloseEvent> {
         reflect_dom_object(box CloseEvent::new_inherited(false, 0, DOMString::new()),
                            global,
                            CloseEventBinding::Wrap)
     }
 
-    pub fn new(global: GlobalRef,
+    pub fn new(global: &GlobalScope,
                type_: Atom,
                bubbles: EventBubbles,
                cancelable: EventCancelable,
@@ -57,7 +57,7 @@ impl CloseEvent {
         ev
     }
 
-    pub fn Constructor(global: GlobalRef,
+    pub fn Constructor(global: &GlobalScope,
                        type_: DOMString,
                        init: &CloseEventBinding::CloseEventInit)
                        -> Fallible<Root<CloseEvent>> {
@@ -77,7 +77,7 @@ impl CloseEvent {
 impl CloseEventMethods for CloseEvent {
     // https://html.spec.whatwg.org/multipage/#dom-closeevent-wasclean
     fn WasClean(&self) -> bool {
-        self.wasClean
+        self.was_clean
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-closeevent-code

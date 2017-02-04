@@ -2,33 +2,148 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use cssparser::ToCss;
 use dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::{self, CSSStyleDeclarationMethods};
+use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::error::{Error, ErrorResult, Fallible};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::js::{JS, Root};
-use dom::bindings::reflector::{Reflector, reflect_dom_object};
+use dom::bindings::reflector::{DomObject, Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
-use dom::element::{Element, StylePriority};
-use dom::node::{Node, NodeDamage, window_from_node};
+use dom::cssrule::CSSRule;
+use dom::element::Element;
+use dom::node::{Node, window_from_node};
 use dom::window::Window;
+use parking_lot::RwLock;
+use servo_url::ServoUrl;
 use std::ascii::AsciiExt;
-use std::cell::Ref;
-use std::slice;
-use string_cache::Atom;
+use std::sync::Arc;
+use style::attr::AttrValue;
 use style::parser::ParserContextExtraData;
-use style::properties::{PropertyDeclaration, Shorthand};
-use style::properties::{is_supported_property, parse_one_declaration, parse_style_attribute};
-use style::selector_impl::PseudoElement;
+use style::properties::{Importance, PropertyDeclarationBlock, PropertyId, LonghandId, ShorthandId};
+use style::properties::{parse_one_declaration, parse_style_attribute};
+use style::selector_parser::PseudoElement;
+use style_traits::ToCss;
 
 // http://dev.w3.org/csswg/cssom/#the-cssstyledeclaration-interface
 #[dom_struct]
 pub struct CSSStyleDeclaration {
     reflector_: Reflector,
-    owner: JS<Element>,
+    owner: CSSStyleOwner,
     readonly: bool,
     pseudo: Option<PseudoElement>,
+}
+
+#[derive(HeapSizeOf, JSTraceable)]
+#[must_root]
+pub enum CSSStyleOwner {
+    Element(JS<Element>),
+    CSSRule(JS<CSSRule>,
+            #[ignore_heap_size_of = "Arc"]
+            Arc<RwLock<PropertyDeclarationBlock>>),
+}
+
+impl CSSStyleOwner {
+    // Mutate the declaration block associated to this style owner, and
+    // optionally indicate if it has changed (assumed to be true).
+    fn mutate_associated_block<F, R>(&self, f: F) -> R
+        where F: FnOnce(&mut PropertyDeclarationBlock, &mut bool) -> R,
+    {
+        // TODO(emilio): This has some duplication just to avoid dummy clones.
+        //
+        // This is somewhat complex but the complexity is encapsulated.
+        let mut changed = true;
+        match *self {
+            CSSStyleOwner::Element(ref el) => {
+                let mut attr = el.style_attribute().borrow_mut().take();
+                let result = if attr.is_some() {
+                    let lock = attr.as_ref().unwrap();
+                    let mut pdb = lock.write();
+                    let result = f(&mut pdb, &mut changed);
+                    result
+                } else {
+                    let mut pdb = PropertyDeclarationBlock {
+                        important_count: 0,
+                        declarations: vec![],
+                    };
+                    let result = f(&mut pdb, &mut changed);
+
+                    // Here `changed` is somewhat silly, because we know the
+                    // exact conditions under it changes.
+                    changed = !pdb.declarations.is_empty();
+                    if changed {
+                        attr = Some(Arc::new(RwLock::new(pdb)));
+                    }
+
+                    result
+                };
+
+                if changed {
+                    // Note that there's no need to remove the attribute here if
+                    // the declaration block is empty[1], and if `attr` is
+                    // `None` it means that it necessarily didn't change, so no
+                    // need to go through all the set_attribute machinery.
+                    //
+                    // [1]: https://github.com/whatwg/html/issues/2306
+                    if let Some(pdb) = attr {
+                        let serialization = pdb.read().to_css_string();
+                        el.set_attribute(&local_name!("style"),
+                                         AttrValue::Declaration(serialization,
+                                                                pdb));
+                    }
+                } else {
+                    // Remember to put it back.
+                    *el.style_attribute().borrow_mut() = attr;
+                }
+
+                result
+            }
+            CSSStyleOwner::CSSRule(ref rule, ref pdb) => {
+                let result = f(&mut *pdb.write(), &mut changed);
+                if changed {
+                    rule.global().as_window().Document().invalidate_stylesheets();
+                }
+                result
+            }
+        }
+    }
+
+    fn with_block<F, R>(&self, f: F) -> R
+        where F: FnOnce(&PropertyDeclarationBlock) -> R,
+    {
+        match *self {
+            CSSStyleOwner::Element(ref el) => {
+                match *el.style_attribute().borrow() {
+                    Some(ref pdb) => f(&pdb.read()),
+                    None => {
+                        let pdb = PropertyDeclarationBlock {
+                            important_count: 0,
+                            declarations: vec![],
+                        };
+                        f(&pdb)
+                    }
+                }
+            }
+            CSSStyleOwner::CSSRule(_, ref pdb) => {
+                f(&pdb.read())
+            }
+        }
+    }
+
+    fn window(&self) -> Root<Window> {
+        match *self {
+            CSSStyleOwner::Element(ref el) => window_from_node(&**el),
+            CSSStyleOwner::CSSRule(ref rule, _) => Root::from_ref(rule.global().as_window()),
+        }
+    }
+
+    fn base_url(&self) -> ServoUrl {
+        match *self {
+            CSSStyleOwner::Element(ref el) => window_from_node(&**el).Document().base_url(),
+            CSSStyleOwner::CSSRule(ref rule, _) => {
+                rule.parent_stylesheet().style_stylesheet().base_url.clone()
+            }
+        }
+    }
 }
 
 #[derive(PartialEq, HeapSizeOf)]
@@ -38,217 +153,187 @@ pub enum CSSModificationAccess {
 }
 
 macro_rules! css_properties(
-    ( $([$getter:ident, $setter:ident, $cssprop:expr]),* ) => (
+    ( $([$getter:ident, $setter:ident, $id:expr],)* ) => (
         $(
             fn $getter(&self) -> DOMString {
-                self.GetPropertyValue(DOMString::from($cssprop))
+                self.get_property_value($id)
             }
             fn $setter(&self, value: DOMString) -> ErrorResult {
-                self.SetPropertyValue(DOMString::from($cssprop), value)
+                self.set_property($id, value, DOMString::new())
             }
         )*
     );
 );
 
 impl CSSStyleDeclaration {
-    pub fn new_inherited(owner: &Element,
+    #[allow(unrooted_must_root)]
+    pub fn new_inherited(owner: CSSStyleOwner,
                          pseudo: Option<PseudoElement>,
                          modification_access: CSSModificationAccess)
                          -> CSSStyleDeclaration {
         CSSStyleDeclaration {
             reflector_: Reflector::new(),
-            owner: JS::from_ref(owner),
+            owner: owner,
             readonly: modification_access == CSSModificationAccess::Readonly,
             pseudo: pseudo,
         }
     }
 
+    #[allow(unrooted_must_root)]
     pub fn new(global: &Window,
-               owner: &Element,
+               owner: CSSStyleOwner,
                pseudo: Option<PseudoElement>,
                modification_access: CSSModificationAccess)
                -> Root<CSSStyleDeclaration> {
         reflect_dom_object(box CSSStyleDeclaration::new_inherited(owner,
                                                                   pseudo,
                                                                   modification_access),
-                           GlobalRef::Window(global),
+                           global,
                            CSSStyleDeclarationBinding::Wrap)
     }
 
-    fn get_computed_style(&self, property: &Atom) -> Option<DOMString> {
-        let node = self.owner.upcast::<Node>();
-        if !node.is_in_doc() {
-            // TODO: Node should be matched against the style rules of this window.
-            // Firefox is currently the only browser to implement this.
-            return None;
+    fn get_computed_style(&self, property: PropertyId) -> DOMString {
+        match self.owner {
+            CSSStyleOwner::CSSRule(..) =>
+                panic!("get_computed_style called on CSSStyleDeclaration with a CSSRule owner"),
+            CSSStyleOwner::Element(ref el) => {
+                let node = el.upcast::<Node>();
+                if !node.is_in_doc() {
+                    // TODO: Node should be matched against the style rules of this window.
+                    // Firefox is currently the only browser to implement this.
+                    return DOMString::new();
+                }
+                let addr = node.to_trusted_node_address();
+                window_from_node(node).resolved_style_query(addr, self.pseudo.clone(), property)
+            }
         }
-        let addr = node.to_trusted_node_address();
-        window_from_node(&*self.owner).resolved_style_query(addr, self.pseudo.clone(), property)
+    }
+
+    fn get_property_value(&self, id: PropertyId) -> DOMString {
+        if self.readonly {
+            // Readonly style declarations are used for getComputedStyle.
+            return self.get_computed_style(id);
+        }
+
+        let mut string = String::new();
+
+        self.owner.with_block(|ref pdb| {
+            pdb.property_value_to_css(&id, &mut string).unwrap();
+        });
+
+        DOMString::from(string)
+    }
+
+    fn set_property(&self, id: PropertyId, value: DOMString, priority: DOMString) -> ErrorResult {
+        // Step 1
+        if self.readonly {
+            return Err(Error::NoModificationAllowed);
+        }
+
+        self.owner.mutate_associated_block(|ref mut pdb, mut changed| {
+            if value.is_empty() {
+                // Step 4
+                *changed = pdb.remove_property(&id);
+                return Ok(());
+            }
+
+            // Step 5
+            let importance = match &*priority {
+                "" => Importance::Normal,
+                p if p.eq_ignore_ascii_case("important") => Importance::Important,
+                _ => {
+                    *changed = false;
+                    return Ok(());
+                }
+            };
+
+            // Step 6
+            let window = self.owner.window();
+            let declarations =
+                parse_one_declaration(id, &value, &self.owner.base_url(),
+                                      window.css_error_reporter(),
+                                      ParserContextExtraData::default());
+
+            // Step 7
+            let declarations = match declarations {
+                Ok(declarations) => declarations,
+                Err(_) => {
+                    *changed = false;
+                    return Ok(());
+                }
+            };
+
+            // Step 8
+            // Step 9
+            // We could try to be better I guess?
+            *changed = !declarations.is_empty();
+            for declaration in declarations {
+                // TODO(emilio): We could check it changed
+                pdb.set_parsed_declaration(declaration.0, importance);
+            }
+
+            Ok(())
+        })
     }
 }
 
 impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-length
     fn Length(&self) -> u32 {
-        let elem = self.owner.upcast::<Element>();
-        let len = match *elem.style_attribute().borrow() {
-            Some(ref declarations) => declarations.normal.len() + declarations.important.len(),
-            None => 0,
-        };
-        len as u32
+        self.owner.with_block(|ref pdb| {
+            pdb.declarations.len() as u32
+        })
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-item
     fn Item(&self, index: u32) -> DOMString {
-        let index = index as usize;
-        let elem = self.owner.upcast::<Element>();
-        let style_attribute = elem.style_attribute().borrow();
-        let result = style_attribute.as_ref().and_then(|declarations| {
-            if index > declarations.normal.len() {
-                declarations.important
-                            .get(index - declarations.normal.len())
-                            .map(|decl| format!("{:?} !important", decl))
-            } else {
-                declarations.normal
-                            .get(index)
-                            .map(|decl| format!("{:?}", decl))
-            }
-        });
-
-        result.map_or(DOMString::new(), DOMString::from)
+        self.IndexedGetter(index).unwrap_or_default()
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-getpropertyvalue
-    fn GetPropertyValue(&self, mut property: DOMString) -> DOMString {
-        let owner = &self.owner;
-
-        // Step 1
-        property.make_ascii_lowercase();
-        let property = Atom::from(property);
-
-        if self.readonly {
-            // Readonly style declarations are used for getComputedStyle.
-            return self.get_computed_style(&property).unwrap_or(DOMString::new());
-        }
-
-        // Step 2
-        if let Some(shorthand) = Shorthand::from_name(&property) {
-            // Step 2.1
-            let mut list = vec![];
-
-            // Step 2.2
-            for longhand in shorthand.longhands() {
-                // Step 2.2.1
-                let declaration = owner.get_inline_style_declaration(&Atom::from(*longhand));
-
-                // Step 2.2.2 & 2.2.3
-                match declaration {
-                    Some(declaration) => list.push(declaration),
-                    None => return DOMString::new(),
-                }
-            }
-
-            // Step 2.3
-            // Work around closures not being Clone
-            #[derive(Clone)]
-            struct Map<'a, 'b: 'a>(slice::Iter<'a, Ref<'b, PropertyDeclaration>>);
-            impl<'a, 'b> Iterator for Map<'a, 'b> {
-                type Item = &'a PropertyDeclaration;
-                fn next(&mut self) -> Option<Self::Item> {
-                    self.0.next().map(|r| &**r)
-                }
-            }
-
-            // TODO: important is hardcoded to false because method does not implement it yet
-            let serialized_value = shorthand.serialize_shorthand_value_to_string(Map(list.iter()), false);
-            return DOMString::from(serialized_value);
-        }
-
-        // Step 3 & 4
-        match owner.get_inline_style_declaration(&property) {
-            Some(declaration) => DOMString::from(declaration.value()),
-            None => DOMString::new(),
-        }
+    fn GetPropertyValue(&self, property: DOMString) -> DOMString {
+        let id = if let Ok(id) = PropertyId::parse(property.into()) {
+            id
+        } else {
+            // Unkwown property
+            return DOMString::new()
+        };
+        self.get_property_value(id)
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-getpropertypriority
-    fn GetPropertyPriority(&self, mut property: DOMString) -> DOMString {
-        // Step 1
-        property.make_ascii_lowercase();
-        let property = Atom::from(property);
-
-        // Step 2
-        if let Some(shorthand) = Shorthand::from_name(&property) {
-            // Step 2.1 & 2.2 & 2.3
-            if shorthand.longhands().iter()
-                                    .map(|&longhand| self.GetPropertyPriority(DOMString::from(longhand)))
-                                    .all(|priority| priority == "important") {
-                return DOMString::from("important");
-            }
-        // Step 3
+    fn GetPropertyPriority(&self, property: DOMString) -> DOMString {
+        let id = if let Ok(id) = PropertyId::parse(property.into()) {
+            id
         } else {
-            if self.owner.get_important_inline_style_declaration(&property).is_some() {
-                return DOMString::from("important");
-            }
-        }
+            // Unkwown property
+            return DOMString::new()
+        };
 
-        // Step 4
-        DOMString::new()
+        self.owner.with_block(|ref pdb| {
+            if pdb.property_priority(&id).important() {
+                DOMString::from("important")
+            } else {
+                // Step 4
+                DOMString::new()
+            }
+        })
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-setproperty
     fn SetProperty(&self,
-                   mut property: DOMString,
+                   property: DOMString,
                    value: DOMString,
                    priority: DOMString)
                    -> ErrorResult {
-        // Step 1
-        if self.readonly {
-            return Err(Error::NoModificationAllowed);
-        }
-
-        // Step 2
-        property.make_ascii_lowercase();
-
         // Step 3
-        if !is_supported_property(&property) {
-            return Ok(());
-        }
-
-        // Step 4
-        if value.is_empty() {
-            return self.RemoveProperty(property).map(|_| ());
-        }
-
-        // Step 5
-        let priority = match &*priority {
-            "" => StylePriority::Normal,
-            p if p.eq_ignore_ascii_case("important") => StylePriority::Important,
-            _ => return Ok(()),
-        };
-
-        // Step 6
-        let window = window_from_node(&*self.owner);
-        let declarations =
-            parse_one_declaration(&property, &value, &window.get_url(), window.css_error_reporter(),
-                                  ParserContextExtraData::default());
-
-        // Step 7
-        let declarations = if let Ok(declarations) = declarations {
-            declarations
+        let id = if let Ok(id) = PropertyId::parse(property.into()) {
+            id
         } else {
-            return Ok(());
+            // Unknown property
+            return Ok(())
         };
-
-        let element = self.owner.upcast::<Element>();
-
-        // Step 8
-        // Step 9
-        element.update_inline_style(declarations, priority);
-
-        let node = element.upcast::<Node>();
-        node.dirty(NodeDamage::NodeStyleDamaged);
-        Ok(())
+        self.set_property(id, value, priority)
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-setpropertypriority
@@ -259,29 +344,23 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
         }
 
         // Step 2 & 3
-        if !is_supported_property(&property) {
-            return Ok(());
-        }
+        let id = match PropertyId::parse(property.into()) {
+            Ok(id) => id,
+            Err(..) => return Ok(()), // Unkwown property
+        };
 
         // Step 4
-        let priority = match &*priority {
-            "" => StylePriority::Normal,
-            p if p.eq_ignore_ascii_case("important") => StylePriority::Important,
+        let importance = match &*priority {
+            "" => Importance::Normal,
+            p if p.eq_ignore_ascii_case("important") => Importance::Important,
             _ => return Ok(()),
         };
 
-        let element = self.owner.upcast::<Element>();
+        self.owner.mutate_associated_block(|ref mut pdb, mut changed| {
+            // Step 5 & 6
+            *changed = pdb.set_importance(&id, importance);
+        });
 
-        // Step 5 & 6
-        match Shorthand::from_name(&property) {
-            Some(shorthand) => {
-                element.set_inline_style_property_priority(shorthand.longhands(), priority)
-            }
-            None => element.set_inline_style_property_priority(&[&*property], priority),
-        }
-
-        let node = element.upcast::<Node>();
-        node.dirty(NodeDamage::NodeStyleDamaged);
         Ok(())
     }
 
@@ -291,36 +370,27 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-removeproperty
-    fn RemoveProperty(&self, mut property: DOMString) -> Fallible<DOMString> {
+    fn RemoveProperty(&self, property: DOMString) -> Fallible<DOMString> {
         // Step 1
         if self.readonly {
             return Err(Error::NoModificationAllowed);
         }
 
-        // Step 2
-        property.make_ascii_lowercase();
+        let id = if let Ok(id) = PropertyId::parse(property.into()) {
+            id
+        } else {
+            // Unkwown property, cannot be there to remove.
+            return Ok(DOMString::new())
+        };
 
-        // Step 3
-        let value = self.GetPropertyValue(property.clone());
-
-        let element = self.owner.upcast::<Element>();
-
-        match Shorthand::from_name(&property) {
-            // Step 4
-            Some(shorthand) => {
-                for longhand in shorthand.longhands() {
-                    element.remove_inline_style_property(longhand)
-                }
-            }
-            // Step 5
-            None => element.remove_inline_style_property(&property),
-        }
-
-        let node = element.upcast::<Node>();
-        node.dirty(NodeDamage::NodeStyleDamaged);
+        let mut string = String::new();
+        self.owner.mutate_associated_block(|mut pdb, mut changed| {
+            pdb.property_value_to_css(&id, &mut string).unwrap();
+            *changed = pdb.remove_property(&id);
+        });
 
         // Step 6
-        Ok(value)
+        Ok(DOMString::from(string))
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-cssfloat
@@ -334,45 +404,43 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
     }
 
     // https://dev.w3.org/csswg/cssom/#the-cssstyledeclaration-interface
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> DOMString {
-        let rval = self.Item(index);
-        *found = index < self.Length();
-        rval
+    fn IndexedGetter(&self, index: u32) -> Option<DOMString> {
+        self.owner.with_block(|ref pdb| {
+            pdb.declarations.get(index as usize).map(|entry| {
+                let (ref declaration, importance) = *entry;
+                let mut css = declaration.to_css_string();
+                if importance.important() {
+                    css += " !important";
+                }
+                DOMString::from(css)
+            })
+        })
     }
 
     // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-csstext
     fn CssText(&self) -> DOMString {
-        let elem = self.owner.upcast::<Element>();
-        let style_attribute = elem.style_attribute().borrow();
-
-        if let Some(declarations) = style_attribute.as_ref() {
-            DOMString::from(declarations.to_css_string())
-        } else {
-            DOMString::new()
-        }
+        self.owner.with_block(|ref pdb| {
+            DOMString::from(pdb.to_css_string())
+        })
     }
 
     // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-csstext
     fn SetCssText(&self, value: DOMString) -> ErrorResult {
-        let window = window_from_node(self.owner.upcast::<Node>());
-        let element = self.owner.upcast::<Element>();
+        let window = self.owner.window();
 
         // Step 1
         if self.readonly {
             return Err(Error::NoModificationAllowed);
         }
 
-        // Step 3
-        let decl_block = parse_style_attribute(&value, &window.get_url(), window.css_error_reporter(),
-                                               ParserContextExtraData::default());
-        *element.style_attribute().borrow_mut() = if decl_block.normal.is_empty() && decl_block.important.is_empty() {
-            None // Step 2
-        } else {
-            Some(decl_block)
-        };
-        element.sync_property_with_attrs_style();
-        let node = element.upcast::<Node>();
-        node.dirty(NodeDamage::NodeStyleDamaged);
+        self.owner.mutate_associated_block(|mut pdb, mut _changed| {
+            // Step 3
+            *pdb = parse_style_attribute(&value,
+                                         &self.owner.base_url(),
+                                         window.css_error_reporter(),
+                                         ParserContextExtraData::default());
+        });
+
         Ok(())
     }
 

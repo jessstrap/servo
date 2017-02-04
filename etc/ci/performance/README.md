@@ -7,25 +7,22 @@ Servo Page Load Time Test
 
 # Basic Usage
 
-## Prepare the test runner
+`./mach test-perf` can be used to run a performance test on your servo build. The test result JSON will be saved to `etc/ci/performance/output/`. You can then run `python test_differ.py` to compare these two test results. Run `python test_differ.py -h` for instructions.
 
-* Clone this repo
-* Download [tp5n.zip](http://people.mozilla.org/~jmaher/taloszips/zips/tp5n.zip), extract it to `page_load_test/tp5n`
-* Run `prepare_manifest.sh` to transform the tp5n manifest to our format
-* Install the Python3 `treeherder-client` package. For example, to install it in a virtualenv: `python3 -m virtualenv venv; source venv/bin/activate; pip install treeherder-client`
+# Setup for CI machine
+## CI for Servo
+
 * Setup your Treeherder client ID and secret as environment variables `TREEHERDER_CLIENT_ID` and `TREEHERDER_CLIENT_SECRET`
+* Run `./mach test-perf --submit` to run and submit the result to Perfherder.
 
-## Build Servo
-* Clone the servo repo
-* Compile release build
-* Run `git_log_to_json.sh` in the servo repo, save the output as `revision.json`
-* Put your `servo` binary, `revision.json` and `resources` folder in `etc/ci/performance/servo/`
+## CI for Gecko
 
-## Run
-* Activate the virutalenv: `source venv/bin/activate`
-* Sync your system clock before running, the Perfherder API SSL check will fail if your system clock is not accurate. (e.g. `sudo nptdate tw.pool.ntp.org`)
-* Run `test_all.sh`
-* Test results are submitted to https://treeherder.mozilla.org/#/jobs?repo=servo
+* Install Firefox Nightly in your PATH
+* Download [geckodriver](https://github.com/mozilla/geckodriver/releases) and add it to the `PATH` (e.g. for Linux `export PATH=$PATH:path/to/geckodriver`)
+* `export FIREFOX_BIN=/path/to/firefox`
+* `pip install selenium`
+* Run `python gecko_driver.py` to test
+* Run `test_all.sh --gecko --submit` (omit `--submit` if you don't want to submit to perfherder)
 
 # How it works
 
@@ -33,6 +30,25 @@ Servo Page Load Time Test
 * Some of the tests will make Servo run forever, it's disabled right now. See https://github.com/servo/servo/issues/11087
 * Each testcase is a subtest on Perfherder, and their summary time is the geometric mean of all the subtests.
 * Notice that the test is different from the Talos TP5 test we run for Gecko. So you can NOT conclude that Servo is "faster" or "slower" than Gecko from this test.
+
+# Comparing the performance before and after a patch
+
+* Run the test once before you apply a patch, and once after you apply it.
+* `python test_differ.py output/perf-<before time>.json output/perf-<after time>.json`
+* Green lines means loading time decreased, Blue lines means loading time increased.
+
+# Add your own test
+
+* Add you test case (html file) to the `page_load_test/` folder. For example we can create a `page_load_test/example/example.html`
+* Add a manifest (or modify existing ones) named `page_load_test/example.manifest`
+* Add the lines like this to the manifest:
+
+```
+http://localhost:8000/page_load_test/example/example.html
+# This is a comment
+# Pages got served on a local server at localhost:8000
+```
+* Modify the `MANIFEST=...` link in `test_all.sh` and point that to the new manifest file.
 
 # Unit tests
 
@@ -59,10 +75,12 @@ If you want to test the data submission code in `submit_to_perfherder.py` withou
   * `./manage.py create_credentials <username> <email> "description"`, the email has to match your logged in user. Remember to log-in through the Web UI once before you run this.
   * Setup your Treeherder client ID and secret as environment variables `TREEHERDER_CLIENT_ID` and `TREEHERDER_CLIENT_SECRET`
 
-## For Gecko
+# Troubleshooting
 
-* Install Firefox Nightly in your PATH
-* Install [jpm](https://developer.mozilla.org/en-US/Add-ons/SDK/Tools/jpm#Installation)
-* Run `jpm xpi` in the `firefox/addon` folder
-* Install the generated `xpi` file to your Firefox Nightly
+ If you saw this error message:
 
+```
+venv/bin/activate: line 8: _OLD_VIRTUAL_PATH: unbound variable
+```
+
+That means your `virtualenv` is too old, try run `pip install -U virtualenv` to upgrade (If you installed ubuntu's `python-virtualenv` package, uninstall it first then install it through `pip`)

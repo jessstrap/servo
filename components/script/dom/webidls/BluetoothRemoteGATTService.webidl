@@ -4,23 +4,26 @@
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattservice
 
-[Pref="dom.bluetooth.enabled", Exposed=(Window,Worker)]
-interface BluetoothRemoteGATTService {
-    readonly attribute BluetoothDevice device;
-    readonly attribute DOMString uuid;
-    readonly attribute boolean isPrimary;
-    [Throws]
-    BluetoothRemoteGATTCharacteristic getCharacteristic(BluetoothCharacteristicUUID characteristic);
-    [Throws]
-    sequence<BluetoothRemoteGATTCharacteristic> getCharacteristics
-        (optional BluetoothCharacteristicUUID characteristic);
-    //Promise<BluetoothRemoteGATTCharacteristic>getCharacteristic(BluetoothCharacteristicUUID characteristic);
-    //Promise<sequence<BluetoothRemoteGATTCharacteristic>>
-    //getCharacteristics(optional BluetoothCharacteristicUUID characteristic);
-    [Throws]
-    BluetoothRemoteGATTService getIncludedService(BluetoothServiceUUID service);
-    [Throws]
-    sequence<BluetoothRemoteGATTService> getIncludedServices(optional BluetoothServiceUUID service);
-    //Promise<BluetoothRemoteGATTService>getIncludedService(BluetoothServiceUUID service);
-    //Promise<sequence<BluetoothRemoteGATTService>>getIncludedServices(optional BluetoothServiceUUID service);
+[Pref="dom.bluetooth.enabled"]
+interface BluetoothRemoteGATTService : EventTarget {
+  [SameObject]
+  readonly attribute BluetoothDevice device;
+  readonly attribute DOMString uuid;
+  readonly attribute boolean isPrimary;
+  Promise<BluetoothRemoteGATTCharacteristic> getCharacteristic(BluetoothCharacteristicUUID characteristic);
+  Promise<sequence<BluetoothRemoteGATTCharacteristic>>
+  getCharacteristics(optional BluetoothCharacteristicUUID characteristic);
+  Promise<BluetoothRemoteGATTService> getIncludedService(BluetoothServiceUUID service);
+  Promise<sequence<BluetoothRemoteGATTService>> getIncludedServices(optional BluetoothServiceUUID service);
 };
+
+[NoInterfaceObject]
+interface ServiceEventHandlers {
+  attribute EventHandler onserviceadded;
+  attribute EventHandler onservicechanged;
+  attribute EventHandler onserviceremoved;
+};
+
+// BluetoothRemoteGATTService implements EventTarget;
+// BluetoothRemoteGATTService implements CharacteristicEventHandlers;
+BluetoothRemoteGATTService implements ServiceEventHandlers;

@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use {OpaqueStyleAndLayoutData, TrustedNodeAddress};
 use app_units::Au;
 use euclid::point::Point2D;
 use euclid::rect::Rect;
-use gfx_traits::{Epoch, LayerId};
+use gfx_traits::Epoch;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use msg::constellation_msg::PipelineId;
 use net_traits::image_cache_thread::ImageCacheThread;
@@ -13,15 +14,13 @@ use profile_traits::mem::ReportsChan;
 use rpc::LayoutRPC;
 use script_traits::{ConstellationControlMsg, LayoutControlMsg};
 use script_traits::{LayoutMsg as ConstellationMsg, StackingContextScrollState, WindowSizeData};
+use servo_url::ServoUrl;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
-use string_cache::Atom;
 use style::context::ReflowGoal;
-use style::selector_impl::PseudoElement;
+use style::properties::PropertyId;
+use style::selector_parser::PseudoElement;
 use style::stylesheets::Stylesheet;
-use url::Url;
-use util::ipc::OptionalOpaqueIpcSender;
-use {OpaqueStyleAndLayoutData, TrustedNodeAddress};
 
 /// Asynchronous messages that script can send to layout.
 pub enum Msg {
@@ -48,10 +47,6 @@ pub enum Msg {
 
     /// Requests that the layout thread reflow with a newly-loaded Web font.
     ReflowWithNewlyLoadedWebFont,
-
-    /// Updates the layout visible rects, affecting the area that display lists will be constructed
-    /// for.
-    SetVisibleRects(Vec<(LayerId, Rect<Au>)>),
 
     /// Destroys layout data associated with a DOM node.
     ///
@@ -84,7 +79,7 @@ pub enum Msg {
     CreateLayoutThread(NewLayoutThreadInfo),
 
     /// Set the final Url.
-    SetFinalUrl(Url),
+    SetFinalUrl(ServoUrl),
 
     /// Tells layout about the new scrolling offsets of each scrollable stacking context.
     SetStackingContextScrollStates(Vec<StackingContextScrollState>),
@@ -92,19 +87,20 @@ pub enum Msg {
 
 
 /// Any query to perform with this reflow.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum ReflowQueryType {
     NoQuery,
     ContentBoxQuery(TrustedNodeAddress),
     ContentBoxesQuery(TrustedNodeAddress),
     NodeOverflowQuery(TrustedNodeAddress),
     HitTestQuery(Point2D<f32>, Point2D<f32>, bool),
+    NodeScrollRootIdQuery(TrustedNodeAddress),
     NodeGeometryQuery(TrustedNodeAddress),
-    NodeLayerIdQuery(TrustedNodeAddress),
     NodeScrollGeometryQuery(TrustedNodeAddress),
-    ResolvedStyleQuery(TrustedNodeAddress, Option<PseudoElement>, Atom),
+    ResolvedStyleQuery(TrustedNodeAddress, Option<PseudoElement>, PropertyId),
     OffsetParentQuery(TrustedNodeAddress),
     MarginStyleQuery(TrustedNodeAddress),
+    TextIndexQuery(TrustedNodeAddress, i32, i32),
 }
 
 /// Information needed for a reflow.
@@ -131,6 +127,8 @@ pub struct ScriptReflow {
     pub script_join_chan: Sender<()>,
     /// The type of query if any to perform during this reflow.
     pub query_type: ReflowQueryType,
+    /// The number of objects in the dom #10110
+    pub dom_count: u32,
 }
 
 impl Drop for ScriptReflow {
@@ -141,14 +139,13 @@ impl Drop for ScriptReflow {
 
 pub struct NewLayoutThreadInfo {
     pub id: PipelineId,
-    pub url: Url,
+    pub url: ServoUrl,
     pub is_parent: bool,
     pub layout_pair: (Sender<Msg>, Receiver<Msg>),
     pub pipeline_port: IpcReceiver<LayoutControlMsg>,
     pub constellation_chan: IpcSender<ConstellationMsg>,
     pub script_chan: IpcSender<ConstellationControlMsg>,
     pub image_cache_thread: ImageCacheThread,
-    pub paint_chan: OptionalOpaqueIpcSender,
-    pub content_process_shutdown_chan: IpcSender<()>,
+    pub content_process_shutdown_chan: Option<IpcSender<()>>,
     pub layout_threads: usize,
 }

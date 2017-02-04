@@ -21,12 +21,6 @@ from mach.decorators import (
 
 from servo.command_base import CommandBase, cd, call
 
-CARGO_PATHS = [
-    path.join('components', 'servo'),
-    path.join('ports', 'cef'),
-    path.join('ports', 'geckolib'),
-]
-
 
 @CommandProvider
 class MachCommands(CommandBase):
@@ -87,11 +81,11 @@ class MachCommands(CommandBase):
             print("flag or update all packages with --all-packages (-a) flag")
             sys.exit(1)
 
-        for cargo_path in CARGO_PATHS:
-            with cd(cargo_path):
-                print(cargo_path)
-                call(["cargo", "update"] + params,
-                     env=self.build_env())
+        self.ensure_bootstrapped()
+
+        with cd(self.context.topdir):
+            call(["cargo", "update"] + params,
+                 env=self.build_env())
 
     @Command('clippy',
              description='Run Clippy',
@@ -103,7 +97,7 @@ class MachCommands(CommandBase):
         '--json', '-j', action="store_true",
         help='Outputs')
     def clippy(self, package=None, json=False):
-        params = ["--features=script/plugins/clippy"]
+        params = ["--features=clippy"]
         if package:
             params += ["-p", package]
         if json:
@@ -152,7 +146,7 @@ class MachCommands(CommandBase):
         # Absolute paths for all directories to be considered
         grep_paths = root_dirs_abs + tests_dirs_abs
         return call(
-            ["git"] + ["grep"] + params + ['--'] + grep_paths + [':(exclude)*.min.js'],
+            ["git"] + ["grep"] + params + ['--'] + grep_paths + [':(exclude)*.min.js', ':(exclude)*.min.css'],
             env=self.build_env())
 
     @Command('fetch',
@@ -163,30 +157,31 @@ class MachCommands(CommandBase):
         self.ensure_bootstrapped()
 
         # Fetch Cargo dependencies
-        for cargo_path in CARGO_PATHS:
-            with cd(cargo_path):
-                print(cargo_path)
-                call(["cargo", "fetch"], env=self.build_env())
+        with cd(self.context.topdir):
+            call(["cargo", "fetch"], env=self.build_env())
 
-    @Command('wpt-upgrade',
+    @Command('wptrunner-upgrade',
              description='upgrade wptrunner.',
              category='devenv')
     def upgrade_wpt_runner(self):
+        env = self.build_env()
         with cd(path.join(self.context.topdir, 'tests', 'wpt', 'harness')):
-            code = call(["git", "init"], env=self.build_env())
+            code = call(["git", "init"], env=env)
             if code:
                 return code
+            # No need to report an error if this fails, as it will for the first use
+            call(["git", "remote", "rm", "upstream"], env=env)
             code = call(
-                ["git", "remote", "add", "upstream", "https://github.com/w3c/wptrunner.git"], env=self.build_env())
+                ["git", "remote", "add", "upstream", "https://github.com/w3c/wptrunner.git"], env=env)
             if code:
                 return code
-            code = call(["git", "fetch", "upstream"], env=self.build_env())
+            code = call(["git", "fetch", "upstream"], env=env)
             if code:
                 return code
-            code = call(["git", "reset", "--hard", "remotes/upstream/master"], env=self.build_env())
+            code = call(["git", "reset", "--hard", "remotes/upstream/master"], env=env)
             if code:
                 return code
-            code = call(["rm", "-rf", ".git"], env=self.build_env())
+            code = call(["rm", "-rf", ".git"], env=env)
             if code:
                 return code
             return 0

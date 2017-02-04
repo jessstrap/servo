@@ -7,11 +7,11 @@
 
 use cookie_rs;
 use net_traits::CookieSource;
-use pub_domains::is_pub_domain;
+use net_traits::pub_domains::is_pub_domain;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use time::{Tm, now, at, Duration};
-use url::Url;
 
 /// A stored cookie that wraps the definition in cookie-rs. This is used to implement
 /// various behaviours defined in the spec that rely on an associated request URL,
@@ -28,7 +28,7 @@ pub struct Cookie {
 
 impl Cookie {
     /// http://tools.ietf.org/html/rfc6265#section-5.3
-    pub fn new_wrapped(mut cookie: cookie_rs::Cookie, request: &Url, source: CookieSource)
+    pub fn new_wrapped(mut cookie: cookie_rs::Cookie, request: &ServoUrl, source: CookieSource)
                        -> Option<Cookie> {
         // Step 3
         let (persistent, expiry_time) = match (&cookie.max_age, &cookie.expires) {
@@ -75,7 +75,7 @@ impl Cookie {
 
 
         // Step 10
-        if cookie.httponly && source != CookieSource::HTTP {
+        if cookie.httponly && source == CookieSource::NonHTTP {
             return None;
         }
 
@@ -132,20 +132,15 @@ impl Cookie {
 
     // http://tools.ietf.org/html/rfc6265#section-5.1.3
     pub fn domain_match(string: &str, domain_string: &str) -> bool {
-        if string == domain_string {
-            return true;
-        }
-        if string.ends_with(domain_string) &&
-            string.as_bytes()[string.len()-domain_string.len()-1] == b'.' &&
-            string.parse::<Ipv4Addr>().is_err() &&
-            string.parse::<Ipv6Addr>().is_err() {
-            return true;
-        }
-        false
+        string == domain_string ||
+        (string.ends_with(domain_string) &&
+         string.as_bytes()[string.len()-domain_string.len()-1] == b'.' &&
+         string.parse::<Ipv4Addr>().is_err() &&
+         string.parse::<Ipv6Addr>().is_err())
     }
 
     // http://tools.ietf.org/html/rfc6265#section-5.4 step 1
-    pub fn appropriate_for_url(&self, url: &Url, source: CookieSource) -> bool {
+    pub fn appropriate_for_url(&self, url: &ServoUrl, source: CookieSource) -> bool {
         let domain = url.host_str();
         if self.host_only {
             if self.cookie.domain.as_ref().map(String::as_str) != domain {
@@ -165,7 +160,7 @@ impl Cookie {
             }
         }
 
-        if self.cookie.secure && url.scheme() != "https" {
+        if self.cookie.secure && !url.is_secure_scheme() {
             return false;
         }
         if self.cookie.httponly && source == CookieSource::NonHTTP {

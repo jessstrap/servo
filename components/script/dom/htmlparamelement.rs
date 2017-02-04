@@ -8,7 +8,7 @@ use dom::bindings::str::DOMString;
 use dom::document::Document;
 use dom::htmlelement::HTMLElement;
 use dom::node::Node;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 
 #[dom_struct]
 pub struct HTMLParamElement {
@@ -16,20 +16,20 @@ pub struct HTMLParamElement {
 }
 
 impl HTMLParamElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLParamElement {
         HTMLParamElement {
             htmlelement:
-                HTMLElement::new_inherited(localName, prefix, document)
+                HTMLElement::new_inherited(local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLParamElement> {
-        Node::reflect_node(box HTMLParamElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLParamElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLParamElementBinding::Wrap)
     }

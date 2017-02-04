@@ -3,17 +3,17 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use canvas_traits::{CanvasGradientStop, FillOrStrokeStyle, LinearGradientStyle, RadialGradientStyle};
-use cssparser::Color as CSSColor;
 use cssparser::{Parser, RGBA};
+use cssparser::Color as CSSColor;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::CanvasGradientBinding;
 use dom::bindings::codegen::Bindings::CanvasGradientBinding::CanvasGradientMethods;
 use dom::bindings::error::{Error, ErrorResult};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::Root;
 use dom::bindings::num::Finite;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
+use dom::globalscope::GlobalScope;
 
 // https://html.spec.whatwg.org/multipage/#canvasgradient
 #[dom_struct]
@@ -38,7 +38,7 @@ impl CanvasGradient {
         }
     }
 
-    pub fn new(global: GlobalRef, style: CanvasGradientStyle) -> Root<CanvasGradient> {
+    pub fn new(global: &GlobalScope, style: CanvasGradientStyle) -> Root<CanvasGradient> {
         reflect_dom_object(box CanvasGradient::new_inherited(style),
                            global,
                            CanvasGradientBinding::Wrap)

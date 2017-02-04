@@ -8,7 +8,7 @@ use dom::bindings::str::DOMString;
 use dom::document::Document;
 use dom::htmlmediaelement::HTMLMediaElement;
 use dom::node::Node;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 
 #[dom_struct]
 pub struct HTMLVideoElement {
@@ -16,18 +16,18 @@ pub struct HTMLVideoElement {
 }
 
 impl HTMLVideoElement {
-    fn new_inherited(localName: Atom, prefix: Option<DOMString>, document: &Document) -> HTMLVideoElement {
+    fn new_inherited(local_name: LocalName, prefix: Option<DOMString>, document: &Document) -> HTMLVideoElement {
         HTMLVideoElement {
             htmlmediaelement:
-                HTMLMediaElement::new_inherited(localName, prefix, document)
+                HTMLMediaElement::new_inherited(local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLVideoElement> {
-        Node::reflect_node(box HTMLVideoElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLVideoElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLVideoElementBinding::Wrap)
     }

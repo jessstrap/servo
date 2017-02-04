@@ -5,19 +5,18 @@
 use devtools_traits::AttrInfo;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::AttrBinding::{self, AttrMethods};
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, MutNullableHeap};
-use dom::bindings::js::{LayoutJS, Root, RootedReference};
+use dom::bindings::js::{LayoutJS, MutNullableJS, Root, RootedReference};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
 use dom::element::{AttributeMutation, Element};
 use dom::virtualmethods::vtable_for;
 use dom::window::Window;
+use html5ever_atoms::{Prefix, LocalName, Namespace};
+use servo_atoms::Atom;
 use std::borrow::ToOwned;
 use std::cell::Ref;
 use std::mem;
-use string_cache::{Atom, Namespace};
 use style::attr::{AttrIdentifier, AttrValue};
 
 // https://dom.spec.whatwg.org/#interface-attr
@@ -28,15 +27,15 @@ pub struct Attr {
     value: DOMRefCell<AttrValue>,
 
     /// the element that owns this attribute.
-    owner: MutNullableHeap<JS<Element>>,
+    owner: MutNullableJS<Element>,
 }
 
 impl Attr {
-    fn new_inherited(local_name: Atom,
+    fn new_inherited(local_name: LocalName,
                      value: AttrValue,
-                     name: Atom,
+                     name: LocalName,
                      namespace: Namespace,
-                     prefix: Option<Atom>,
+                     prefix: Option<Prefix>,
                      owner: Option<&Element>)
                      -> Attr {
         Attr {
@@ -48,16 +47,16 @@ impl Attr {
                 prefix: prefix,
             },
             value: DOMRefCell::new(value),
-            owner: MutNullableHeap::new(owner),
+            owner: MutNullableJS::new(owner),
         }
     }
 
     pub fn new(window: &Window,
-               local_name: Atom,
+               local_name: LocalName,
                value: AttrValue,
-               name: Atom,
+               name: LocalName,
                namespace: Namespace,
-               prefix: Option<Atom>,
+               prefix: Option<Prefix>,
                owner: Option<&Element>)
                -> Root<Attr> {
         reflect_dom_object(box Attr::new_inherited(local_name,
@@ -66,12 +65,12 @@ impl Attr {
                                                    namespace,
                                                    prefix,
                                                    owner),
-                           GlobalRef::Window(window),
+                           window,
                            AttrBinding::Wrap)
     }
 
     #[inline]
-    pub fn name(&self) -> &Atom {
+    pub fn name(&self) -> &LocalName {
         &self.identifier.name
     }
 
@@ -81,15 +80,15 @@ impl Attr {
     }
 
     #[inline]
-    pub fn prefix(&self) -> &Option<Atom> {
-        &self.identifier.prefix
+    pub fn prefix(&self) -> Option<&Prefix> {
+        self.identifier.prefix.as_ref()
     }
 }
 
 impl AttrMethods for Attr {
     // https://dom.spec.whatwg.org/#dom-attr-localname
     fn LocalName(&self) -> DOMString {
-        // FIXME(ajeffrey): convert directly from Atom to DOMString
+        // FIXME(ajeffrey): convert directly from LocalName to DOMString
         DOMString::from(&**self.local_name())
     }
 
@@ -105,7 +104,7 @@ impl AttrMethods for Attr {
             let value = owner.parse_attribute(&self.identifier.namespace,
                                               self.local_name(),
                                               value);
-            self.set_value(value, owner.r());
+            self.set_value(value, &owner);
         } else {
             *self.value.borrow_mut() = AttrValue::String(value.into());
         }
@@ -133,7 +132,7 @@ impl AttrMethods for Attr {
 
     // https://dom.spec.whatwg.org/#dom-attr-name
     fn Name(&self) -> DOMString {
-        // FIXME(ajeffrey): convert directly from Atom to DOMString
+        // FIXME(ajeffrey): convert directly from LocalName to DOMString
         DOMString::from(&*self.identifier.name)
     }
 
@@ -144,17 +143,16 @@ impl AttrMethods for Attr {
 
     // https://dom.spec.whatwg.org/#dom-attr-namespaceuri
     fn GetNamespaceURI(&self) -> Option<DOMString> {
-        let Namespace(ref atom) = self.identifier.namespace;
-        match &**atom {
-            "" => None,
-            url => Some(DOMString::from(url)),
+        match self.identifier.namespace {
+            ns!() => None,
+            ref url => Some(DOMString::from(&**url)),
         }
     }
 
     // https://dom.spec.whatwg.org/#dom-attr-prefix
     fn GetPrefix(&self) -> Option<DOMString> {
-        // FIXME(ajeffrey): convert directly from Atom to DOMString
-        self.prefix().as_ref().map(|p| DOMString::from(&**p))
+        // FIXME(ajeffrey): convert directly from LocalName to DOMString
+        self.prefix().map(|p| DOMString::from(&**p))
     }
 
     // https://dom.spec.whatwg.org/#dom-attr-ownerelement
@@ -172,7 +170,7 @@ impl AttrMethods for Attr {
 impl Attr {
     pub fn set_value(&self, mut value: AttrValue, owner: &Element) {
         assert!(Some(owner) == self.owner().r());
-        owner.will_mutate_attr();
+        owner.will_mutate_attr(self);
         self.swap_value(&mut value);
         if self.identifier.namespace == ns!() {
             vtable_for(owner.upcast())
@@ -193,7 +191,7 @@ impl Attr {
         self.value.borrow()
     }
 
-    pub fn local_name(&self) -> &Atom {
+    pub fn local_name(&self) -> &LocalName {
         &self.identifier.local_name
     }
 
@@ -201,12 +199,12 @@ impl Attr {
     /// or removed from its older parent.
     pub fn set_owner(&self, owner: Option<&Element>) {
         let ns = &self.identifier.namespace;
-        match (self.owner().r(), owner) {
+        match (self.owner(), owner) {
             (Some(old), None) => {
                 // Already gone from the list of attributes of old owner.
                 assert!(old.get_attribute(&ns, &self.identifier.local_name).r() != Some(self))
             }
-            (Some(old), Some(new)) => assert!(old == new),
+            (Some(old), Some(new)) => assert!(&*old == new),
             _ => {},
         }
         self.owner.set(owner);
@@ -217,9 +215,8 @@ impl Attr {
     }
 
     pub fn summarize(&self) -> AttrInfo {
-        let Namespace(ref ns) = self.identifier.namespace;
         AttrInfo {
-            namespace: (**ns).to_owned(),
+            namespace: (*self.identifier.namespace).to_owned(),
             name: String::from(self.Name()),
             value: String::from(self.Value()),
         }
@@ -232,7 +229,7 @@ pub trait AttrHelpersForLayout {
     unsafe fn value_ref_forever(&self) -> &'static str;
     unsafe fn value_atom_forever(&self) -> Option<Atom>;
     unsafe fn value_tokens_forever(&self) -> Option<&'static [Atom]>;
-    unsafe fn local_name_atom_forever(&self) -> Atom;
+    unsafe fn local_name_atom_forever(&self) -> LocalName;
     unsafe fn value_for_layout(&self) -> &AttrValue;
 }
 
@@ -268,7 +265,7 @@ impl AttrHelpersForLayout for LayoutJS<Attr> {
     }
 
     #[inline]
-    unsafe fn local_name_atom_forever(&self) -> Atom {
+    unsafe fn local_name_atom_forever(&self) -> LocalName {
         (*self.unsafe_get()).identifier.local_name.clone()
     }
 

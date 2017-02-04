@@ -4,7 +4,6 @@
 
 use dom::bindings::codegen::Bindings::DOMRectListBinding;
 use dom::bindings::codegen::Bindings::DOMRectListBinding::DOMRectListMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::js::{JS, Root};
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::domrect::DOMRect;
@@ -30,7 +29,7 @@ impl DOMRectList {
         where T: Iterator<Item = Root<DOMRect>>
     {
         reflect_dom_object(box DOMRectList::new_inherited(rects),
-                           GlobalRef::Window(window),
+                           window,
                            DOMRectListBinding::Wrap)
     }
 }
@@ -52,8 +51,7 @@ impl DOMRectListMethods for DOMRectList {
     }
 
     // check-tidy: no specs after this line
-    fn IndexedGetter(&self, index: u32, found: &mut bool) -> Option<Root<DOMRect>> {
-        *found = index < self.rects.len() as u32;
+    fn IndexedGetter(&self, index: u32) -> Option<Root<DOMRect>> {
         self.Item(index)
     }
 }

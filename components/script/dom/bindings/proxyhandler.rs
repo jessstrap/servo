@@ -8,22 +8,53 @@
 
 use dom::bindings::conversions::is_dom_proxy;
 use dom::bindings::utils::delete_property_by_id;
+use js::glue::{GetProxyHandler, GetProxyHandlerFamily, SetProxyExtra};
 use js::glue::GetProxyExtra;
 use js::glue::InvokeGetOwnPropertyDescriptor;
-use js::glue::{GetProxyHandler, SetProxyExtra};
+use js::jsapi::{DOMProxyShadowsResult, JSContext, JSObject, JSPROP_GETTER, PropertyDescriptor};
+use js::jsapi::{Handle, HandleId, HandleObject, MutableHandle, ObjectOpResult};
+use js::jsapi::{JSErrNum, JS_AlreadyHasOwnPropertyById, JS_StrictPropertyStub};
+use js::jsapi::{JS_DefinePropertyById, JS_NewObjectWithGivenProto, SetDOMProxyInformation};
 use js::jsapi::GetObjectProto;
 use js::jsapi::GetStaticPrototype;
 use js::jsapi::JS_GetPropertyDescriptorById;
 use js::jsapi::MutableHandleObject;
-use js::jsapi::{Handle, HandleId, HandleObject, MutableHandle, ObjectOpResult};
-use js::jsapi::{JSContext, JSObject, JSPROP_GETTER, PropertyDescriptor};
-use js::jsapi::{JSErrNum, JS_StrictPropertyStub};
-use js::jsapi::{JS_DefinePropertyById, JS_NewObjectWithGivenProto};
 use js::jsval::ObjectValue;
 use libc;
 use std::{mem, ptr};
 
+
 static JSPROXYSLOT_EXPANDO: u32 = 0;
+
+/// Determine if this id shadows any existing properties for this proxy.
+pub unsafe extern "C" fn shadow_check_callback(cx: *mut JSContext,
+                                               object: HandleObject,
+                                               id: HandleId)
+                                               -> DOMProxyShadowsResult {
+    // TODO: support OverrideBuiltins when #12978 is fixed.
+
+    rooted!(in(cx) let expando = get_expando_object(object));
+    if !expando.get().is_null() {
+        let mut has_own = false;
+        if !JS_AlreadyHasOwnPropertyById(cx, expando.handle(), id, &mut has_own) {
+            return DOMProxyShadowsResult::ShadowCheckFailed;
+        }
+
+        if has_own {
+            return DOMProxyShadowsResult::ShadowsViaDirectExpando;
+        }
+    }
+
+    // Our expando, if any, didn't shadow, so we're not shadowing at all.
+    DOMProxyShadowsResult::DoesntShadow
+}
+
+/// Initialize the infrastructure for DOM proxy objects.
+pub unsafe fn init() {
+    SetDOMProxyInformation(GetProxyHandlerFamily(),
+                           JSPROXYSLOT_EXPANDO,
+                           Some(shadow_check_callback));
+}
 
 /// Invoke the [[GetOwnProperty]] trap (`getOwnPropertyDescriptor`) on `proxy`,
 /// with argument `id` and return the result, if it is not `undefined`.
@@ -147,7 +178,7 @@ pub fn ensure_expando_object(cx: *mut JSContext, obj: HandleObject) -> *mut JSOb
             expando = JS_NewObjectWithGivenProto(cx, ptr::null_mut(), HandleObject::null());
             assert!(!expando.is_null());
 
-            SetProxyExtra(obj.get(), JSPROXYSLOT_EXPANDO, &ObjectValue(&*expando));
+            SetProxyExtra(obj.get(), JSPROXYSLOT_EXPANDO, &ObjectValue(expando));
         }
         expando
     }
@@ -155,7 +186,7 @@ pub fn ensure_expando_object(cx: *mut JSContext, obj: HandleObject) -> *mut JSOb
 
 /// Set the property descriptor's object to `obj` and set it to enumerable,
 /// and writable if `readonly` is true.
-pub fn fill_property_descriptor(desc: &mut PropertyDescriptor,
+pub fn fill_property_descriptor(mut desc: MutableHandle<PropertyDescriptor>,
                                 obj: *mut JSObject,
                                 attrs: u32) {
     desc.obj = obj;

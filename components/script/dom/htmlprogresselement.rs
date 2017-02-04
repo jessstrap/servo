@@ -10,7 +10,7 @@ use dom::document::Document;
 use dom::htmlelement::HTMLElement;
 use dom::node::Node;
 use dom::nodelist::NodeList;
-use string_cache::Atom;
+use html5ever_atoms::LocalName;
 
 #[dom_struct]
 pub struct HTMLProgressElement {
@@ -18,20 +18,20 @@ pub struct HTMLProgressElement {
 }
 
 impl HTMLProgressElement {
-    fn new_inherited(localName: Atom,
+    fn new_inherited(local_name: LocalName,
                      prefix: Option<DOMString>,
                      document: &Document) -> HTMLProgressElement {
         HTMLProgressElement {
             htmlelement:
-                HTMLElement::new_inherited(localName, prefix, document)
+                HTMLElement::new_inherited(local_name, prefix, document)
         }
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(localName: Atom,
+    pub fn new(local_name: LocalName,
                prefix: Option<DOMString>,
                document: &Document) -> Root<HTMLProgressElement> {
-        Node::reflect_node(box HTMLProgressElement::new_inherited(localName, prefix, document),
+        Node::reflect_node(box HTMLProgressElement::new_inherited(local_name, prefix, document),
                            document,
                            HTMLProgressElementBinding::Wrap)
     }

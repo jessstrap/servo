@@ -31,7 +31,17 @@ def run_tests(paths=None, **kwargs):
 
     mozlog.commandline.log_formatters["servo"] = \
         (grouping_formatter.GroupingFormatter, "A grouping output formatter")
-    wptrunner.setup_logging(kwargs, {"servo": sys.stdout})
+
+    use_mach_logging = False
+    if len(kwargs["test_list"]) == 1:
+        file_ext = os.path.splitext(kwargs["test_list"][0])[1].lower()
+        if file_ext in [".htm", ".html", ".js", ".xhtml"]:
+            use_mach_logging = True
+
+    if use_mach_logging:
+        wptrunner.setup_logging(kwargs, {"mach": sys.stdout})
+    else:
+        wptrunner.setup_logging(kwargs, {"servo": sys.stdout})
 
     success = wptrunner.run_tests(**kwargs)
     return 0 if success else 1
@@ -49,7 +59,10 @@ def set_defaults(paths, kwargs):
 
     if kwargs["binary"] is None:
         bin_dir = "release" if kwargs["release"] else "debug"
-        bin_path = servo_path("target", bin_dir, "servo")
+        bin_name = "servo"
+        if sys.platform == "win32":
+            bin_name += ".exe"
+        bin_path = servo_path("target", bin_dir, bin_name)
 
         kwargs["binary"] = bin_path
 

@@ -4,77 +4,56 @@
 
 use CompositionPipeline;
 use SendableFrameTree;
-use app_units::Au;
-use compositor_layer::{CompositorData, CompositorLayer, RcCompositorLayer, WantsScrollEventsFlag};
 use compositor_thread::{CompositorProxy, CompositorReceiver};
 use compositor_thread::{InitialCompositorState, Msg, RenderListener};
 use delayed_composition::DelayedCompositionTimerProxy;
+use euclid::Point2D;
 use euclid::point::TypedPoint2D;
-use euclid::rect::TypedRect;
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::TypedSize2D;
-use euclid::{Matrix4D, Point2D, Rect, Size2D};
-use gfx_traits::print_tree::PrintTree;
-use gfx_traits::{ChromeToPaintMsg, PaintRequest, ScrollPolicy, StackingContextId};
-use gfx_traits::{color, Epoch, FrameTreeId, FragmentType, LayerId, LayerKind, LayerProperties};
+use gfx_traits::{Epoch, FragmentType, ScrollRootId};
 use gleam::gl;
 use gleam::gl::types::{GLint, GLsizei};
 use image::{DynamicImage, ImageFormat, RgbImage};
 use ipc_channel::ipc::{self, IpcSender, IpcSharedMemory};
-use ipc_channel::router::ROUTER;
-use layers::geometry::{DevicePixel, LayerPixel};
-use layers::layers::{BufferRequest, Layer, LayerBuffer, LayerBufferSet};
-use layers::platform::surface::NativeDisplay;
-use layers::rendergl;
-use layers::rendergl::RenderContext;
-use layers::scene::Scene;
-use msg::constellation_msg::{Image, PixelFormat, Key, KeyModifiers, KeyState};
-use msg::constellation_msg::{LoadData, TraversalDirection, PipelineId};
-use msg::constellation_msg::{PipelineIndex, PipelineNamespaceId, WindowSizeType};
-use profile_traits::mem::{self, ReportKind, Reporter, ReporterRequest};
+use msg::constellation_msg::{Key, KeyModifiers, KeyState, CONTROL};
+use msg::constellation_msg::{PipelineId, PipelineIndex, PipelineNamespaceId, TraversalDirection};
+use net_traits::image::base::{Image, PixelFormat};
 use profile_traits::time::{self, ProfilerCategory, profile};
-use script_traits::CompositorEvent::{MouseMoveEvent, MouseButtonEvent, TouchEvent};
 use script_traits::{AnimationState, AnimationTickType, ConstellationControlMsg};
-use script_traits::{ConstellationMsg, LayoutControlMsg, MouseButton, MouseEventType};
-use script_traits::{StackingContextScrollState, TouchpadPressurePhase, TouchEventType};
-use script_traits::{TouchId, WindowSizeData};
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::{HashMap, HashSet};
+use script_traits::{ConstellationMsg, DevicePixel, LayoutControlMsg, LoadData, MouseButton};
+use script_traits::{MouseEventType, StackingContextScrollState};
+use script_traits::{TouchpadPressurePhase, TouchEventType, TouchId, WindowSizeData, WindowSizeType};
+use script_traits::CompositorEvent::{self, MouseMoveEvent, MouseButtonEvent, TouchEvent, TouchpadPressureEvent};
+use servo_config::opts;
+use servo_config::prefs::PREFS;
+use servo_geometry::ScreenPx;
+use servo_url::ServoUrl;
+use std::collections::HashMap;
 use std::fs::File;
-use std::mem as std_mem;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use style_traits::viewport::ViewportConstraints;
+use std::time::{Duration, Instant};
 use style_traits::{PagePx, ViewportPx};
-use surface_map::SurfaceMap;
+use style_traits::viewport::ViewportConstraints;
 use time::{precise_time_ns, precise_time_s};
 use touch::{TouchHandler, TouchAction};
-use url::Url;
-use util::geometry::ScreenPx;
-use util::opts;
-use util::prefs::PREFS;
 use webrender;
-use webrender_traits::{self, ScrollEventPhase};
+use webrender_traits::{self, ScrollEventPhase, ServoScrollRootId, LayoutPoint, ScrollLocation};
 use windowing::{self, MouseWindowEvent, WindowEvent, WindowMethods, WindowNavigateMsg};
 
 #[derive(Debug, PartialEq)]
 enum UnableToComposite {
-    NoContext,
     WindowUnprepared,
     NotReadyToPaintImage(NotReadyToPaint),
 }
 
 #[derive(Debug, PartialEq)]
 enum NotReadyToPaint {
-    LayerHasOutstandingPaintMessages,
-    MissingRoot,
-    PendingSubpages(usize),
     AnimationsActive,
     JustNotifiedConstellation,
     WaitingOnConstellation,
 }
-
-const BUFFER_MAP_SIZE: usize = 10000000;
 
 // Default viewport constraints
 const MAX_ZOOM: f32 = 8.0;
@@ -93,13 +72,13 @@ impl ConvertPipelineIdFromWebRender for webrender_traits::PipelineId {
     }
 }
 
-trait ConvertStackingContextFromWebRender {
-    fn from_webrender(&self) -> StackingContextId;
+trait ConvertScrollRootIdFromWebRender {
+    fn from_webrender(&self) -> ScrollRootId;
 }
 
-impl ConvertStackingContextFromWebRender for webrender_traits::ServoStackingContextId {
-    fn from_webrender(&self) -> StackingContextId {
-        StackingContextId::new_of_type(self.1, self.0.from_webrender())
+impl ConvertScrollRootIdFromWebRender for webrender_traits::ServoScrollRootId {
+    fn from_webrender(&self) -> ScrollRootId {
+        ScrollRootId(self.0)
     }
 }
 
@@ -128,20 +107,29 @@ enum ReadyState {
     ReadyToSaveImage,
 }
 
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
+struct FrameTreeId(u32);
+
+impl FrameTreeId {
+    pub fn next(&mut self) {
+        self.0 += 1;
+    }
+}
+
+/// One pixel in layer coordinate space.
+///
+/// This unit corresponds to a "pixel" in layer coordinate space, which after scaling and
+/// transformation becomes a device pixel.
+#[derive(Copy, Clone, Debug)]
+enum LayerPixel {}
+
 /// NB: Never block on the constellation, because sometimes the constellation blocks on us.
 pub struct IOCompositor<Window: WindowMethods> {
     /// The application window.
     window: Rc<Window>,
 
-    /// The display this compositor targets. Will be None when using webrender.
-    native_display: Option<NativeDisplay>,
-
     /// The port on which we receive messages.
     port: Box<CompositorReceiver>,
-
-    /// The render context. This will be `None` if the windowing system has not yet sent us a
-    /// `PrepareRenderingEvent`.
-    context: Option<RenderContext>,
 
     /// The root pipeline.
     root_pipeline: Option<CompositionPipeline>,
@@ -149,8 +137,8 @@ pub struct IOCompositor<Window: WindowMethods> {
     /// Tracks details about each active pipeline that the compositor knows about.
     pipeline_details: HashMap<PipelineId, PipelineDetails>,
 
-    /// The canvas to paint a page.
-    scene: Scene<CompositorData>,
+    /// The scene scale, to allow for zooming and high-resolution painting.
+    scale: ScaleFactor<f32, LayerPixel, DevicePixel>,
 
     /// The application window size.
     window_size: TypedSize2D<u32, DevicePixel>,
@@ -210,12 +198,6 @@ pub struct IOCompositor<Window: WindowMethods> {
     /// The channel on which messages can be sent to the time profiler.
     time_profiler_chan: time::ProfilerChan,
 
-    /// The channel on which messages can be sent to the memory profiler.
-    mem_profiler_chan: mem::ProfilerChan,
-
-    /// Pending scroll to fragment event, if any
-    fragment_point: Option<Point2D<f32>>,
-
     /// Touch input state machine
     touch_handler: TouchHandler,
 
@@ -229,32 +211,24 @@ pub struct IOCompositor<Window: WindowMethods> {
     /// image for the reftest framework.
     ready_to_save_state: ReadyState,
 
-    /// A data structure to cache unused NativeSurfaces.
-    surface_map: SurfaceMap,
-
-    /// Pipeline IDs of subpages that the compositor has seen in a layer tree but which have not
-    /// yet been painted.
-    pending_subpages: HashSet<PipelineId>,
-
-    /// The id of the pipeline that was last sent a mouse move event, if any.
-    last_mouse_move_recipient: Option<PipelineId>,
-
     /// Whether a scroll is in progress; i.e. whether the user's fingers are down.
     scroll_in_progress: bool,
 
-    /// The webrender renderer, if enabled.
-    webrender: Option<webrender::Renderer>,
+    in_scroll_transaction: Option<Instant>,
+
+    /// The webrender renderer.
+    webrender: webrender::Renderer,
 
     /// The webrender interface, if enabled.
-    webrender_api: Option<webrender_traits::RenderApi>,
+    webrender_api: webrender_traits::RenderApi,
 }
 
 #[derive(Copy, Clone)]
 struct ScrollZoomEvent {
     /// Change the pinch zoom level by this factor
     magnification: f32,
-    /// Scroll by this offset
-    delta: TypedPoint2D<f32, DevicePixel>,
+    /// Scroll by this offset, or to Start or End
+    scroll_location: ScrollLocation,
     /// Apply changes to the frame at this location
     cursor: TypedPoint2D<i32, DevicePixel>,
     /// The scroll event phase.
@@ -277,19 +251,9 @@ enum ShutdownState {
     FinishedShuttingDown,
 }
 
-struct HitTestResult {
-    /// The topmost layer containing the requested point
-    layer: Rc<Layer<CompositorData>>,
-    /// The point in client coordinates of the innermost window or frame containing `layer`
-    point: TypedPoint2D<f32, LayerPixel>,
-}
-
 struct PipelineDetails {
     /// The pipeline associated with this PipelineDetails object.
     pipeline: Option<CompositionPipeline>,
-
-    /// The current layout epoch that this pipeline wants to draw.
-    current_epoch: Epoch,
 
     /// Whether animations are running
     animations_running: bool,
@@ -305,7 +269,6 @@ impl PipelineDetails {
     fn new() -> PipelineDetails {
         PipelineDetails {
             pipeline: None,
-            current_epoch: Epoch(0),
             animations_running: false,
             animation_callbacks_running: false,
             visible: true,
@@ -327,16 +290,16 @@ enum CompositeTarget {
 
 struct RenderTargetInfo {
     framebuffer_ids: Vec<gl::GLuint>,
-    texture_ids: Vec<gl::GLuint>,
     renderbuffer_ids: Vec<gl::GLuint>,
+    texture_ids: Vec<gl::GLuint>,
 }
 
 impl RenderTargetInfo {
     fn empty() -> RenderTargetInfo {
         RenderTargetInfo {
             framebuffer_ids: Vec::new(),
+            renderbuffer_ids: Vec::new(),
             texture_ids: Vec::new(),
-            renderbuffer_ids: Vec::new()
         }
     }
 }
@@ -358,44 +321,34 @@ fn initialize_png(width: usize, height: usize) -> RenderTargetInfo {
 
     gl::bind_texture(gl::TEXTURE_2D, 0);
 
-    let renderbuffer_ids = if opts::get().use_webrender {
-        let renderbuffer_ids = gl::gen_renderbuffers(1);
-        gl::bind_renderbuffer(gl::RENDERBUFFER, renderbuffer_ids[0]);
-        gl::renderbuffer_storage(gl::RENDERBUFFER,
-                                 gl::STENCIL_INDEX8,
-                                 width as GLsizei,
-                                 height as GLsizei);
-        gl::framebuffer_renderbuffer(gl::FRAMEBUFFER,
-                                     gl::STENCIL_ATTACHMENT,
-                                     gl::RENDERBUFFER,
-                                     renderbuffer_ids[0]);
-        renderbuffer_ids
-    } else {
-        Vec::new()
-    };
+    let renderbuffer_ids = gl::gen_renderbuffers(1);
+    let depth_rb = renderbuffer_ids[0];
+    gl::bind_renderbuffer(gl::RENDERBUFFER, depth_rb);
+    gl::renderbuffer_storage(gl::RENDERBUFFER,
+                             gl::DEPTH_COMPONENT24,
+                             width as gl::GLsizei,
+                             height as gl::GLsizei);
+    gl::framebuffer_renderbuffer(gl::FRAMEBUFFER,
+                                 gl::DEPTH_ATTACHMENT,
+                                 gl::RENDERBUFFER,
+                                 depth_rb);
 
     RenderTargetInfo {
         framebuffer_ids: framebuffer_ids,
+        renderbuffer_ids: renderbuffer_ids,
         texture_ids: texture_ids,
-        renderbuffer_ids: renderbuffer_ids
     }
-}
-
-fn reporter_name() -> String {
-    "compositor-reporter".to_owned()
 }
 
 struct RenderNotifier {
     compositor_proxy: Box<CompositorProxy>,
-    constellation_chan: Sender<ConstellationMsg>,
 }
 
 impl RenderNotifier {
     fn new(compositor_proxy: Box<CompositorProxy>,
-           constellation_chan: Sender<ConstellationMsg>) -> RenderNotifier {
+           _: Sender<ConstellationMsg>) -> RenderNotifier {
         RenderNotifier {
             compositor_proxy: compositor_proxy,
-            constellation_chan: constellation_chan,
         }
     }
 }
@@ -410,39 +363,25 @@ impl webrender_traits::RenderNotifier for RenderNotifier {
     }
 
     fn pipeline_size_changed(&mut self,
-                             pipeline_id: webrender_traits::PipelineId,
-                             size: Option<Size2D<f32>>) {
-        let pipeline_id = pipeline_id.from_webrender();
+                             _: webrender_traits::PipelineId,
+                             _: Option<webrender_traits::LayoutSize>) {
+    }
+}
 
-        if let Some(size) = size {
-            let msg = ConstellationMsg::FrameSize(pipeline_id, size);
-            if let Err(e) = self.constellation_chan.send(msg) {
-                warn!("Compositor resize to constellation failed ({}).", e);
-            }
-        }
+// Used to dispatch functions from webrender to the main thread's event loop.
+struct CompositorThreadDispatcher {
+    compositor_proxy: Box<CompositorProxy>
+}
+
+impl webrender_traits::RenderDispatcher for CompositorThreadDispatcher {
+    fn dispatch(&self, f: Box<Fn() + Send>) {
+        self.compositor_proxy.send(Msg::Dispatch(f));
     }
 }
 
 impl<Window: WindowMethods> IOCompositor<Window> {
     fn new(window: Rc<Window>, state: InitialCompositorState)
            -> IOCompositor<Window> {
-        // Register this thread as a memory reporter, via its own channel.
-        let (reporter_sender, reporter_receiver) = ipc::channel()
-            .expect("Compositor reporter chan");
-        let compositor_proxy_for_memory_reporter = state.sender.clone_compositor_proxy();
-        ROUTER.add_route(reporter_receiver.to_opaque(), box move |reporter_request| {
-            match reporter_request.to::<ReporterRequest>() {
-                Err(e) => error!("Cast to ReporterRequest failed ({}).", e),
-                Ok(reporter_request) => {
-                    let msg = Msg::CollectMemoryReports(reporter_request.reports_channel);
-                    compositor_proxy_for_memory_reporter.send(msg);
-                },
-            }
-        });
-        let reporter = Reporter(reporter_sender);
-        state.mem_profiler_chan.send(
-            mem::ProfilerMsg::RegisterReporter(reporter_name(), reporter));
-
         let window_size = window.framebuffer_size();
         let scale_factor = window.scale_factor();
         let composite_target = match opts::get().output_file {
@@ -450,25 +389,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             None => CompositeTarget::Window
         };
 
-        let webrender_api = state.webrender_api_sender.map(|sender| {
-            sender.create_api()
-        });
-
-        let native_display = if state.webrender.is_some() {
-            None
-        } else {
-            Some(window.native_display())
-        };
-
         IOCompositor {
             window: window,
-            native_display: native_display,
             port: state.receiver,
-            context: None,
             root_pipeline: None,
             pipeline_details: HashMap::new(),
-            scene: Scene::new(TypedRect::new(TypedPoint2D::zero(), window_size.as_f32())),
             window_size: window_size,
+            scale: ScaleFactor::new(1.0),
             viewport: None,
             scale_factor: scale_factor,
             channel_to_self: state.sender.clone_compositor_proxy(),
@@ -489,28 +416,31 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             frame_tree_id: FrameTreeId(0),
             constellation_chan: state.constellation_chan,
             time_profiler_chan: state.time_profiler_chan,
-            mem_profiler_chan: state.mem_profiler_chan,
-            fragment_point: None,
             last_composite_time: 0,
             ready_to_save_state: ReadyState::Unknown,
-            surface_map: SurfaceMap::new(BUFFER_MAP_SIZE),
-            pending_subpages: HashSet::new(),
-            last_mouse_move_recipient: None,
             scroll_in_progress: false,
+            in_scroll_transaction: None,
             webrender: state.webrender,
-            webrender_api: webrender_api,
+            webrender_api: state.webrender_api_sender.create_api(),
         }
     }
 
     pub fn create(window: Rc<Window>, state: InitialCompositorState) -> IOCompositor<Window> {
         let mut compositor = IOCompositor::new(window, state);
 
-        if let Some(ref mut webrender) = compositor.webrender {
-            let compositor_proxy_for_webrender = compositor.channel_to_self
-                                                           .clone_compositor_proxy();
-            let render_notifier = RenderNotifier::new(compositor_proxy_for_webrender,
-                                                      compositor.constellation_chan.clone());
-            webrender.set_render_notifier(Box::new(render_notifier));
+        let compositor_proxy_for_webrender = compositor.channel_to_self
+                                                       .clone_compositor_proxy();
+        let render_notifier = RenderNotifier::new(compositor_proxy_for_webrender,
+                                                  compositor.constellation_chan.clone());
+        compositor.webrender.set_render_notifier(Box::new(render_notifier));
+
+        if cfg!(target_os = "windows") {
+            // Used to dispatch functions from webrender to the main thread's event loop.
+            // Required to allow WGL GLContext sharing in Windows.
+            let dispatcher = Box::new(CompositorThreadDispatcher {
+                compositor_proxy: compositor.channel_to_self.clone_compositor_proxy()
+            });
+            compositor.webrender.set_main_thread_dispatcher(dispatcher);
         }
 
         // Set the size of the root layer.
@@ -528,32 +458,22 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             warn!("Sending exit message to constellation failed ({}).", e);
         }
 
-        self.mem_profiler_chan.send(mem::ProfilerMsg::UnregisterReporter(reporter_name()));
-
         self.shutdown_state = ShutdownState::ShuttingDown;
     }
 
     fn finish_shutting_down(&mut self) {
         debug!("Compositor received message that constellation shutdown is complete");
 
-        // Clear out the compositor layers so that painting threads can destroy the buffers.
-        if let Some(ref root_layer) = self.scene.root {
-            root_layer.forget_all_tiles();
-        }
-
         // Drain compositor port, sometimes messages contain channels that are blocking
         // another thread from finishing (i.e. SetFrameTree).
         while self.port.try_recv_compositor_msg().is_some() {}
 
         // Tell the profiler, memory profiler, and scrolling timer to shut down.
-        match ipc::channel() {
-            Ok((sender, receiver)) => {
-                self.time_profiler_chan.send(time::ProfilerMsg::Exit(sender));
-                let _ = receiver.recv();
-            },
-            Err(_) => {},
+        if let Ok((sender, receiver)) = ipc::channel() {
+            self.time_profiler_chan.send(time::ProfilerMsg::Exit(sender));
+            let _ = receiver.recv();
         }
-        self.mem_profiler_chan.send(mem::ProfilerMsg::Exit);
+
         self.delayed_composition_timer.shutdown();
 
         self.shutdown_state = ShutdownState::FinishedShuttingDown;
@@ -591,58 +511,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             (Msg::SetFrameTree(frame_tree, response_chan),
              ShutdownState::NotShuttingDown) => {
                 self.set_frame_tree(&frame_tree, response_chan);
-                self.send_viewport_rects_for_all_layers();
+                self.send_viewport_rects();
                 self.title_for_main_frame();
             }
 
-            (Msg::InitializeLayersForPipeline(pipeline_id, epoch, properties),
+            (Msg::ScrollFragmentPoint(pipeline_id, scroll_root_id, point, _),
              ShutdownState::NotShuttingDown) => {
-                debug!("initializing layers for pipeline: {:?}", pipeline_id);
-                self.pipeline_details(pipeline_id).current_epoch = epoch;
-
-                self.collect_old_layers(pipeline_id, &properties);
-                for (index, layer_properties) in properties.iter().enumerate() {
-                    if index == 0 {
-                        self.create_or_update_base_layer(pipeline_id, *layer_properties);
-                    } else {
-                        self.create_or_update_descendant_layer(pipeline_id, *layer_properties);
-                    }
-                }
-
-                self.send_buffer_requests_for_all_layers();
-                self.dump_layer_tree();
-            }
-
-            (Msg::GetNativeDisplay(chan),
-             ShutdownState::NotShuttingDown) => {
-                if let Err(e) = chan.send(self.native_display.clone()) {
-                    warn!("Sending response to get native display failed ({}).", e);
-                }
-            }
-
-            (Msg::AssignPaintedBuffers(pipeline_id, epoch, replies, frame_tree_id),
-             ShutdownState::NotShuttingDown) => {
-                self.pending_subpages.remove(&pipeline_id);
-
-                for (layer_id, new_layer_buffer_set) in replies {
-                    self.assign_painted_buffers(pipeline_id,
-                                                layer_id,
-                                                new_layer_buffer_set,
-                                                epoch,
-                                                frame_tree_id);
-                }
-            }
-
-            (Msg::ReturnUnusedNativeSurfaces(native_surfaces),
-             ShutdownState::NotShuttingDown) => {
-                if let Some(ref native_display) = self.native_display {
-                    self.surface_map.insert_surfaces(native_display, native_surfaces);
-                }
-            }
-
-            (Msg::ScrollFragmentPoint(pipeline_id, layer_id, point, _),
-             ShutdownState::NotShuttingDown) => {
-                self.scroll_fragment_to_point(pipeline_id, layer_id, point);
+                self.scroll_fragment_to_point(pipeline_id, scroll_root_id, point);
             }
 
             (Msg::MoveTo(point),
@@ -715,15 +590,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
             (Msg::CreatePng(reply), ShutdownState::NotShuttingDown) => {
                 let res = self.composite_specific_target(CompositeTarget::WindowAndPng);
+                if let Err(ref e) = res {
+                    info!("Error retrieving PNG: {:?}", e);
+                }
                 let img = res.unwrap_or(None);
                 if let Err(e) = reply.send(img) {
                     warn!("Sending reply to create png failed ({}).", e);
                 }
-            }
-
-            (Msg::PaintThreadExited(pipeline_id), _) => {
-                debug!("compositor learned about paint thread exiting: {:?}", pipeline_id);
-                self.remove_pipeline_root_layer(pipeline_id);
             }
 
             (Msg::ViewportConstrained(pipeline_id, constraints),
@@ -755,22 +628,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 self.window.head_parsed();
             }
 
-            (Msg::CollectMemoryReports(reports_chan), ShutdownState::NotShuttingDown) => {
-                let name = "compositor-thread";
-                // These are both `ExplicitUnknownLocationSize` because the memory might be in the
-                // GPU or on the heap.
-                let reports = vec![mem::Report {
-                    path: path![name, "surface-map"],
-                    kind: ReportKind::ExplicitUnknownLocationSize,
-                    size: self.surface_map.mem(),
-                }, mem::Report {
-                    path: path![name, "layer-tree"],
-                    kind: ReportKind::ExplicitUnknownLocationSize,
-                    size: self.scene.get_memory_usage(),
-                }];
-                reports_chan.send(reports);
-            }
-
             (Msg::PipelineVisibilityChanged(pipeline_id, visible), ShutdownState::NotShuttingDown) => {
                 self.pipeline_details(pipeline_id).visible = visible;
                 if visible {
@@ -780,21 +637,8 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
             (Msg::PipelineExited(pipeline_id, sender), _) => {
                 debug!("Compositor got pipeline exited: {:?}", pipeline_id);
-                self.pending_subpages.remove(&pipeline_id);
                 self.remove_pipeline_root_layer(pipeline_id);
                 let _ = sender.send(());
-            }
-
-            (Msg::GetScrollOffset(pipeline_id, layer_id, sender), ShutdownState::NotShuttingDown) => {
-                match self.find_layer_with_pipeline_and_layer_id(pipeline_id, layer_id) {
-                    Some(ref layer) => {
-                        let typed = layer.extra_data.borrow().scroll_offset;
-                        let _ = sender.send(Point2D::new(typed.x, typed.y));
-                    },
-                    None => {
-                        warn!("Can't find requested layer in handling Msg::GetScrollOffset");
-                    },
-                }
             }
 
             (Msg::NewScrollFrameReady(recomposite_needed), ShutdownState::NotShuttingDown) => {
@@ -803,6 +647,16 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                     self.composition_request = CompositionRequest::CompositeNow(
                         CompositingReason::NewWebRenderScrollFrame);
                 }
+            }
+
+            (Msg::Dispatch(func), ShutdownState::NotShuttingDown) => {
+                // The functions sent here right now are really dumb, so they can't panic.
+                // But if we start running more complex code here, we should really catch panic here.
+                func();
+            }
+
+            (Msg::SetFullscreenState(state), ShutdownState::NotShuttingDown) => {
+                self.window.set_fullscreen_state(state);
             }
 
             // When we are shutting_down, we need to avoid performing operations
@@ -869,78 +723,29 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         }
     }
 
-    fn change_page_url(&mut self, _: PipelineId, url: Url) {
+    fn change_page_url(&mut self, _: PipelineId, url: ServoUrl) {
         self.window.set_page_url(url);
     }
 
     fn set_frame_tree(&mut self,
                       frame_tree: &SendableFrameTree,
                       response_chan: IpcSender<()>) {
+        debug!("Setting the frame tree for pipeline {}", frame_tree.pipeline.id);
         if let Err(e) = response_chan.send(()) {
             warn!("Sending reponse to set frame tree failed ({}).", e);
         }
 
-        // There are now no more pending iframes.
-        self.pending_subpages.clear();
-
         self.root_pipeline = Some(frame_tree.pipeline.clone());
 
-        if let Some(ref webrender_api) = self.webrender_api {
-            let pipeline_id = frame_tree.pipeline.id.to_webrender();
-            webrender_api.set_root_pipeline(pipeline_id);
-        }
-
-        // If we have an old root layer, release all old tiles before replacing it.
-        let old_root_layer = self.scene.root.take();
-        if let Some(ref old_root_layer) = old_root_layer {
-            old_root_layer.clear_all_tiles(self)
-        }
-
-        self.scene.root = Some(self.create_root_layer_for_pipeline_and_size(&frame_tree.pipeline,
-                                                                            None));
-        self.scene.set_root_layer_size(self.window_size.as_f32());
+        let pipeline_id = frame_tree.pipeline.id.to_webrender();
+        self.webrender_api.set_root_pipeline(pipeline_id);
+        self.webrender_api.generate_frame();
 
         self.create_pipeline_details_for_frame_tree(&frame_tree);
 
         self.send_window_size(WindowSizeType::Initial);
 
         self.frame_tree_id.next();
-        self.composite_if_necessary_if_not_using_webrender(CompositingReason::NewFrameTree);
-    }
-
-    fn create_root_layer_for_pipeline_and_size(&mut self,
-                                               pipeline: &CompositionPipeline,
-                                               frame_size: Option<TypedSize2D<f32, PagePx>>)
-                                               -> Rc<Layer<CompositorData>> {
-        let layer_properties = LayerProperties {
-            id: LayerId::null(),
-            parent_id: None,
-            rect: Rect::zero(),
-            background_color: color::transparent(),
-            scroll_policy: ScrollPolicy::Scrollable,
-            transform: Matrix4D::identity(),
-            perspective: Matrix4D::identity(),
-            subpage_pipeline_id: None,
-            establishes_3d_context: true,
-            scrolls_overflow_area: false,
-        };
-
-        let root_layer = CompositorData::new_layer(pipeline.id,
-                                                   layer_properties,
-                                                   WantsScrollEventsFlag::WantsScrollEvents,
-                                                   opts::get().tile_size);
-
-        self.pipeline_details(pipeline.id).pipeline = Some(pipeline.clone());
-
-        // All root layers mask to bounds.
-        *root_layer.masks_to_bounds.borrow_mut() = true;
-
-        if let Some(ref frame_size) = frame_size {
-            root_layer.bounds.borrow_mut().size =
-                TypedSize2D::new(frame_size.width, frame_size.height);
-        }
-
-        root_layer
     }
 
     fn create_pipeline_details_for_frame_tree(&mut self, frame_tree: &SendableFrameTree) {
@@ -951,202 +756,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         }
     }
 
-    fn find_pipeline_root_layer(&self, pipeline_id: PipelineId)
-                                -> Option<Rc<Layer<CompositorData>>> {
-        if !self.pipeline_details.contains_key(&pipeline_id) {
-            warn!("Tried to create or update layer for unknown pipeline");
-            return None;
-        }
-        self.find_layer_with_pipeline_and_layer_id(pipeline_id, LayerId::null())
-    }
-
-    fn collect_old_layers(&mut self,
-                          pipeline_id: PipelineId,
-                          new_layers: &[LayerProperties]) {
-        let root_layer = match self.scene.root {
-            Some(ref root_layer) => root_layer.clone(),
-            None => return,
-        };
-
-        let mut pipelines_removed = Vec::new();
-        root_layer.collect_old_layers(self, pipeline_id, new_layers, &mut pipelines_removed);
-
-        for pipeline_removed in pipelines_removed.into_iter() {
-            self.pending_subpages.remove(&pipeline_removed);
-        }
-    }
-
     fn remove_pipeline_root_layer(&mut self, pipeline_id: PipelineId) {
-        let root_layer = match self.scene.root {
-            Some(ref root_layer) => root_layer.clone(),
-            None => return,
-        };
-
-        // Remove all the compositor layers for this pipeline and recache
-        // any buffers that they owned.
-        root_layer.remove_root_layer_with_pipeline_id(self, pipeline_id);
         self.pipeline_details.remove(&pipeline_id);
-    }
-
-    fn update_layer_if_exists(&mut self,
-                              pipeline_id: PipelineId,
-                              properties: LayerProperties)
-                              -> bool {
-        if let Some(subpage_id) = properties.subpage_pipeline_id {
-            match self.find_layer_with_pipeline_and_layer_id(subpage_id, LayerId::null()) {
-                Some(layer) => {
-                    *layer.bounds.borrow_mut() =
-                        TypedRect::new(TypedPoint2D::zero(),
-                                       TypedSize2D::from_untyped(&properties.rect.size));
-                }
-                None => warn!("Tried to update non-existent subpage root layer: {:?}", subpage_id),
-            }
-        }
-
-        match self.find_layer_with_pipeline_and_layer_id(pipeline_id, properties.id) {
-            Some(existing_layer) => {
-                // If this layer contains a subpage, then create the root layer for that subpage
-                // now.
-                if properties.subpage_pipeline_id.is_some() {
-                    self.create_root_layer_for_subpage_if_necessary(properties,
-                                                                    existing_layer.clone())
-                }
-
-                existing_layer.update_layer(properties);
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn create_or_update_base_layer(&mut self,
-                                   pipeline_id: PipelineId,
-                                   layer_properties: LayerProperties) {
-        debug_assert!(layer_properties.parent_id.is_none());
-
-        let root_layer = match self.find_pipeline_root_layer(pipeline_id) {
-            Some(root_layer) => root_layer,
-            None => {
-                debug!("Ignoring CreateOrUpdateBaseLayer message for pipeline \
-                        ({:?}) shutting down.",
-                       pipeline_id);
-                return;
-            }
-        };
-
-        let need_new_base_layer = !self.update_layer_if_exists(pipeline_id, layer_properties);
-        if need_new_base_layer {
-            root_layer.update_layer_except_bounds(layer_properties);
-
-            let base_layer = CompositorData::new_layer(
-                pipeline_id,
-                layer_properties,
-                WantsScrollEventsFlag::DoesntWantScrollEvents,
-                opts::get().tile_size);
-
-            // Add the base layer to the front of the child list, so that child
-            // iframe layers are painted on top of the base layer. These iframe
-            // layers were added previously when creating the layer tree
-            // skeleton in create_frame_tree_root_layers.
-            root_layer.children().insert(0, base_layer);
-        }
-
-        self.scroll_layer_to_fragment_point_if_necessary(pipeline_id,
-                                                         layer_properties.id);
-    }
-
-    fn create_or_update_descendant_layer(&mut self,
-                                         pipeline_id: PipelineId,
-                                         layer_properties: LayerProperties) {
-        debug_assert!(layer_properties.parent_id.is_some());
-
-        if !self.update_layer_if_exists(pipeline_id, layer_properties) {
-            self.create_descendant_layer(pipeline_id, layer_properties);
-        }
-        self.update_subpage_size_if_necessary(&layer_properties);
-        self.scroll_layer_to_fragment_point_if_necessary(pipeline_id,
-                                                         layer_properties.id);
-    }
-
-    fn create_descendant_layer(&mut self,
-                               pipeline_id: PipelineId,
-                               layer_properties: LayerProperties) {
-        let parent_id = match layer_properties.parent_id {
-            None => return error!("Creating descendent layer without a parent id."),
-            Some(parent_id) => parent_id,
-        };
-        if let Some(parent_layer) = self.find_layer_with_pipeline_and_layer_id(pipeline_id,
-                                                                               parent_id) {
-            let wants_scroll_events = if layer_properties.scrolls_overflow_area {
-                WantsScrollEventsFlag::WantsScrollEvents
-            } else {
-                WantsScrollEventsFlag::DoesntWantScrollEvents
-            };
-
-            let new_layer = CompositorData::new_layer(pipeline_id,
-                                                      layer_properties,
-                                                      wants_scroll_events,
-                                                      parent_layer.tile_size);
-
-            if layer_properties.scrolls_overflow_area {
-                *new_layer.masks_to_bounds.borrow_mut() = true
-            }
-
-            // If this layer contains a subpage, then create the root layer for that subpage now.
-            if layer_properties.subpage_pipeline_id.is_some() {
-                self.create_root_layer_for_subpage_if_necessary(layer_properties,
-                                                                new_layer.clone())
-            }
-
-            parent_layer.add_child(new_layer.clone());
-        }
-
-        self.dump_layer_tree();
-    }
-
-    fn create_root_layer_for_subpage_if_necessary(&mut self,
-                                                  layer_properties: LayerProperties,
-                                                  parent_layer: Rc<Layer<CompositorData>>) {
-        if parent_layer.children
-                       .borrow()
-                       .iter()
-                       .any(|child| child.extra_data.borrow().subpage_info.is_some()) {
-            return
-        }
-
-        let subpage_pipeline_id =
-            layer_properties.subpage_pipeline_id
-                            .expect("create_root_layer_for_subpage() called for non-subpage?!");
-        let subpage_layer_properties = LayerProperties {
-            id: LayerId::null(),
-            parent_id: None,
-            rect: Rect::new(Point2D::zero(), layer_properties.rect.size),
-            background_color: layer_properties.background_color,
-            scroll_policy: ScrollPolicy::Scrollable,
-            transform: Matrix4D::identity(),
-            perspective: Matrix4D::identity(),
-            subpage_pipeline_id: Some(subpage_pipeline_id),
-            establishes_3d_context: true,
-            scrolls_overflow_area: true,
-        };
-
-        let wants_scroll_events = if subpage_layer_properties.scrolls_overflow_area {
-            WantsScrollEventsFlag::WantsScrollEvents
-        } else {
-            WantsScrollEventsFlag::DoesntWantScrollEvents
-        };
-        let subpage_layer = CompositorData::new_layer(subpage_pipeline_id,
-                                                      subpage_layer_properties,
-                                                      wants_scroll_events,
-                                                      parent_layer.tile_size);
-        *subpage_layer.masks_to_bounds.borrow_mut() = true;
-        parent_layer.add_child(subpage_layer);
-        self.pending_subpages.insert(subpage_pipeline_id);
     }
 
     fn send_window_size(&self, size_type: WindowSizeType) {
         let dppx = self.page_zoom * self.device_pixels_per_screen_px();
-        let initial_viewport = self.window_size.as_f32() / dppx;
+        let initial_viewport = self.window_size.to_f32() / dppx;
         let visible_viewport = initial_viewport / self.viewport_zoom;
         let msg = ConstellationMsg::WindowSize(WindowSizeData {
             device_pixel_ratio: dppx,
@@ -1156,48 +772,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
         if let Err(e) = self.constellation_chan.send(msg) {
             warn!("Sending window resize to constellation failed ({}).", e);
-        }
-    }
-
-    /// Sends the size of the given subpage up to the constellation. This will often trigger a
-    /// reflow of that subpage.
-    fn update_subpage_size_if_necessary(&self, layer_properties: &LayerProperties) {
-        let subpage_pipeline_id = match layer_properties.subpage_pipeline_id {
-            Some(ref subpage_pipeline_id) => subpage_pipeline_id,
-            None => return,
-        };
-
-        let msg = ConstellationMsg::FrameSize(*subpage_pipeline_id, layer_properties.rect.size);
-        if let Err(e) = self.constellation_chan.send(msg) {
-            warn!("Sending subpage resize to constellation failed ({}).", e);
-        }
-    }
-
-    fn move_layer(&self,
-                  pipeline_id: PipelineId,
-                  layer_id: LayerId,
-                  origin: TypedPoint2D<f32, LayerPixel>)
-                  -> bool {
-        match self.find_layer_with_pipeline_and_layer_id(pipeline_id, layer_id) {
-            Some(ref layer) => {
-                if layer.wants_scroll_events() == WantsScrollEventsFlag::WantsScrollEvents {
-                    layer.clamp_scroll_offset_and_scroll_layer(TypedPoint2D::zero() - origin);
-                }
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn scroll_layer_to_fragment_point_if_necessary(&mut self,
-                                                   pipeline_id: PipelineId,
-                                                   layer_id: LayerId) {
-        if let Some(point) = self.fragment_point.take() {
-            if !self.move_layer(pipeline_id, layer_id, TypedPoint2D::from_untyped(&point)) {
-                return warn!("Compositor: Tried to scroll to fragment with unknown layer.");
-            }
-
-            self.perform_updates_after_scroll();
         }
     }
 
@@ -1213,65 +787,14 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         self.composition_request = CompositionRequest::DelayedComposite(timestamp);
     }
 
-    fn assign_painted_buffers(&mut self,
-                              pipeline_id: PipelineId,
-                              layer_id: LayerId,
-                              new_layer_buffer_set: Box<LayerBufferSet>,
-                              epoch: Epoch,
-                              frame_tree_id: FrameTreeId) {
-        // If the frame tree id has changed since this paint request was sent,
-        // reject the buffers and send them back to the paint thread. If this isn't handled
-        // correctly, the content_age in the tile grid can get out of sync when iframes are
-        // loaded and the frame tree changes. This can result in the compositor thinking it
-        // has already drawn the most recently painted buffer, and missing a frame.
-        if frame_tree_id == self.frame_tree_id {
-            if let Some(layer) = self.find_layer_with_pipeline_and_layer_id(pipeline_id,
-                                                                            layer_id) {
-                let requested_epoch = layer.extra_data.borrow().requested_epoch;
-                if requested_epoch == epoch {
-                    self.assign_painted_buffers_to_layer(layer, new_layer_buffer_set, epoch);
-                    return
-                } else {
-                    debug!("assign_painted_buffers epoch mismatch {:?} {:?} req={:?} actual={:?}",
-                           pipeline_id,
-                           layer_id,
-                           requested_epoch,
-                           epoch);
-                }
-            }
-        }
-
-        self.cache_unused_buffers(new_layer_buffer_set.buffers);
-    }
-
-    fn assign_painted_buffers_to_layer(&mut self,
-                                       layer: Rc<Layer<CompositorData>>,
-                                       new_layer_buffer_set: Box<LayerBufferSet>,
-                                       epoch: Epoch) {
-        debug!("compositor received new frame at size {:?}x{:?}",
-               self.window_size.width,
-               self.window_size.height);
-
-        // From now on, if we destroy the buffers, they will leak.
-        let mut new_layer_buffer_set = new_layer_buffer_set;
-        new_layer_buffer_set.mark_will_leak();
-
-        // FIXME(pcwalton): This is going to cause problems with inconsistent frames since
-        // we only composite one layer at a time.
-        layer.add_buffers(self, new_layer_buffer_set, epoch);
-        self.composite_if_necessary_if_not_using_webrender(CompositingReason::NewPaintedBuffers);
-    }
-
     fn scroll_fragment_to_point(&mut self,
                                 pipeline_id: PipelineId,
-                                layer_id: LayerId,
+                                scroll_root_id: ScrollRootId,
                                 point: Point2D<f32>) {
-        if self.move_layer(pipeline_id, layer_id, TypedPoint2D::from_untyped(&point)) {
-            self.perform_updates_after_scroll();
-            self.send_viewport_rects_for_all_layers()
-        } else {
-            self.fragment_point = Some(point)
-        }
+        self.webrender_api.scroll_layers_with_scroll_root_id(
+            LayoutPoint::from_untyped(&point),
+            pipeline_id.to_webrender(),
+            ServoScrollRootId(scroll_root_id.0));
     }
 
     fn handle_window_message(&mut self, event: WindowEvent) {
@@ -1383,18 +906,17 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
         self.window_size = new_size;
 
-        self.scene.set_root_layer_size(new_size.as_f32());
         self.send_window_size(WindowSizeType::Resize);
     }
 
     fn on_load_url_window_event(&mut self, url_string: String) {
         debug!("osmain: loading URL `{}`", url_string);
         self.got_load_complete_message = false;
-        match Url::parse(&url_string) {
+        match ServoUrl::parse(&url_string) {
             Ok(url) => {
                 self.window.set_page_url(url.clone());
-                let msg = match self.scene.root {
-                    Some(ref layer) => ConstellationMsg::LoadUrl(layer.pipeline_id(), LoadData::new(url, None, None)),
+                let msg = match self.root_pipeline {
+                    Some(ref pipeline) => ConstellationMsg::LoadUrl(pipeline.id, LoadData::new(url, None, None)),
                     None => ConstellationMsg::InitLoadUrl(url)
                 };
                 if let Err(e) = self.constellation_chan.send(msg) {
@@ -1415,43 +937,39 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             return
         }
 
+        self.dispatch_mouse_window_event_class(mouse_window_event);
+    }
+
+    fn dispatch_mouse_window_event_class(&mut self, mouse_window_event: MouseWindowEvent) {
         let point = match mouse_window_event {
             MouseWindowEvent::Click(_, p) => p,
             MouseWindowEvent::MouseDown(_, p) => p,
             MouseWindowEvent::MouseUp(_, p) => p,
         };
 
-        if self.webrender_api.is_some() {
-            let root_pipeline_id = match self.get_root_pipeline_id() {
-                Some(root_pipeline_id) => root_pipeline_id,
-                None => return,
-            };
+        let root_pipeline_id = match self.get_root_pipeline_id() {
+            Some(root_pipeline_id) => root_pipeline_id,
+            None => return,
+        };
 
-            if let Some(pipeline) = self.pipeline(root_pipeline_id) {
-                let dppx = self.page_zoom * self.device_pixels_per_screen_px();
-                let translated_point = (point / dppx).to_untyped();
-                let event_to_send = match mouse_window_event {
-                    MouseWindowEvent::Click(button, _) => {
-                        MouseButtonEvent(MouseEventType::Click, button, translated_point)
-                    }
-                    MouseWindowEvent::MouseDown(button, _) => {
-                        MouseButtonEvent(MouseEventType::MouseDown, button, translated_point)
-                    }
-                    MouseWindowEvent::MouseUp(button, _) => {
-                        MouseButtonEvent(MouseEventType::MouseUp, button, translated_point)
-                    }
-                };
-                let msg = ConstellationControlMsg::SendEvent(root_pipeline_id, event_to_send);
-                if let Err(e) = pipeline.script_chan.send(msg) {
-                    warn!("Sending control event to script failed ({}).", e);
+        if let Some(pipeline) = self.pipeline(root_pipeline_id) {
+            let dppx = self.page_zoom * self.device_pixels_per_screen_px();
+            let translated_point = (point / dppx).to_untyped();
+            let event_to_send = match mouse_window_event {
+                MouseWindowEvent::Click(button, _) => {
+                    MouseButtonEvent(MouseEventType::Click, button, translated_point)
                 }
+                MouseWindowEvent::MouseDown(button, _) => {
+                    MouseButtonEvent(MouseEventType::MouseDown, button, translated_point)
+                }
+                MouseWindowEvent::MouseUp(button, _) => {
+                    MouseButtonEvent(MouseEventType::MouseUp, button, translated_point)
+                }
+            };
+            let msg = ConstellationControlMsg::SendEvent(root_pipeline_id, event_to_send);
+            if let Err(e) = pipeline.script_chan.send(msg) {
+                warn!("Sending control event to script failed ({}).", e);
             }
-            return
-        }
-
-        match self.find_topmost_layer_at_point(point / self.scene.scale) {
-            Some(result) => result.layer.send_mouse_event(self, mouse_window_event, result.point),
-            None => {},
         }
     }
 
@@ -1461,61 +979,59 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             return
         }
 
-        if self.webrender_api.is_some() {
-            let root_pipeline_id = match self.get_root_pipeline_id() {
-                Some(root_pipeline_id) => root_pipeline_id,
-                None => return,
-            };
-            if self.pipeline(root_pipeline_id).is_none() {
-                return;
-            }
+        self.dispatch_mouse_window_move_event_class(cursor);
+    }
 
-            let dppx = self.page_zoom * self.device_pixels_per_screen_px();
-            let event_to_send = MouseMoveEvent(Some((cursor / dppx).to_untyped()));
-            let msg = ConstellationControlMsg::SendEvent(root_pipeline_id, event_to_send);
-            if let Some(pipeline) = self.pipeline(root_pipeline_id) {
-                if let Err(e) = pipeline.script_chan.send(msg) {
-                    warn!("Sending mouse control event to script failed ({}).", e);
-                }
-            }
-            return
+    fn dispatch_mouse_window_move_event_class(&mut self, cursor: TypedPoint2D<f32, DevicePixel>) {
+        let root_pipeline_id = match self.get_root_pipeline_id() {
+            Some(root_pipeline_id) => root_pipeline_id,
+            None => return,
+        };
+        if self.pipeline(root_pipeline_id).is_none() {
+            return;
         }
 
-        match self.find_topmost_layer_at_point(cursor / self.scene.scale) {
-            Some(result) => {
-                // In the case that the mouse was previously over a different layer,
-                // that layer must update its state.
-                if let Some(last_pipeline_id) = self.last_mouse_move_recipient {
-                    if last_pipeline_id != result.layer.pipeline_id() {
-                        if let Some(pipeline) = self.pipeline(last_pipeline_id) {
-                            let _ = pipeline.script_chan
-                                            .send(ConstellationControlMsg::SendEvent(
-                                                last_pipeline_id.clone(),
-                                                MouseMoveEvent(None)));
-                        }
-                    }
-                }
-
-                self.last_mouse_move_recipient = Some(result.layer.pipeline_id());
-                result.layer.send_mouse_move_event(self, result.point);
+        let dppx = self.page_zoom * self.device_pixels_per_screen_px();
+        let event_to_send = MouseMoveEvent(Some((cursor / dppx).to_untyped()));
+        let msg = ConstellationControlMsg::SendEvent(root_pipeline_id, event_to_send);
+        if let Some(pipeline) = self.pipeline(root_pipeline_id) {
+            if let Err(e) = pipeline.script_chan.send(msg) {
+                warn!("Sending mouse control event to script failed ({}).", e);
             }
-            None => {}
+        }
+    }
+
+    fn send_event_to_root_pipeline(&self, event: CompositorEvent) {
+        let root_pipeline_id = match self.get_root_pipeline_id() {
+            Some(root_pipeline_id) => root_pipeline_id,
+            None => return,
+        };
+
+        if let Some(pipeline) = self.pipeline(root_pipeline_id) {
+            let msg = ConstellationControlMsg::SendEvent(root_pipeline_id, event);
+            if let Err(e) = pipeline.script_chan.send(msg) {
+                warn!("Sending control event to script failed ({}).", e);
+            }
         }
     }
 
     fn on_touch_down(&mut self, identifier: TouchId, point: TypedPoint2D<f32, DevicePixel>) {
         self.touch_handler.on_touch_down(identifier, point);
-        if let Some(result) = self.find_topmost_layer_at_point(point / self.scene.scale) {
-            result.layer.send_event(self, TouchEvent(TouchEventType::Down, identifier,
-                                                     result.point.to_untyped()));
-        }
+        let dppx = self.page_zoom * self.device_pixels_per_screen_px();
+        let translated_point = (point / dppx).to_untyped();
+        self.send_event_to_root_pipeline(TouchEvent(TouchEventType::Down,
+                                                    identifier,
+                                                    translated_point));
     }
 
     fn on_touch_move(&mut self, identifier: TouchId, point: TypedPoint2D<f32, DevicePixel>) {
         match self.touch_handler.on_touch_move(identifier, point) {
             TouchAction::Scroll(delta) => {
                 match point.cast() {
-                    Some(point) => self.on_scroll_window_event(delta, point),
+                    Some(point) => self.on_scroll_window_event(ScrollLocation::Delta(
+                                                               webrender_traits::LayerPoint::from_untyped(
+                                                               &delta.to_untyped())),
+                                                               point),
                     None => error!("Point cast failed."),
                 }
             }
@@ -1523,28 +1039,30 @@ impl<Window: WindowMethods> IOCompositor<Window> {
                 let cursor = TypedPoint2D::new(-1, -1);  // Make sure this hits the base layer.
                 self.pending_scroll_zoom_events.push(ScrollZoomEvent {
                     magnification: magnification,
-                    delta: scroll_delta,
+                    scroll_location: ScrollLocation::Delta(webrender_traits::LayerPoint::from_untyped(
+                                                           &scroll_delta.to_untyped())),
                     cursor: cursor,
                     phase: ScrollEventPhase::Move(true),
                     event_count: 1,
                 });
-                self.composite_if_necessary_if_not_using_webrender(CompositingReason::Zoom);
             }
             TouchAction::DispatchEvent => {
-                if let Some(result) = self.find_topmost_layer_at_point(point / self.scene.scale) {
-                    result.layer.send_event(self, TouchEvent(TouchEventType::Move, identifier,
-                                                             result.point.to_untyped()));
-                }
+                let dppx = self.page_zoom * self.device_pixels_per_screen_px();
+                let translated_point = (point / dppx).to_untyped();
+                self.send_event_to_root_pipeline(TouchEvent(TouchEventType::Move,
+                                                            identifier,
+                                                            translated_point));
             }
             _ => {}
         }
     }
 
     fn on_touch_up(&mut self, identifier: TouchId, point: TypedPoint2D<f32, DevicePixel>) {
-        if let Some(result) = self.find_topmost_layer_at_point(point / self.scene.scale) {
-            result.layer.send_event(self, TouchEvent(TouchEventType::Up, identifier,
-                                                     result.point.to_untyped()));
-        }
+        let dppx = self.page_zoom * self.device_pixels_per_screen_px();
+        let translated_point = (point / dppx).to_untyped();
+        self.send_event_to_root_pipeline(TouchEvent(TouchEventType::Up,
+                                                    identifier,
+                                                    translated_point));
         if let TouchAction::Click = self.touch_handler.on_touch_up(identifier, point) {
             self.simulate_mouse_click(point);
         }
@@ -1553,218 +1071,178 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     fn on_touch_cancel(&mut self, identifier: TouchId, point: TypedPoint2D<f32, DevicePixel>) {
         // Send the event to script.
         self.touch_handler.on_touch_cancel(identifier, point);
-        if let Some(result) = self.find_topmost_layer_at_point(point / self.scene.scale) {
-            result.layer.send_event(self, TouchEvent(TouchEventType::Cancel, identifier,
-                                                     result.point.to_untyped()));
+        let dppx = self.page_zoom * self.device_pixels_per_screen_px();
+        let translated_point = (point / dppx).to_untyped();
+        self.send_event_to_root_pipeline(TouchEvent(TouchEventType::Cancel,
+                                                    identifier,
+                                                    translated_point));
+    }
+
+    fn on_touchpad_pressure_event(&self,
+                                  point: TypedPoint2D<f32, DevicePixel>,
+                                  pressure: f32,
+                                  phase: TouchpadPressurePhase) {
+        if let Some(true) = PREFS.get("dom.forcetouch.enabled").as_boolean() {
+            let dppx = self.page_zoom * self.device_pixels_per_screen_px();
+            let translated_point = (point / dppx).to_untyped();
+            self.send_event_to_root_pipeline(TouchpadPressureEvent(translated_point,
+                                                                   pressure,
+                                                                   phase));
         }
     }
 
     /// http://w3c.github.io/touch-events/#mouse-events
-    fn simulate_mouse_click(&self, p: TypedPoint2D<f32, DevicePixel>) {
-        match self.find_topmost_layer_at_point(p / self.scene.scale) {
-            Some(HitTestResult { layer, point }) => {
-                let button = MouseButton::Left;
-                layer.send_mouse_move_event(self, point);
-                layer.send_mouse_event(self, MouseWindowEvent::MouseDown(button, p), point);
-                layer.send_mouse_event(self, MouseWindowEvent::MouseUp(button, p), point);
-                layer.send_mouse_event(self, MouseWindowEvent::Click(button, p), point);
-            }
-            None => {},
-        }
+    fn simulate_mouse_click(&mut self, p: TypedPoint2D<f32, DevicePixel>) {
+        let button = MouseButton::Left;
+        self.dispatch_mouse_window_move_event_class(p);
+        self.dispatch_mouse_window_event_class(MouseWindowEvent::MouseDown(button, p));
+        self.dispatch_mouse_window_event_class(MouseWindowEvent::MouseUp(button, p));
+        self.dispatch_mouse_window_event_class(MouseWindowEvent::Click(button, p));
     }
 
     fn on_scroll_window_event(&mut self,
-                              delta: TypedPoint2D<f32, DevicePixel>,
+                              scroll_location: ScrollLocation,
                               cursor: TypedPoint2D<i32, DevicePixel>) {
+        let event_phase = match (self.scroll_in_progress, self.in_scroll_transaction) {
+            (false, None) => ScrollEventPhase::Start,
+            (false, Some(last_scroll)) if last_scroll.elapsed() > Duration::from_millis(80) =>
+                ScrollEventPhase::Start,
+            (_, _) => ScrollEventPhase::Move(self.scroll_in_progress),
+        };
+        self.in_scroll_transaction = Some(Instant::now());
         self.pending_scroll_zoom_events.push(ScrollZoomEvent {
             magnification: 1.0,
-            delta: delta,
+            scroll_location: scroll_location,
             cursor: cursor,
-            phase: ScrollEventPhase::Move(self.scroll_in_progress),
+            phase: event_phase,
             event_count: 1,
         });
-        self.composite_if_necessary_if_not_using_webrender(CompositingReason::Scroll);
     }
 
     fn on_scroll_start_window_event(&mut self,
-                                    delta: TypedPoint2D<f32, DevicePixel>,
+                                    scroll_location: ScrollLocation,
                                     cursor: TypedPoint2D<i32, DevicePixel>) {
         self.scroll_in_progress = true;
         self.pending_scroll_zoom_events.push(ScrollZoomEvent {
             magnification: 1.0,
-            delta: delta,
+            scroll_location: scroll_location,
             cursor: cursor,
             phase: ScrollEventPhase::Start,
             event_count: 1,
         });
-        self.composite_if_necessary_if_not_using_webrender(CompositingReason::Scroll);
     }
 
     fn on_scroll_end_window_event(&mut self,
-                                  delta: TypedPoint2D<f32, DevicePixel>,
+                                  scroll_location: ScrollLocation,
                                   cursor: TypedPoint2D<i32, DevicePixel>) {
         self.scroll_in_progress = false;
         self.pending_scroll_zoom_events.push(ScrollZoomEvent {
             magnification: 1.0,
-            delta: delta,
+            scroll_location: scroll_location,
             cursor: cursor,
             phase: ScrollEventPhase::End,
             event_count: 1,
         });
-        self.composite_if_necessary_if_not_using_webrender(CompositingReason::Scroll);
     }
 
     fn process_pending_scroll_events(&mut self) {
         let had_events = self.pending_scroll_zoom_events.len() > 0;
 
-        match self.webrender_api {
-            Some(ref webrender_api) => {
-                // Batch up all scroll events into one, or else we'll do way too much painting.
-                let mut last_combined_event: Option<ScrollZoomEvent> = None;
-                for scroll_event in self.pending_scroll_zoom_events.drain(..) {
-                    let this_delta = scroll_event.delta;
-                    let this_cursor = scroll_event.cursor;
-                    if let Some(combined_event) = last_combined_event {
-                        if combined_event.phase != scroll_event.phase {
-                            let delta = (combined_event.delta / self.scene.scale).to_untyped();
-                            let cursor = (combined_event.cursor.as_f32() /
-                                          self.scene.scale).to_untyped();
-                            webrender_api.scroll(delta, cursor, combined_event.phase);
-                            last_combined_event = None
-                        }
-                    }
+        // Batch up all scroll events into one, or else we'll do way too much painting.
+        let mut last_combined_event: Option<ScrollZoomEvent> = None;
+        for scroll_event in self.pending_scroll_zoom_events.drain(..) {
+            let this_cursor = scroll_event.cursor;
 
-                    match (&mut last_combined_event, scroll_event.phase) {
-                        (last_combined_event @ &mut None, _) => {
-                            *last_combined_event = Some(ScrollZoomEvent {
-                                magnification: scroll_event.magnification,
-                                delta: this_delta,
-                                cursor: this_cursor,
-                                phase: scroll_event.phase,
-                                event_count: 1,
-                            })
-                        }
-                        (&mut Some(ref mut last_combined_event),
-                         ScrollEventPhase::Move(false)) => {
-                            // Mac OS X sometimes delivers scroll events out of vsync during a
-                            // fling. This causes events to get bunched up occasionally, causing
-                            // nasty-looking "pops". To mitigate this, during a fling we average
-                            // deltas instead of summing them.
-                            let old_event_count =
-                                ScaleFactor::new(last_combined_event.event_count as f32);
-                            last_combined_event.event_count += 1;
-                            let new_event_count =
-                                ScaleFactor::new(last_combined_event.event_count as f32);
-                            last_combined_event.delta =
-                                (last_combined_event.delta * old_event_count + this_delta) /
-                                new_event_count;
-                        }
-                        (&mut Some(ref mut last_combined_event), _) => {
-                            last_combined_event.delta = last_combined_event.delta + this_delta;
-                            last_combined_event.event_count += 1
-                        }
-                    }
+            let this_delta = match scroll_event.scroll_location {
+                ScrollLocation::Delta(delta) => delta,
+                ScrollLocation::Start | ScrollLocation::End => {
+                    // If this is an event which is scrolling to the start or end of the page,
+                    // disregard other pending events and exit the loop.
+                    last_combined_event = Some(scroll_event);
+                    break;
                 }
+            };
 
-                // TODO(gw): Support zoom (WR issue #28).
-                if let Some(combined_event) = last_combined_event {
-                    let delta = (combined_event.delta / self.scene.scale).to_untyped();
-                    let cursor = (combined_event.cursor.as_f32() / self.scene.scale).to_untyped();
-                    webrender_api.scroll(delta, cursor, combined_event.phase);
-                    self.waiting_for_results_of_scroll = true
+            if let Some(combined_event) = last_combined_event {
+                if combined_event.phase != scroll_event.phase {
+                    let combined_delta = match combined_event.scroll_location {
+                        ScrollLocation::Delta(delta) => delta,
+                        ScrollLocation::Start | ScrollLocation::End => {
+                            // If this is an event which is scrolling to the start or end of the page,
+                            // disregard other pending events and exit the loop.
+                            last_combined_event = Some(scroll_event);
+                            break;
+                        }
+                    };
+                    let delta = (TypedPoint2D::from_untyped(&combined_delta.to_untyped()) / self.scale)
+                                 .to_untyped();
+                    let delta = webrender_traits::LayerPoint::from_untyped(&delta);
+                    let cursor =
+                        (combined_event.cursor.to_f32() / self.scale).to_untyped();
+                    let location = webrender_traits::ScrollLocation::Delta(delta);
+                    let cursor = webrender_traits::WorldPoint::from_untyped(&cursor);
+                    self.webrender_api.scroll(location, cursor, combined_event.phase);
+                    last_combined_event = None
                 }
             }
-            None => {
-                for event in std_mem::replace(&mut self.pending_scroll_zoom_events,
-                                                     Vec::new()) {
-                    let delta = event.delta / self.scene.scale;
-                    let cursor = event.cursor.as_f32() / self.scene.scale;
 
-                    if let Some(ref mut layer) = self.scene.root {
-                        layer.handle_scroll_event(delta, cursor);
+            match (&mut last_combined_event, scroll_event.phase) {
+                (last_combined_event @ &mut None, _) => {
+                    *last_combined_event = Some(ScrollZoomEvent {
+                        magnification: scroll_event.magnification,
+                        scroll_location: ScrollLocation::Delta(webrender_traits::LayerPoint::from_untyped(
+                                                               &this_delta.to_untyped())),
+                        cursor: this_cursor,
+                        phase: scroll_event.phase,
+                        event_count: 1,
+                    })
+                }
+                (&mut Some(ref mut last_combined_event),
+                 ScrollEventPhase::Move(false)) => {
+                    // Mac OS X sometimes delivers scroll events out of vsync during a
+                    // fling. This causes events to get bunched up occasionally, causing
+                    // nasty-looking "pops". To mitigate this, during a fling we average
+                    // deltas instead of summing them.
+                    if let ScrollLocation::Delta(delta) = last_combined_event.scroll_location {
+                        let old_event_count =
+                            ScaleFactor::new(last_combined_event.event_count as f32);
+                        last_combined_event.event_count += 1;
+                        let new_event_count =
+                            ScaleFactor::new(last_combined_event.event_count as f32);
+                        last_combined_event.scroll_location = ScrollLocation::Delta(
+                            (delta * old_event_count + this_delta) /
+                            new_event_count);
                     }
-
-                    if event.magnification != 1.0 {
-                        self.zoom_action = true;
-                        self.zoom_time = precise_time_s();
-                        self.viewport_zoom = ScaleFactor::new(
-                            (self.viewport_zoom.get() * event.magnification)
-                            .min(self.max_viewport_zoom.as_ref().map_or(MAX_ZOOM, ScaleFactor::get))
-                            .max(self.min_viewport_zoom.as_ref().map_or(MIN_ZOOM, ScaleFactor::get)));
-                        self.update_zoom_transform();
+                }
+                (&mut Some(ref mut last_combined_event), _) => {
+                    if let ScrollLocation::Delta(delta) = last_combined_event.scroll_location {
+                        last_combined_event.scroll_location = ScrollLocation::Delta(delta + this_delta);
+                        last_combined_event.event_count += 1
                     }
-
-                    self.perform_updates_after_scroll();
                 }
             }
+        }
+
+        // TODO(gw): Support zoom (WR issue #28).
+        if let Some(combined_event) = last_combined_event {
+            let scroll_location = match combined_event.scroll_location {
+                ScrollLocation::Delta(delta) => {
+                    let scaled_delta = (TypedPoint2D::from_untyped(&delta.to_untyped()) / self.scale)
+                                       .to_untyped();
+                    let calculated_delta = webrender_traits::LayoutPoint::from_untyped(&scaled_delta);
+                                           ScrollLocation::Delta(calculated_delta)
+                },
+                // Leave ScrollLocation unchanged if it is Start or End location.
+                sl @ ScrollLocation::Start | sl @ ScrollLocation::End => sl,
+            };
+            let cursor = (combined_event.cursor.to_f32() / self.scale).to_untyped();
+            let cursor = webrender_traits::WorldPoint::from_untyped(&cursor);
+            self.webrender_api.scroll(scroll_location, cursor, combined_event.phase);
+            self.waiting_for_results_of_scroll = true
         }
 
         if had_events {
-            self.send_viewport_rects_for_all_layers();
-        }
-    }
-
-    /// Computes new display ports for each layer, taking the scroll position into account, and
-    /// sends them to layout as necessary. This ultimately triggers a rerender of the content.
-    fn send_updated_display_ports_to_layout(&mut self) {
-        fn process_layer(layer: &Layer<CompositorData>,
-                         window_size: &TypedSize2D<f32, LayerPixel>,
-                         new_display_ports: &mut HashMap<PipelineId, Vec<(LayerId, Rect<Au>)>>) {
-            let visible_rect =
-                TypedRect::new(TypedPoint2D::zero(), *window_size)
-                    .translate(&-*layer.content_offset.borrow())
-                    .intersection(&*layer.bounds.borrow())
-                    .unwrap_or(TypedRect::zero())
-                    .to_untyped();
-            let visible_rect = TypedRect::new(
-                TypedPoint2D::new(Au::from_f32_px(visible_rect.origin.x),
-                                  Au::from_f32_px(visible_rect.origin.y)),
-                TypedSize2D::new(Au::from_f32_px(visible_rect.size.width),
-                                 Au::from_f32_px(visible_rect.size.height)));
-
-            let extra_layer_data = layer.extra_data.borrow();
-            if !new_display_ports.contains_key(&extra_layer_data.pipeline_id) {
-                new_display_ports.insert(extra_layer_data.pipeline_id, Vec::new());
-            }
-            if let Some(new_display_port) = new_display_ports.get_mut(&extra_layer_data.pipeline_id) {
-                new_display_port.push((extra_layer_data.id, visible_rect));
-            }
-
-            for kid in &*layer.children.borrow() {
-                process_layer(&*kid, window_size, new_display_ports)
-            }
-        }
-
-        let dppx = self.page_zoom * self.device_pixels_per_screen_px();
-        let window_size = self.window_size.as_f32() / dppx * ScaleFactor::new(1.0);
-        let mut new_visible_rects = HashMap::new();
-        if let Some(ref layer) = self.scene.root {
-            process_layer(&**layer, &window_size, &mut new_visible_rects)
-        }
-
-        for (pipeline_id, new_visible_rects) in &new_visible_rects {
-            if let Some(pipeline_details) = self.pipeline_details.get(&pipeline_id) {
-                if let Some(ref pipeline) = pipeline_details.pipeline {
-                    let msg = LayoutControlMsg::SetVisibleRects((*new_visible_rects).clone());
-                    if let Err(e) = pipeline.layout_chan.send(msg) {
-                        warn!("Sending layout control message failed ({}).", e);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Performs buffer requests and starts the scrolling timer or schedules a recomposite as
-    /// necessary.
-    fn perform_updates_after_scroll(&mut self) {
-        self.send_updated_display_ports_to_layout();
-        if opts::get().use_webrender {
-            return
-        }
-        if self.send_buffer_requests_for_all_layers() {
-            self.schedule_delayed_composite_if_necessary();
-        } else {
-            self.channel_to_self.send(Msg::Recomposite(CompositingReason::ContinueScroll));
+            self.send_viewport_rects();
         }
     }
 
@@ -1793,10 +1271,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             }
         }
 
-        // We still need to tick layout unfortunately, see things like #12749.
-        let msg = ConstellationMsg::TickAnimation(pipeline_id, AnimationTickType::Layout);
-        if let Err(e) = self.constellation_chan.send(msg) {
-            warn!("Sending tick to constellation failed ({}).", e);
+        // We may need to tick animations in layout. (See #12749.)
+        let animations_running = self.pipeline_details(pipeline_id).animations_running;
+        if animations_running {
+            let msg = ConstellationMsg::TickAnimation(pipeline_id, AnimationTickType::Layout);
+            if let Err(e) = self.constellation_chan.send(msg) {
+                warn!("Sending tick to constellation failed ({}).", e);
+            }
         }
     }
 
@@ -1831,11 +1312,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
     fn update_zoom_transform(&mut self) {
         let scale = self.device_pixels_per_page_px();
-        self.scene.scale = ScaleFactor::new(scale.get());
-
-        // We need to set the size of the root layer again, since the window size
-        // has changed in unscaled layer pixels.
-        self.scene.set_root_layer_size(self.window_size.as_f32());
+        self.scale = ScaleFactor::new(scale.get());
     }
 
     fn on_zoom_reset_window_event(&mut self) {
@@ -1855,12 +1332,11 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     fn on_pinch_zoom_window_event(&mut self, magnification: f32) {
         self.pending_scroll_zoom_events.push(ScrollZoomEvent {
             magnification: magnification,
-            delta: TypedPoint2D::zero(), // TODO: Scroll to keep the center in view?
+            scroll_location: ScrollLocation::Delta(TypedPoint2D::zero()), // TODO: Scroll to keep the center in view?
             cursor:  TypedPoint2D::new(-1, -1), // Make sure this hits the base layer.
             phase: ScrollEventPhase::Move(true),
             event_count: 1,
         });
-        self.composite_if_necessary_if_not_using_webrender(CompositingReason::Zoom);
     }
 
     fn on_navigation_window_event(&self, direction: WindowNavigateMsg) {
@@ -1874,208 +1350,51 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         }
     }
 
-    fn on_touchpad_pressure_event(&self, cursor: TypedPoint2D<f32, DevicePixel>, pressure: f32,
-                                  phase: TouchpadPressurePhase) {
-        if let Some(true) = PREFS.get("dom.forcetouch.enabled").as_boolean() {
-            match self.find_topmost_layer_at_point(cursor / self.scene.scale) {
-                Some(result) => result.layer.send_touchpad_pressure_event(self, result.point, pressure, phase),
-                None => {},
+    fn on_key_event(&mut self,
+                    ch: Option<char>,
+                    key: Key,
+                    state: KeyState,
+                    modifiers: KeyModifiers) {
+        // Steal a few key events for webrender debug options.
+        if modifiers.contains(CONTROL) && state == KeyState::Pressed {
+            match key {
+                Key::F12 => {
+                    let profiler_enabled = self.webrender.get_profiler_enabled();
+                    self.webrender.set_profiler_enabled(!profiler_enabled);
+                    return;
+                }
+                _ => {}
             }
         }
-    }
 
-    fn on_key_event(&self, ch: Option<char>, key: Key, state: KeyState, modifiers: KeyModifiers) {
         let msg = ConstellationMsg::KeyEvent(ch, key, state, modifiers);
         if let Err(e) = self.constellation_chan.send(msg) {
             warn!("Sending key event to constellation failed ({}).", e);
         }
     }
 
-    fn fill_paint_request_with_cached_layer_buffers(&mut self, paint_request: &mut PaintRequest) {
-        for buffer_request in &mut paint_request.buffer_requests {
-            if self.surface_map.mem() == 0 {
-                return;
-            }
-
-            let size = Size2D::new(buffer_request.screen_rect.size.width as i32,
-                                   buffer_request.screen_rect.size.height as i32);
-            if let Some(mut native_surface) = self.surface_map.find(size) {
-                native_surface.mark_wont_leak();
-                buffer_request.native_surface = Some(native_surface);
-            }
-        }
-    }
-
-    fn convert_buffer_requests_to_pipeline_requests_map(&mut self,
-                                                        requests: Vec<(Rc<Layer<CompositorData>>,
-                                                                       Vec<BufferRequest>)>)
-                                                        -> HashMap<PipelineId, Vec<PaintRequest>> {
-        let scale = self.device_pixels_per_page_px();
-        let mut results: HashMap<PipelineId, Vec<PaintRequest>> = HashMap::new();
-
-        for (layer, mut layer_requests) in requests {
-            let pipeline_id = layer.pipeline_id();
-            let current_epoch = self.pipeline_details(pipeline_id).current_epoch;
-            layer.extra_data.borrow_mut().requested_epoch = current_epoch;
-            let vec = match results.entry(pipeline_id) {
-                Occupied(entry) => {
-                    entry.into_mut()
-                }
-                Vacant(entry) => {
-                    entry.insert(Vec::new())
-                }
-            };
-
-            // All the BufferRequests are in layer/device coordinates, but the paint thread
-            // wants to know the page coordinates. We scale them before sending them.
-            for request in &mut layer_requests {
-                request.page_rect = request.page_rect / scale.get();
-            }
-
-            let layer_kind = if layer.transform_state.borrow().has_transform {
-                LayerKind::HasTransform
-            } else {
-                LayerKind::NoTransform
-            };
-
-            let mut paint_request = PaintRequest {
-                buffer_requests: layer_requests,
-                scale: scale.get(),
-                layer_id: layer.extra_data.borrow().id,
-                epoch: layer.extra_data.borrow().requested_epoch,
-                layer_kind: layer_kind,
-            };
-            self.fill_paint_request_with_cached_layer_buffers(&mut paint_request);
-            vec.push(paint_request);
-        }
-
-        results
-    }
-
-    fn send_viewport_rect_for_layer(&self, layer: Rc<Layer<CompositorData>>) {
-        if layer.extra_data.borrow().id == LayerId::null() {
-            let layer_rect = Rect::new(-layer.extra_data.borrow().scroll_offset.to_untyped(),
-                                       layer.bounds.borrow().size.to_untyped());
-            if let Some(pipeline) = self.pipeline(layer.pipeline_id()) {
-                let msg = ConstellationControlMsg::Viewport(pipeline.id.clone(), layer_rect);
-                if let Err(e) = pipeline.script_chan.send(msg) {
-                    warn!("Send viewport to script failed ({})", e);
-                }
-            }
-        }
-
-        for kid in &*layer.children() {
-            self.send_viewport_rect_for_layer(kid.clone());
-        }
-    }
-
-    fn send_viewport_rects_for_all_layers(&self) {
-        if opts::get().use_webrender {
-            return self.send_webrender_viewport_rects()
-        }
-
-        if let Some(ref root) = self.scene.root {
-            self.send_viewport_rect_for_layer(root.clone())
-        }
-    }
-
-    fn send_webrender_viewport_rects(&self) {
+    fn send_viewport_rects(&self) {
         let mut stacking_context_scroll_states_per_pipeline = HashMap::new();
-        if let Some(ref webrender_api) = self.webrender_api {
-            for scroll_layer_state in webrender_api.get_scroll_layer_state() {
-                let stacking_context_scroll_state = StackingContextScrollState {
-                    stacking_context_id: scroll_layer_state.stacking_context_id.from_webrender(),
-                    scroll_offset: scroll_layer_state.scroll_offset,
-                };
-                let pipeline_id = scroll_layer_state.pipeline_id;
-                stacking_context_scroll_states_per_pipeline
-                    .entry(pipeline_id)
-                    .or_insert(vec![])
-                    .push(stacking_context_scroll_state);
-            }
+        for scroll_layer_state in self.webrender_api.get_scroll_layer_state() {
+            let stacking_context_scroll_state = StackingContextScrollState {
+                scroll_root_id: scroll_layer_state.scroll_root_id.from_webrender(),
+                scroll_offset: scroll_layer_state.scroll_offset.to_untyped(),
+            };
+            let pipeline_id = scroll_layer_state.pipeline_id;
+            stacking_context_scroll_states_per_pipeline
+                .entry(pipeline_id)
+                .or_insert(vec![])
+                .push(stacking_context_scroll_state);
+        }
 
-            for (pipeline_id, stacking_context_scroll_states) in
-                    stacking_context_scroll_states_per_pipeline {
-                if let Some(pipeline) = self.pipeline(pipeline_id.from_webrender()) {
-                    let msg = LayoutControlMsg::SetStackingContextScrollStates(
-                        stacking_context_scroll_states);
-                    let _ = pipeline.layout_chan.send(msg);
-                }
+        for (pipeline_id, stacking_context_scroll_states) in
+                stacking_context_scroll_states_per_pipeline {
+            if let Some(pipeline) = self.pipeline(pipeline_id.from_webrender()) {
+                let msg = LayoutControlMsg::SetStackingContextScrollStates(
+                    stacking_context_scroll_states);
+                let _ = pipeline.layout_chan.send(msg);
             }
         }
-    }
-
-    /// Returns true if any buffer requests were sent or false otherwise.
-    fn send_buffer_requests_for_all_layers(&mut self) -> bool {
-        if self.webrender.is_some() {
-            return false;
-        }
-
-        if let Some(ref root_layer) = self.scene.root {
-            root_layer.update_transform_state(&Matrix4D::identity(),
-                                              &Matrix4D::identity(),
-                                              &Point2D::zero());
-        }
-
-        let mut layers_and_requests = Vec::new();
-        let mut unused_buffers = Vec::new();
-        self.scene.get_buffer_requests(&mut layers_and_requests, &mut unused_buffers);
-
-        // Return unused tiles first, so that they can be reused by any new BufferRequests.
-        self.cache_unused_buffers(unused_buffers);
-
-        if layers_and_requests.is_empty() {
-            return false;
-        }
-
-        // We want to batch requests for each pipeline to avoid race conditions
-        // when handling the resulting BufferRequest responses.
-        let pipeline_requests =
-            self.convert_buffer_requests_to_pipeline_requests_map(layers_and_requests);
-
-        for (pipeline_id, requests) in pipeline_requests {
-            let msg = ChromeToPaintMsg::Paint(requests, self.frame_tree_id);
-            if let Some(pipeline) = self.pipeline(pipeline_id) {
-                if let Err(e) = pipeline.chrome_to_paint_chan.send(msg) {
-                    warn!("Sending paint message failed ({}).", e);
-                }
-            }
-        }
-
-        true
-    }
-
-    /// Check if a layer (or its children) have any outstanding paint
-    /// results to arrive yet.
-    fn does_layer_have_outstanding_paint_messages(&self, layer: &Rc<Layer<CompositorData>>)
-                                                  -> bool {
-        let layer_data = layer.extra_data.borrow();
-        let current_epoch = match self.pipeline_details.get(&layer_data.pipeline_id) {
-            None => return false,
-            Some(ref details) => details.current_epoch,
-        };
-
-        // Only check layers that have requested the current epoch, as there may be
-        // layers that are not visible in the current viewport, and therefore
-        // have not requested a paint of the current epoch.
-        // If a layer has sent a request for the current epoch, but it hasn't
-        // arrived yet then this layer is waiting for a paint message.
-        //
-        // Also don't check the root layer, because the paint thread won't paint
-        // anything for it after first layout.
-        if layer_data.id != LayerId::null() &&
-                layer_data.requested_epoch == current_epoch &&
-                layer_data.painted_epoch != current_epoch {
-            return true;
-        }
-
-        for child in &*layer.children() {
-            if self.does_layer_have_outstanding_paint_messages(child) {
-                return true;
-            }
-        }
-
-        false
     }
 
     // Check if any pipelines currently have active animations or animation callbacks.
@@ -2102,39 +1421,17 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             ReadyState::Unknown => {
                 // Unsure if the output image is stable.
 
-                // Check if any layers are waiting for paints to complete
-                // of their current epoch request. If so, early exit
-                // from this check.
-                match self.scene.root {
-                    Some(ref root_layer) => {
-                        if self.does_layer_have_outstanding_paint_messages(root_layer) {
-                            return Err(NotReadyToPaint::LayerHasOutstandingPaintMessages);
-                        }
-                    }
-                    None => {
-                        return Err(NotReadyToPaint::MissingRoot);
-                    }
-                }
-
-                // Check if there are any pending frames. If so, the image is not stable yet.
-                if !self.pending_subpages.is_empty() {
-                    return Err(NotReadyToPaint::PendingSubpages(self.pending_subpages.len()));
-                }
-
                 // Collect the currently painted epoch of each pipeline that is
                 // complete (i.e. has *all* layers painted to the requested epoch).
                 // This gets sent to the constellation for comparison with the current
                 // frame tree.
                 let mut pipeline_epochs = HashMap::new();
-                for (id, details) in &self.pipeline_details {
-                    if let Some(ref webrender) = self.webrender {
-                        let webrender_pipeline_id = id.to_webrender();
-                        if let Some(webrender_traits::Epoch(epoch)) = webrender.current_epoch(webrender_pipeline_id) {
-                            let epoch = Epoch(epoch);
-                            pipeline_epochs.insert(*id, epoch);
-                        }
-                    } else {
-                        pipeline_epochs.insert(*id, details.current_epoch);
+                for (id, _) in &self.pipeline_details {
+                    let webrender_pipeline_id = id.to_webrender();
+                    if let Some(webrender_traits::Epoch(epoch)) = self.webrender
+                                                                      .current_epoch(webrender_pipeline_id) {
+                        let epoch = Epoch(epoch);
+                        pipeline_epochs.insert(*id, epoch);
                     }
                 }
 
@@ -2190,19 +1487,13 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     fn composite_specific_target(&mut self,
                                  target: CompositeTarget)
                                  -> Result<Option<Image>, UnableToComposite> {
-        if self.context.is_none() && self.webrender.is_none() {
-            return Err(UnableToComposite::NoContext)
-        }
         let (width, height) =
             (self.window_size.width as usize, self.window_size.height as usize);
         if !self.window.prepare_for_composite(width, height) {
             return Err(UnableToComposite::WindowUnprepared)
         }
 
-        if let Some(ref mut webrender) = self.webrender {
-            assert!(self.context.is_none());
-            webrender.update();
-        }
+        self.webrender.update();
 
         let wait_for_stable_image = match target {
             CompositeTarget::WindowAndPng | CompositeTarget::PngFile => true,
@@ -2233,39 +1524,10 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
         profile(ProfilerCategory::Compositing, None, self.time_profiler_chan.clone(), || {
             debug!("compositor: compositing");
-            self.dump_layer_tree();
-            // Adjust the layer dimensions as necessary to correspond to the size of the window.
-            self.scene.viewport = match self.viewport {
-                Some((point, size)) => TypedRect::new(point.as_f32(), size.as_f32()),
-                None => TypedRect::new(TypedPoint2D::zero(), self.window_size.as_f32()),
-            };
 
             // Paint the scene.
-            if let Some(ref mut webrender) = self.webrender {
-                assert!(self.context.is_none());
-                webrender.render(self.window_size.to_untyped());
-            } else if let Some(ref layer) = self.scene.root {
-                match self.context {
-                    Some(context) => {
-                        if let Some((point, size)) = self.viewport {
-                            let point = point.to_untyped(); let size  = size.to_untyped();
-
-                            gl::scissor(point.x as GLint, point.y as GLint, size.width as GLsizei,
-                            size.height as GLsizei);
-
-                            gl::enable(gl::SCISSOR_TEST); rendergl::render_scene(layer.clone(),
-                            context, &self.scene); gl::disable(gl::SCISSOR_TEST);
-
-                        } else {
-                            rendergl::render_scene(layer.clone(), context, &self.scene);
-                        }
-                    }
-
-                    None => {
-                        debug!("compositor: not compositing because context not yet set up")
-                    }
-                }
-            }
+            let size = webrender_traits::DeviceUintSize::from_untyped(&self.window_size.to_untyped());
+            self.webrender.render(size);
         });
 
         let rv = match target {
@@ -2309,10 +1571,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
 
         self.composition_request = CompositionRequest::NoCompositingNecessary;
 
-        if !opts::get().use_webrender {
-            self.process_pending_scroll_events();
-        }
-
         self.process_animations();
         self.start_scrolling_bounce_if_necessary();
         self.waiting_for_results_of_scroll = false;
@@ -2333,10 +1591,8 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         gl::bind_framebuffer(gl::FRAMEBUFFER, 0);
 
         gl::delete_buffers(&render_target_info.texture_ids);
+        gl::delete_renderbuffers(&render_target_info.renderbuffer_ids);
         gl::delete_frame_buffers(&render_target_info.framebuffer_ids);
-        if opts::get().use_webrender  {
-            gl::delete_renderbuffers(&render_target_info.renderbuffer_ids);
-        }
 
         // flip image vertically (texture is upside down)
         let orig_pixels = pixels.clone();
@@ -2361,175 +1617,11 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         }
     }
 
-    fn composite_if_necessary_if_not_using_webrender(&mut self, reason: CompositingReason) {
-        if !opts::get().use_webrender {
-            self.composite_if_necessary(reason)
-        }
-    }
-
     fn initialize_compositing(&mut self) {
-        if self.webrender.is_none() {
-            let show_debug_borders = opts::get().show_debug_borders;
-            // We can unwrap native_display because it's only None when using webrender.
-            self.context = Some(rendergl::RenderContext::new(self.native_display
-                                                             .expect("n_d should be Some when not using wr").clone(),
-                                                             show_debug_borders,
-                                                             opts::get().output_file.is_some()))
-        }
-    }
-
-    fn find_topmost_layer_at_point_for_layer(&self,
-                                             layer: Rc<Layer<CompositorData>>,
-                                             point_in_parent_layer: TypedPoint2D<f32, LayerPixel>,
-                                             clip_rect_in_parent_layer: &TypedRect<f32, LayerPixel>)
-                                             -> Option<HitTestResult> {
-        let layer_bounds = *layer.bounds.borrow();
-        let masks_to_bounds = *layer.masks_to_bounds.borrow();
-        if layer_bounds.is_empty() && masks_to_bounds {
-            return None;
-        }
-        let scroll_offset = layer.extra_data.borrow().scroll_offset;
-
-        // Total offset from parent coordinates to this layer's coordinates.
-        // FIXME: This offset is incorrect for fixed-position layers.
-        let layer_offset = scroll_offset + layer_bounds.origin;
-
-        let clipped_layer_bounds = match clip_rect_in_parent_layer.intersection(&layer_bounds) {
-            Some(rect) => rect,
-            None => return None,
-        };
-
-        let clip_rect_for_children = if masks_to_bounds {
-            &clipped_layer_bounds
-        } else {
-            clip_rect_in_parent_layer
-        }.translate(&-layer_offset);
-
-        let child_point = point_in_parent_layer - layer_offset;
-        for child in layer.children().iter().rev() {
-            // Translate the clip rect into the child's coordinate system.
-            let result = self.find_topmost_layer_at_point_for_layer(child.clone(),
-                                                                    child_point,
-                                                                    &clip_rect_for_children);
-            if let Some(mut result) = result {
-                // Return the point in layer coordinates of the topmost frame containing the point.
-                let pipeline_id = layer.extra_data.borrow().pipeline_id;
-                let child_pipeline_id = result.layer.extra_data.borrow().pipeline_id;
-                if pipeline_id == child_pipeline_id {
-                    result.point = result.point + layer_offset;
-                }
-                return Some(result);
-            }
-        }
-
-        if !clipped_layer_bounds.contains(&point_in_parent_layer) {
-            return None;
-        }
-
-        Some(HitTestResult { layer: layer, point: point_in_parent_layer })
-    }
-
-    fn find_topmost_layer_at_point(&self,
-                                   point: TypedPoint2D<f32, LayerPixel>)
-                                   -> Option<HitTestResult> {
-        match self.scene.root {
-            Some(ref layer) => {
-                self.find_topmost_layer_at_point_for_layer(layer.clone(),
-                                                           point,
-                                                           &*layer.bounds.borrow())
-            }
-
-            None => None,
-        }
-    }
-
-    fn find_layer_with_pipeline_and_layer_id(&self,
-                                             pipeline_id: PipelineId,
-                                             layer_id: LayerId)
-                                             -> Option<Rc<Layer<CompositorData>>> {
-        match self.scene.root {
-            Some(ref layer) =>
-                find_layer_with_pipeline_and_layer_id_for_layer(layer.clone(),
-                                                                pipeline_id,
-                                                                layer_id),
-
-            None => None,
-        }
-    }
-
-    pub fn cache_unused_buffers<B>(&mut self, buffers: B)
-        where B: IntoIterator<Item=Box<LayerBuffer>>
-    {
-        let surfaces = buffers.into_iter().map(|buffer| buffer.native_surface);
-        if let Some(ref native_display) = self.native_display {
-            self.surface_map.insert_surfaces(native_display, surfaces);
-        }
     }
 
     fn get_root_pipeline_id(&self) -> Option<PipelineId> {
-        self.scene.root.as_ref().map(|root_layer| root_layer.extra_data.borrow().pipeline_id)
-    }
-
-    #[allow(dead_code)]
-    fn dump_layer_tree(&self) {
-        if !opts::get().dump_layer_tree {
-            return;
-        }
-
-        let mut print_tree = PrintTree::new("Layer tree".to_owned());
-        if let Some(ref layer) = self.scene.root {
-            self.dump_layer_tree_layer(&**layer, &mut print_tree);
-        }
-    }
-
-    #[allow(dead_code)]
-    fn dump_layer_tree_layer(&self, layer: &Layer<CompositorData>, print_tree: &mut PrintTree) {
-        let data = layer.extra_data.borrow();
-        let layer_string = if data.id == LayerId::null() {
-            format!("Root Layer (pipeline={})", data.pipeline_id)
-        } else {
-            "Layer".to_owned()
-        };
-
-        let masks_string = if *layer.masks_to_bounds.borrow() {
-            " (masks children)"
-        } else {
-            ""
-        };
-
-        let establishes_3d_context_string = if layer.establishes_3d_context {
-            " (3D context)"
-        } else {
-            ""
-        };
-
-        let fixed_string = if data.scroll_policy == ScrollPolicy::FixedPosition {
-            " (fixed)"
-        } else {
-            ""
-        };
-
-        let layer_string = format!("{} ({:?}) ({},{} at {},{}){}{}{}",
-                                   layer_string,
-                                   layer.extra_data.borrow().id,
-                                   (*layer.bounds.borrow()).size.to_untyped().width,
-                                   (*layer.bounds.borrow()).size.to_untyped().height,
-                                   (*layer.bounds.borrow()).origin.to_untyped().x,
-                                   (*layer.bounds.borrow()).origin.to_untyped().y,
-                                   masks_string,
-                                   establishes_3d_context_string,
-                                   fixed_string);
-
-        let children = layer.children();
-        if !children.is_empty() {
-            print_tree.new_level(layer_string);
-            for kid in &*children {
-                self.dump_layer_tree_layer(&**kid, print_tree);
-            }
-            print_tree.end_level();
-        } else {
-            print_tree.add_item(layer_string);
-        }
+        self.root_pipeline.as_ref().map(|pipeline| pipeline.id)
     }
 
     fn start_scrolling_bounce_if_necessary(&mut self) {
@@ -2537,14 +1629,9 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             return
         }
 
-        match self.webrender {
-            Some(ref webrender) if webrender.layers_are_bouncing_back() => {}
-            _ => return,
-        }
-
-        if let Some(ref webrender_api) = self.webrender_api {
-            webrender_api.tick_scrolling_bounce_animations();
-            self.send_webrender_viewport_rects()
+        if self.webrender.layers_are_bouncing_back() {
+            self.webrender_api.tick_scrolling_bounce_animations();
+            self.send_viewport_rects()
         }
     }
 
@@ -2588,8 +1675,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
         // If a pinch-zoom happened recently, ask for tiles at the new resolution
         if self.zoom_action && precise_time_s() - self.zoom_time > 0.3 {
             self.zoom_action = false;
-            self.scene.mark_layer_contents_as_changed_recursively();
-            self.send_buffer_requests_for_all_layers();
         }
 
         match self.composition_request {
@@ -2600,8 +1685,7 @@ impl<Window: WindowMethods> IOCompositor<Window> {
             }
         }
 
-        if !self.pending_scroll_zoom_events.is_empty() && !self.waiting_for_results_of_scroll &&
-                opts::get().use_webrender {
+        if !self.pending_scroll_zoom_events.is_empty() && !self.waiting_for_results_of_scroll {
             self.process_pending_scroll_events()
         }
 
@@ -2613,37 +1697,19 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     ///
     /// This is used when resizing the window.
     pub fn repaint_synchronously(&mut self) {
-        if self.webrender.is_none() {
-            while self.shutdown_state != ShutdownState::ShuttingDown {
-                let msg = self.port.recv_compositor_msg();
-                let received_new_buffers = match msg {
-                    Msg::AssignPaintedBuffers(..) => true,
-                    _ => false,
-                };
-                let keep_going = self.handle_browser_message(msg);
-                if received_new_buffers {
-                    self.composite();
-                    break
-                }
-                if !keep_going {
-                    break
-                }
+        while self.shutdown_state != ShutdownState::ShuttingDown {
+            let msg = self.port.recv_compositor_msg();
+            let need_recomposite = match msg {
+                Msg::Recomposite(_) => true,
+                _ => false,
+            };
+            let keep_going = self.handle_browser_message(msg);
+            if need_recomposite {
+                self.composite();
+                break
             }
-        } else {
-            while self.shutdown_state != ShutdownState::ShuttingDown {
-                let msg = self.port.recv_compositor_msg();
-                let need_recomposite = match msg {
-                    Msg::Recomposite(_) => true,
-                    _ => false,
-                };
-                let keep_going = self.handle_browser_message(msg);
-                if need_recomposite {
-                    self.composite();
-                    break
-                }
-                if !keep_going {
-                    break
-                }
+            if !keep_going {
+                break
             }
         }
     }
@@ -2664,26 +1730,6 @@ impl<Window: WindowMethods> IOCompositor<Window> {
     }
 }
 
-fn find_layer_with_pipeline_and_layer_id_for_layer(layer: Rc<Layer<CompositorData>>,
-                                                   pipeline_id: PipelineId,
-                                                   layer_id: LayerId)
-                                                   -> Option<Rc<Layer<CompositorData>>> {
-    if layer.extra_data.borrow().pipeline_id == pipeline_id &&
-       layer.extra_data.borrow().id == layer_id {
-        return Some(layer);
-    }
-
-    for kid in &*layer.children() {
-        let result = find_layer_with_pipeline_and_layer_id_for_layer(kid.clone(),
-                                                                     pipeline_id,
-                                                                     layer_id);
-        if result.is_some() {
-            return result;
-        }
-    }
-
-    None
-}
 
 /// Why we performed a composite. This is used for debugging.
 #[derive(Copy, Clone, PartialEq, Debug)]

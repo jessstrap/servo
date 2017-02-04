@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use audio_video_metadata;
 use document_loader::LoadType;
 use dom::attr::Attr;
 use dom::bindings::cell::DOMRefCell;
@@ -11,31 +12,34 @@ use dom::bindings::codegen::Bindings::HTMLMediaElementBinding::HTMLMediaElementC
 use dom::bindings::codegen::Bindings::HTMLMediaElementBinding::HTMLMediaElementMethods;
 use dom::bindings::codegen::Bindings::MediaErrorBinding::MediaErrorConstants::*;
 use dom::bindings::codegen::Bindings::MediaErrorBinding::MediaErrorMethods;
-use dom::bindings::global::GlobalRef;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{Root, MutNullableHeap, JS};
+use dom::bindings::js::{MutNullableJS, Root};
 use dom::bindings::refcounted::Trusted;
+use dom::bindings::reflector::DomObject;
 use dom::bindings::str::DOMString;
 use dom::document::Document;
 use dom::element::{Element, AttributeMutation};
 use dom::event::{Event, EventBubbles, EventCancelable};
+use dom::htmlaudioelement::HTMLAudioElement;
 use dom::htmlelement::HTMLElement;
 use dom::htmlsourceelement::HTMLSourceElement;
+use dom::htmlvideoelement::HTMLVideoElement;
 use dom::mediaerror::MediaError;
 use dom::node::{window_from_node, document_from_node, Node, UnbindContext};
 use dom::virtualmethods::VirtualMethods;
-use hyper_serde::Serde;
+use html5ever_atoms::LocalName;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use net_traits::{AsyncResponseListener, AsyncResponseTarget, Metadata, NetworkError};
+use net_traits::{FetchResponseListener, FetchMetadata, Metadata, NetworkError};
+use net_traits::request::{CredentialsMode, Destination, RequestInit, Type as RequestType};
 use network_listener::{NetworkListener, PreInvoke};
 use script_thread::{Runnable, ScriptThread};
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
-use string_cache::Atom;
 use task_source::TaskSource;
 use time::{self, Timespec, Duration};
-use url::Url;
 
 struct HTMLMediaElementContext {
     /// The element that initiated the request.
@@ -49,24 +53,33 @@ struct HTMLMediaElementContext {
     /// Time of last progress notification.
     next_progress_event: Timespec,
     /// Url of resource requested.
-    url: Url,
+    url: ServoUrl,
     /// Whether the media metadata has been completely received.
     have_metadata: bool,
     /// True if this response is invalid and should be ignored.
     ignore_response: bool,
 }
 
-impl AsyncResponseListener for HTMLMediaElementContext {
+impl FetchResponseListener for HTMLMediaElementContext {
+    fn process_request_body(&mut self) {}
+
+    fn process_request_eof(&mut self) {}
+
     // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
-    fn headers_available(&mut self, metadata: Result<Metadata, NetworkError>) {
-        self.metadata = metadata.ok();
+    fn process_response(&mut self, metadata: Result<FetchMetadata, NetworkError>) {
+        self.metadata = metadata.ok().map(|m| {
+            match m {
+                FetchMetadata::Unfiltered(m) => m,
+                FetchMetadata::Filtered { unsafe_, .. } => unsafe_
+            }
+        });
 
         // => "If the media data cannot be fetched at all..."
         let is_failure = self.metadata
                              .as_ref()
                              .and_then(|m| m.status
                                             .as_ref()
-                                            .map(|&Serde(ref s)| s.0 < 200 || s.0 >= 300))
+                                            .map(|&(s, _)| s < 200 || s >= 300))
                              .unwrap_or(false);
         if is_failure {
             // Ensure that the element doesn't receive any further notifications
@@ -76,7 +89,7 @@ impl AsyncResponseListener for HTMLMediaElementContext {
         }
     }
 
-    fn data_available(&mut self, mut payload: Vec<u8>) {
+    fn process_response_chunk(&mut self, mut payload: Vec<u8>) {
         if self.ignore_response {
             return;
         }
@@ -102,11 +115,16 @@ impl AsyncResponseListener for HTMLMediaElementContext {
     }
 
     // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
-    fn response_complete(&mut self, status: Result<(), NetworkError>) {
+    fn process_response_eof(&mut self, status: Result<(), NetworkError>) {
         let elem = self.elem.root();
 
+        // => "If the media data can be fetched but is found by inspection to be in an unsupported
+        //     format, or can otherwise not be rendered at all"
+        if !self.have_metadata {
+            elem.queue_dedicated_media_source_failure_steps();
+        }
         // => "Once the entire media resource has been fetched..."
-        if status.is_ok() {
+        else if status.is_ok() {
             elem.change_ready_state(HAVE_ENOUGH_DATA);
 
             elem.fire_simple_event("progress");
@@ -146,7 +164,7 @@ impl PreInvoke for HTMLMediaElementContext {
 }
 
 impl HTMLMediaElementContext {
-    fn new(elem: &HTMLMediaElement, url: Url) -> HTMLMediaElementContext {
+    fn new(elem: &HTMLMediaElement, url: ServoUrl) -> HTMLMediaElementContext {
         HTMLMediaElementContext {
             elem: Trusted::new(elem),
             data: vec![],
@@ -160,12 +178,24 @@ impl HTMLMediaElementContext {
     }
 
     fn check_metadata(&mut self, elem: &HTMLMediaElement) {
-        // Step 6.
-        //
-        // TODO: Properly implement once we have figured out the build and
-        // licensing ffmpeg issues.
-        elem.change_ready_state(HAVE_METADATA);
-        self.have_metadata = true;
+        match audio_video_metadata::get_format_from_slice(&self.data) {
+            Ok(audio_video_metadata::Metadata::Video(meta)) => {
+                let dur = meta.audio.duration.unwrap_or(::std::time::Duration::new(0, 0));
+                *elem.video.borrow_mut() = Some(VideoMedia {
+                    format: format!("{:?}", meta.format),
+                    duration: Duration::seconds(dur.as_secs() as i64) +
+                              Duration::nanoseconds(dur.subsec_nanos() as i64),
+                    width: meta.dimensions.width,
+                    height: meta.dimensions.height,
+                    video: meta.video.unwrap_or("".to_owned()),
+                    audio: meta.audio.audio,
+                });
+                // Step 6
+                elem.change_ready_state(HAVE_METADATA);
+                self.have_metadata = true;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -188,14 +218,14 @@ pub struct HTMLMediaElement {
     current_src: DOMRefCell<String>,
     generation_id: Cell<u32>,
     first_data_load: Cell<bool>,
-    error: MutNullableHeap<JS<MediaError>>,
+    error: MutNullableJS<MediaError>,
     paused: Cell<bool>,
     autoplaying: Cell<bool>,
     video: DOMRefCell<Option<VideoMedia>>,
 }
 
 impl HTMLMediaElement {
-    pub fn new_inherited(tag_name: Atom,
+    pub fn new_inherited(tag_name: LocalName,
                          prefix: Option<DOMString>, document: &Document)
                          -> HTMLMediaElement {
         HTMLMediaElement {
@@ -211,11 +241,6 @@ impl HTMLMediaElement {
             autoplaying: Cell::new(true),
             video: DOMRefCell::new(None),
         }
-    }
-
-    #[inline]
-    pub fn htmlelement(&self) -> &HTMLElement {
-        &self.htmlelement
     }
 
     // https://html.spec.whatwg.org/multipage/#internal-pause-steps
@@ -259,7 +284,7 @@ impl HTMLMediaElement {
             elem: Trusted::new(self),
         };
         let win = window_from_node(self);
-        let _ = win.dom_manipulation_task_source().queue(task, GlobalRef::Window(&win));
+        let _ = win.dom_manipulation_task_source().queue(task, win.upcast());
     }
 
     // https://html.spec.whatwg.org/multipage/#internal-pause-steps step 2.2
@@ -283,18 +308,18 @@ impl HTMLMediaElement {
             elem: Trusted::new(self),
         };
         let win = window_from_node(self);
-        let _ = win.dom_manipulation_task_source().queue(task, GlobalRef::Window(&win));
+        let _ = win.dom_manipulation_task_source().queue(task, win.upcast());
     }
 
     fn queue_fire_simple_event(&self, type_: &'static str) {
         let win = window_from_node(self);
         let task = box FireSimpleEventTask::new(self, type_);
-        let _ = win.dom_manipulation_task_source().queue(task, GlobalRef::Window(&win));
+        let _ = win.dom_manipulation_task_source().queue(task, win.upcast());
     }
 
     fn fire_simple_event(&self, type_: &str) {
         let window = window_from_node(self);
-        let event = Event::new(GlobalRef::Window(&*window),
+        let event = Event::new(window.upcast(),
                                Atom::from(type_),
                                EventBubbles::DoesNotBubble,
                                EventCancelable::NotCancelable);
@@ -407,16 +432,17 @@ impl HTMLMediaElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#concept-media-load-algorithm
-    fn resource_selection_algorithm_sync(&self, base_url: Url) {
+    #[allow(unreachable_code)]
+    fn resource_selection_algorithm_sync(&self, base_url: ServoUrl) {
         // TODO step 5 (populate pending text tracks)
 
         // Step 6
         let mode = if false {
             // TODO media provider object
             ResourceSelectionMode::Object
-        } else if let Some(attr) = self.upcast::<Element>().get_attribute(&ns!(), &atom!("src")) {
+        } else if let Some(attr) = self.upcast::<Element>().get_attribute(&ns!(), &local_name!("src")) {
             ResourceSelectionMode::Attribute(attr.Value().to_string())
-        } else if false {
+        } else if false {  // TODO: when implementing this remove #[allow(unreachable_code)] above.
             // TODO <source> child
             ResourceSelectionMode::Children(panic!())
         } else {
@@ -491,23 +517,41 @@ impl HTMLMediaElement {
             let context = Arc::new(Mutex::new(HTMLMediaElementContext::new(self, url.clone())));
             let (action_sender, action_receiver) = ipc::channel().unwrap();
             let window = window_from_node(self);
-            let script_chan = window.networking_task_source();
-            let listener = box NetworkListener {
+            let listener = NetworkListener {
                 context: context,
-                script_chan: script_chan,
-                wrapper: Some(window.get_runnable_wrapper()),
+                task_source: window.networking_task_source(),
+                wrapper: Some(window.get_runnable_wrapper())
             };
 
-            let response_target = AsyncResponseTarget {
-                sender: action_sender,
-            };
             ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
-                listener.notify_action(message.to().unwrap());
+                listener.notify_fetch(message.to().unwrap());
             });
 
             // FIXME: we're supposed to block the load event much earlier than now
-            let doc = document_from_node(self);
-            doc.load_async(LoadType::Media(url), response_target);
+            let document = document_from_node(self);
+
+            let ty = if self.is::<HTMLAudioElement>() {
+                RequestType::Audio
+            } else if self.is::<HTMLVideoElement>() {
+                RequestType::Video
+            } else {
+                unreachable!("Unexpected HTMLMediaElement")
+            };
+
+            let request = RequestInit {
+                url: url.clone(),
+                type_: ty,
+                destination: Destination::Media,
+                credentials_mode: CredentialsMode::Include,
+                use_url_credentials: true,
+                origin: document.url(),
+                pipeline_id: Some(self.global().pipeline_id()),
+                referrer_url: Some(document.url()),
+                referrer_policy: document.get_referrer_policy(),
+                .. RequestInit::default()
+            };
+
+            document.fetch_async(LoadType::Media(url), request, action_sender);
         } else {
             // TODO local resource fetch
             self.queue_dedicated_media_source_failure_steps();
@@ -516,8 +560,8 @@ impl HTMLMediaElement {
 
     fn queue_dedicated_media_source_failure_steps(&self) {
         let window = window_from_node(self);
-        let _ = window.dom_manipulation_task_source().queue(box DedicatedMediaSourceFailureTask::new(self),
-                                                            GlobalRef::Window(&window));
+        let _ = window.dom_manipulation_task_source().queue(
+            box DedicatedMediaSourceFailureTask::new(self), window.upcast());
     }
 
     // https://html.spec.whatwg.org/multipage/#dedicated-media-source-failure-steps
@@ -616,7 +660,7 @@ impl HTMLMediaElementMethods for HTMLMediaElement {
 
     // https://html.spec.whatwg.org/multipage/#attr-media-preload
     // Missing value default is user-agent defined.
-    make_enumerated_getter!(Preload, "preload", "", ("none") | ("metadata") | ("auto"));
+    make_enumerated_getter!(Preload, "preload", "", "none" | "metadata" | "auto");
     // https://html.spec.whatwg.org/multipage/#attr-media-preload
     make_setter!(SetPreload, "preload");
 
@@ -722,7 +766,7 @@ impl VirtualMethods for HTMLMediaElement {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
 
         match attr.local_name() {
-            &atom!("src") => {
+            &local_name!("src") => {
                 if mutation.new_value(attr).is_some() {
                     self.media_element_load_algorithm();
                 }
@@ -766,11 +810,11 @@ impl Runnable for FireSimpleEventTask {
 
 struct ResourceSelectionTask {
     elem: Trusted<HTMLMediaElement>,
-    base_url: Url,
+    base_url: ServoUrl,
 }
 
 impl ResourceSelectionTask {
-    fn new(elem: &HTMLMediaElement, url: Url) -> ResourceSelectionTask {
+    fn new(elem: &HTMLMediaElement, url: ServoUrl) -> ResourceSelectionTask {
         ResourceSelectionTask {
             elem: Trusted::new(elem),
             base_url: url,
@@ -837,5 +881,5 @@ enum ResourceSelectionMode {
 
 enum Resource {
     Object,
-    Url(Url),
+    Url(ServoUrl),
 }

@@ -18,18 +18,22 @@ import data
 
 
 def main():
-    usage = "Usage: %s [ servo | gecko ] [ style-crate | html ]" % sys.argv[0]
-    if len(sys.argv) < 3:
+    usage = "Usage: %s [ servo | gecko ] [ style-crate | html ] [ testing | regular ]" % sys.argv[0]
+    if len(sys.argv) < 4:
         abort(usage)
     product = sys.argv[1]
     output = sys.argv[2]
+    testing = sys.argv[3] == "testing"
+
     if product not in ["servo", "gecko"] or output not in ["style-crate", "geckolib", "html"]:
         abort(usage)
 
-    properties = data.PropertiesData(product=product)
-    rust = render(os.path.join(BASE, "properties.mako.rs"), product=product, data=properties)
+    properties = data.PropertiesData(product=product, testing=testing)
+    template = os.path.join(BASE, "properties.mako.rs")
+    rust = render(template, product=product, data=properties, __file__=template)
     if output == "style-crate":
         write(os.environ["OUT_DIR"], "properties.rs", rust)
+        write(os.environ["OUT_DIR"], "static_ids.txt", static_ids(properties))
         if product == "gecko":
             template = os.path.join(BASE, "gecko.mako.rs")
             rust = render(template, data=properties)
@@ -45,7 +49,9 @@ def abort(message):
 
 def render(filename, **context):
     try:
-        lookup = TemplateLookup(directories=[BASE])
+        lookup = TemplateLookup(directories=[BASE],
+                                input_encoding="utf8",
+                                strict_undefined=True)
         template = Template(open(filename, "rb").read(),
                             filename=filename,
                             input_encoding="utf8",
@@ -64,6 +70,19 @@ def write(directory, filename, content):
     if not os.path.exists(directory):
         os.makedirs(directory)
     open(os.path.join(directory, filename), "wb").write(content)
+
+
+def static_id_generator(properties):
+    for kind, props in [("Longhand", properties.longhands),
+                        ("Shorthand", properties.shorthands)]:
+        for p in props:
+            yield "%s\tStaticId::%s(%sId::%s)" % (p.name, kind, kind, p.camel_case)
+            for alias in p.alias:
+                yield "%s\tStaticId::%s(%sId::%s)" % (alias, kind, kind, p.camel_case)
+
+
+def static_ids(properties):
+    return '\n'.join(static_id_generator(properties))
 
 
 def write_html(properties):

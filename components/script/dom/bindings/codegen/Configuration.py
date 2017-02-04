@@ -4,7 +4,7 @@
 
 import os
 
-from WebIDL import IDLExternalInterface, IDLInterface, WebIDLError
+from WebIDL import IDLExternalInterface, IDLWrapperType, WebIDLError
 
 
 class Configuration:
@@ -30,10 +30,9 @@ class Configuration:
                 raise WebIDLError("Servo does not support external interfaces.",
                                   [thing.location])
 
-            # Some toplevel things are sadly types, and those have an
-            # isInterface that doesn't mean the same thing as IDLObject's
-            # isInterface()...
-            if not isinstance(thing, IDLInterface):
+            assert not thing.isType()
+
+            if not thing.isInterface() and not thing.isNamespace():
                 continue
 
             iface = thing
@@ -83,12 +82,18 @@ class Configuration:
                 getter = lambda x: x.interface.hasInterfaceObject()
             elif key == 'isCallback':
                 getter = lambda x: x.interface.isCallback()
+            elif key == 'isNamespace':
+                getter = lambda x: x.interface.isNamespace()
             elif key == 'isJSImplemented':
                 getter = lambda x: x.interface.isJSImplemented()
             elif key == 'isGlobal':
                 getter = lambda x: x.isGlobal()
+            elif key == 'isInline':
+                getter = lambda x: x.interface.getExtendedAttribute('Inline') is not None
             elif key == 'isExposedConditionally':
                 getter = lambda x: x.interface.isExposedConditionally()
+            elif key == 'isIteratorInterface':
+                getter = lambda x: x.interface.isIteratorInterface()
             else:
                 getter = lambda x: getattr(x, key)
             curr = filter(lambda x: getter(x) == val, curr)
@@ -177,13 +182,34 @@ class Descriptor(DescriptorProvider):
 
         # Read the desc, and fill in the relevant defaults.
         ifaceName = self.interface.identifier.name
-        typeName = desc.get('nativeType', ifaceName)
+        nativeTypeDefault = ifaceName
 
-        # Callback types do not use JS smart pointers, so we should not use the
+        # For generated iterator interfaces for other iterable interfaces, we
+        # just use IterableIterator as the native type, templated on the
+        # nativeType of the iterable interface. That way we can have a
+        # templated implementation for all the duplicated iterator
+        # functionality.
+        if self.interface.isIteratorInterface():
+            itrName = self.interface.iterableInterface.identifier.name
+            itrDesc = self.getDescriptor(itrName)
+            nativeTypeDefault = iteratorNativeType(itrDesc)
+
+        typeName = desc.get('nativeType', nativeTypeDefault)
+
+        spiderMonkeyInterface = desc.get('spiderMonkeyInterface', False)
+
+        # Callback and SpiderMonkey types do not use JS smart pointers, so we should not use the
         # built-in rooting mechanisms for them.
-        if self.interface.isCallback():
+        if spiderMonkeyInterface:
             self.needsRooting = False
-            ty = "%sBinding::%s" % (ifaceName, ifaceName)
+            self.returnType = 'Rc<%s>' % typeName
+            self.argumentType = '&%s' % typeName
+            self.nativeType = typeName
+            pathDefault = 'dom::types::%s' % typeName
+        elif self.interface.isCallback():
+            self.needsRooting = False
+            ty = 'dom::bindings::codegen::Bindings::%sBinding::%s' % (ifaceName, ifaceName)
+            pathDefault = ty
             self.returnType = "Rc<%s>" % ty
             self.argumentType = "???"
             self.nativeType = ty
@@ -192,10 +218,15 @@ class Descriptor(DescriptorProvider):
             self.returnType = "Root<%s>" % typeName
             self.argumentType = "&%s" % typeName
             self.nativeType = "*const %s" % typeName
+            if self.interface.isIteratorInterface():
+                pathDefault = 'dom::bindings::iterable::IterableIterator'
+            else:
+                pathDefault = 'dom::types::%s' % MakeNativeName(typeName)
 
         self.concreteType = typeName
         self.register = desc.get('register', True)
-        self.path = desc.get('path', 'dom::types::%s' % typeName)
+        self.path = desc.get('path', pathDefault)
+        self.bindingPath = 'dom::bindings::codegen::Bindings::%s' % ('::'.join([ifaceName + 'Binding'] * 2))
         self.outerObjectHook = desc.get('outerObjectHook', 'None')
         self.proxy = False
         self.weakReferenceable = desc.get('weakReferenceable', False)
@@ -203,7 +234,10 @@ class Descriptor(DescriptorProvider):
         # If we're concrete, we need to crawl our ancestor interfaces and mark
         # them as having a concrete descendant.
         self.concrete = (not self.interface.isCallback() and
-                         not self.interface.getExtendedAttribute("Abstract"))
+                         not self.interface.isNamespace() and
+                         not self.interface.getExtendedAttribute("Abstract") and
+                         not self.interface.getExtendedAttribute("Inline") and
+                         not spiderMonkeyInterface)
         self.hasUnforgeableMembers = (self.concrete and
                                       any(MemberIsUnforgeable(m, self) for m in
                                           self.interface.members))
@@ -352,8 +386,12 @@ class Descriptor(DescriptorProvider):
         return attrs
 
     def getParentName(self):
-        assert self.interface.parent is not None
-        return self.interface.parent.identifier.name
+        parent = self.interface.parent
+        while parent:
+            if not parent.getExtendedAttribute("Inline"):
+                return parent.identifier.name
+            parent = parent.parent
+        return None
 
     def hasDescendants(self):
         return (self.interface.getUserData("hasConcreteDescendant", False) or
@@ -361,7 +399,9 @@ class Descriptor(DescriptorProvider):
 
     def shouldHaveGetConstructorObjectMethod(self):
         assert self.interface.hasInterfaceObject()
-        return self.interface.isCallback() or self.hasDescendants()
+        if self.interface.getExtendedAttribute("Inline"):
+            return False
+        return self.interface.isCallback() or self.interface.isNamespace() or self.hasDescendants()
 
     def isExposedConditionally(self):
         return self.interface.isExposedConditionally()
@@ -376,8 +416,15 @@ class Descriptor(DescriptorProvider):
 
 
 # Some utility methods
+
+
+def MakeNativeName(name):
+    return name[0].upper() + name[1:]
+
+
 def getModuleFromObject(object):
-    return os.path.basename(object.location.filename()).split('.webidl')[0] + 'Binding'
+    return ('dom::bindings::codegen::Bindings::' +
+            os.path.basename(object.location.filename()).split('.webidl')[0] + 'Binding')
 
 
 def getTypesFromDescriptor(descriptor):
@@ -404,6 +451,8 @@ def getTypesFromDictionary(dictionary):
     """
     Get all member types for this dictionary
     """
+    if isinstance(dictionary, IDLWrapperType):
+        dictionary = dictionary.inner
     types = []
     curDict = dictionary
     while curDict:
@@ -421,3 +470,10 @@ def getTypesFromCallback(callback):
     types = [sig[0]]  # Return type
     types.extend(arg.type for arg in sig[1])  # Arguments
     return types
+
+
+def iteratorNativeType(descriptor, infer=False):
+    assert descriptor.interface.isIterable()
+    iterableDecl = descriptor.interface.maplikeOrSetlikeOrIterable
+    assert iterableDecl.isPairIterator()
+    return "IterableIterator%s" % ("" if infer else '<%s>' % descriptor.interface.identifier.name)
