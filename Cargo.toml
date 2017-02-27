@@ -3,6 +3,7 @@ members = [
     "ports/cef",
     "ports/geckolib",
     "ports/servo",
+    "ports/servotk_sample",
     "support/android/build-apk",
 ]
 

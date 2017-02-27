@@ -332,7 +332,7 @@ class CommandBase(object):
         else:
             return path.join(self.context.topdir, "target")
 
-    def get_binary_path(self, release, dev, android=False):
+    def get_binary_path(self, release, dev, android=False, servotk=False):
         # TODO(autrilla): this function could still use work - it shouldn't
         # handle quitting, or printing. It should return the path, or an error.
         base_path = self.get_target_dir()
@@ -341,6 +341,10 @@ class CommandBase(object):
             base_path = path.join(base_path, self.config["android"]["target"])
 
         binary_name = "servo" + BIN_SUFFIX
+        
+        if servotk:
+            binary_name = "servotk_sample" + BIN_SUFFIX
+        
         release_path = path.join(base_path, "release", binary_name)
         dev_path = path.join(base_path, "debug", binary_name)
 
@@ -516,8 +520,11 @@ class CommandBase(object):
 
         return env
 
-    def servo_crate(self):
-        return path.join(self.context.topdir, "ports", "servo")
+    def servo_crate(self, servotk=False):
+        if servotk:
+            return path.join(self.context.topdir, "ports", "servotk_sample")
+        else:
+            return path.join(self.context.topdir, "ports", "servo")
 
     def servo_features(self):
         """Return a list of optional features to enable for the Servo crate"""

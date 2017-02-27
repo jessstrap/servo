@@ -36,7 +36,6 @@ def read_file(filename, if_exists=False):
     with open(filename) as f:
         return f.read()
 
-
 @CommandProvider
 class PostBuildCommands(CommandBase):
     @Command('run',
@@ -61,11 +60,13 @@ class PostBuildCommands(CommandBase):
                      help='Launch in headless mode')
     @CommandArgument('--software', '-s', action='store_true',
                      help='Launch with software rendering')
+    @CommandArgument('--servotk', '-tk', action='store_true',
+                     help='Launch servotk sample')
     @CommandArgument(
         'params', nargs='...',
         help="Command-line arguments to be passed through to Servo")
     def run(self, params, release=False, dev=False, android=None, debug=False, debugger=None, browserhtml=False,
-            headless=False, software=False):
+            headless=False, software=False, servotk=False):
         env = self.build_env()
         env["RUST_BACKTRACE"] = "1"
 
@@ -97,7 +98,7 @@ class PostBuildCommands(CommandBase):
             shell.communicate("\n".join(script) + "\n")
             return shell.wait()
 
-        args = [self.get_binary_path(release, dev)]
+        args = [self.get_binary_path(release, dev, False, servotk)]
 
         if browserhtml:
             browserhtml_path = get_browserhtml_path(args[0])
@@ -174,14 +175,16 @@ class PostBuildCommands(CommandBase):
                      help='Use release build')
     @CommandArgument('--dev', '-d', action='store_true',
                      help='Use dev build')
+    @CommandArgument('--servotk', '-tk', action='store_true',
+                     help='Use servotk sample')
     @CommandArgument(
         'params', nargs='...',
         help="Command-line arguments to be passed through to Servo")
-    def rr_record(self, release=False, dev=False, params=[]):
+    def rr_record(self, release=False, dev=False, servotk=False, params=[]):
         env = self.build_env()
         env["RUST_BACKTRACE"] = "1"
 
-        servo_cmd = [self.get_binary_path(release, dev)] + params
+        servo_cmd = [self.get_binary_path(release, dev, False, servotk)] + params
         rr_cmd = ['rr', '--fatal-errors', 'record']
         try:
             check_call(rr_cmd + servo_cmd)

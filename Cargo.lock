@@ -1067,7 +1067,7 @@ dependencies = [
  "log 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "msg 0.0.1",
  "net_traits 0.0.1",
- "osmesa-src 12.0.1 (git+https://github.com/servo/osmesa-src)",
+ "osmesa-src 12.0.1",
  "osmesa-sys 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "script_traits 0.0.1",
  "servo-egl 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1942,7 +1942,6 @@ dependencies = [
 [[package]]
 name = "osmesa-src"
 version = "12.0.1"
-source = "git+https://github.com/servo/osmesa-src#42509fbd70d0e54e1278849b771ea1cb1c3386f4"
 
 [[package]]
 name = "osmesa-sys"
@@ -2644,6 +2643,32 @@ dependencies = [
  "serde 0.8.20 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_derive 0.8.23 (registry+https://github.com/rust-lang/crates.io-index)",
  "url 1.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "servotk_sample"
+version = "0.0.1"
+dependencies = [
+ "android_glue 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "android_injected_glue 0.2.1 (git+https://github.com/mmatyas/android-rs-injected-glue)",
+ "backtrace 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "browserhtml 0.1.17 (git+https://github.com/browserhtml/browserhtml?branch=crate)",
+ "compiletest_helper 0.0.1",
+ "gfx_tests 0.0.1",
+ "glutin_app 0.0.1",
+ "layout_tests 0.0.1",
+ "libc 0.2.20 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libservo 0.0.1",
+ "log 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "net_tests 0.0.1",
+ "net_traits_tests 0.0.1",
+ "plugin_compiletest 0.0.1",
+ "profile_tests 0.0.1",
+ "script_tests 0.0.1",
+ "servo_config_tests 0.0.1",
+ "servo_remutex_tests 0.0.1",
+ "sig 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "style_tests 0.0.1",
 ]
 
 [[package]]
@@ -3501,7 +3526,6 @@ dependencies = [
 "checksum openssl-sys-extras 0.7.14 (registry+https://github.com/rust-lang/crates.io-index)" = "11c5e1dba7d3d03d80f045bf0d60111dc69213b67651e7c889527a3badabb9fa"
 "checksum openssl-verify 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "3ed86cce894f6b0ed4572e21eb34026f1dc8869cb9ee3869029131bc8c3feb2d"
 "checksum ordered-float 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "da12c96037889ae0be29dd2bdd260e5a62a7df24e6466d5a15bb8131c1c200a8"
-"checksum osmesa-src 12.0.1 (git+https://github.com/servo/osmesa-src)" = "<none>"
 "checksum osmesa-sys 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "88cfece6e95d2e717e0872a7f53a8684712ad13822a7979bc760b9c77ec0013b"
 "checksum owning_ref 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)" = "9d52571ddcb42e9c900c901a18d8d67e393df723fcd51dd59c5b1a85d0acb6cc"
 "checksum parking_lot 0.3.8 (registry+https://github.com/rust-lang/crates.io-index)" = "fa12d706797d42551663426a45e2db2e0364bd1dbf6aeada87e89c5f981f43e9"

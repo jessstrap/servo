@@ -173,9 +173,13 @@ class MachCommands(CommandBase):
                      default=None,
                      action='store_true',
                      help='Enable debug assertions in release')
+    @CommandArgument('--servotk',
+                     default=False,
+                     action='store_true',
+                     help='Build servotk_sample')
     def build(self, target=None, release=False, dev=False, jobs=None,
               features=None, android=None, verbose=False, debug_mozjs=False, params=None,
-              with_debug_assertions=False):
+              with_debug_assertions=False, servotk=False):
         if android is None:
             android = self.config["build"]["android"]
         features = features or self.servo_features()
@@ -303,7 +307,7 @@ class MachCommands(CommandBase):
 
         status = call(
             [cargo_binary, "build"] + opts,
-            env=env, cwd=self.servo_crate(), verbose=verbose)
+            env=env, cwd=self.servo_crate(servotk), verbose=verbose)
         elapsed = time() - build_start
 
         # Do some additional things if the build succeeded
